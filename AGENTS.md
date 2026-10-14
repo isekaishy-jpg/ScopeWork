@@ -1,11 +1,13 @@
 # Project rules
 
-Build one Rust GUI for managing binary research projects. Initial projects are Stock and Forever.
+Build one Rust GUI for managing isolated binary research projects. Initial projects are Stock and Forever; additional projects use the same structure.
 
+- Keep the approved dashboard design. Do not redesign it while implementing research storage or workflows.
+- Canonical hierarchy: App -> Architecture category -> Chunk -> Function. Research composes upward. Every node has exactly one canonical Markdown report in its project directory.
+- Update canonical files in place; do not create overlapping follow-up reports. Keep supporting evidence in the owning project's evidence directory and link it from the function report.
+- Each parent report must synthesize its children. All required children and the parent's own report must be complete before the parent can be complete.
+- Keep project data and claims isolated by project and exact binary identity. Never import historical completion claims as accepted work automatically.
 - This repository is a research management tool, not a client or rendering implementation.
-- The README contains a proposed design, not finalized acceptance criteria. Do not invent deliverables or narrow research scope to claim completion.
-- Keep project data and claims isolated by project and exact binary identity.
-- Never silently import historical completion claims as accepted work.
-- Keep source installations and binaries read-only. Do not commit binaries, private captures, credentials, or existing research datasets.
-- Preserve evidence provenance and distinguish observed, specification-defined, and inferred claims.
+- Keep source installations and binaries read-only. Do not commit binaries, private captures, credentials, or research datasets.
+- Preserve provenance and distinguish observed, specification-defined, and inferred claims.
 - Do not add tests or run test commands unless the user asks for testing or verification.

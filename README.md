@@ -1,14 +1,36 @@
-# Research Dashboard
+# Research Task Manager
 
-A compact Rust desktop dashboard for binary research, with a separate tab for Stock and Forever.
+Rust desktop research dashboard with the approved classic Task Manager layout, a modern dark palette, two meters per row, and separate chunk/function counts.
 
-The entire application uses classic Task Manager styling: custom blue title bar and window buttons, grey beveled window frame, File/Options/View/Help menus, research tabs, recessed panels, small Tahoma text, and a three-part status strip. Drag the title bar to move the window; double-click it or use the maximize button to maximize. The lower-right grip resizes it.
+## Research records
 
-Each project page has horizontal segmented meters, a total-function coverage meter, and function/chunk count fields. The CPU Usage meter in the supplied reference is rotated sideways: thin segments illuminate from left to right, with dim unlit segments and a black seam between two segment banks. Fill is completed functions divided by total functions. Done groups are fully green, active groups are partially yellow, and untouched groups have dim red segments. Sample completed-function counts are explicit; aggregate counts, meter fill, tooltips, and the selected chunk readout use those same values. Click a chunk meter to inspect its architecture, name, function count, and state. The initial current chunk is the first in-progress sample chunk. The sample page holds 24 meters in a 1100 x 820 window: four named chunks per architecture row. Each 32-pixel-high meter has its architecture/chunk header above it and completed/total function counts plus status below it.
+Open **View > Research records...**. Stock and Forever start with separate app reports. Create future projects in the same window.
 
-Dark mode is the default: charcoal surfaces, soft light text, subdued borders, and the same colored meter segments. Options > Dark mode switches between modern dark and classic light palettes; the choice is saved locally on normal exit. Menus also provide Exit, Always on top, Clear chunk selection, and About.
+Each project owns a complete hierarchy:
 
-All current categories, counts, and statuses are labeled sample data. The research inventory, deliverables, and acceptance rules will be defined later. Existing research claims have not been imported.
+```
+data/projects/<project-id>/
+  project.json                 # IDs, hierarchy, status, revisions; no report prose
+  app.md                       # one complete-app research report
+  architectures/000001.md      # one canonical report per category
+  chunks/000002.md              # one canonical report per chunk
+  functions/00001234.md         # one canonical file per function RVA
+  evidence/                    # this project's supporting artifacts
+```
+
+Select a parent and create its child: App -> Architecture -> Chunk -> Function. Architectures are categories such as Asset Loading or Models. Enter the exact binary build/hash and image base before adding functions. Function identity is an RVA within that project's binary. A function cannot be duplicated elsewhere in the same project. Different binaries require separate projects.
+
+The editor updates each canonical Markdown file in place. Parent reports link their direct source reports: architecture to chunks, chunks to function files. Function evidence remains in the function file instead of being copied into parallel reports. Parent synthesis is authored in the parent's own report; linking children alone does not complete it.
+
+### Completion
+
+Use the completion checkbox only after reviewing the report. Completion requires a written report, function evidence where applicable, and every required child complete. Empty parent reports and parents without children cannot be completed. Changing a child or adding a child reopens completed ancestors. SHA-256 checks detect externally changed completed files, and the editor rejects saves over a concurrently changed file. Use View > Refresh research progress after external edits. Completion is a human attestation supported by these structural checks, not automated judgment of research quality.
+
+Save or discard edits before navigating. Unsaved report edits prevent closing the app. One application instance can write the research library at a time.
+
+When a project has architecture records, its dashboard uses them: one meter per architecture, one existing-size segment per chunk (green complete, yellow in progress, dim red not started), and separate function counts. Double-click a meter to open its architecture report. The App report's completion status is separate from function coverage. The existing previews remain explicitly labeled for projects without architecture records; no historical completion claims are imported.
+
+All research data is local and excluded from Git. Default root is `data/projects` in this checkout; set `RESEARCH_DASHBOARD_HOME` to choose another library root before launching. Projects have separate IDs, trees, metadata, evidence directories, and document membership. Do not copy research between projects without an explicit evidence reference and scope review.
 
 ## Run
 
@@ -18,14 +40,8 @@ cargo run --release
 
 Windows executable: `target/release/research-dashboard.exe`.
 
-## Research boundaries
+Options > Dark mode switches palettes and saves the choice. Other menus provide Exit, Always on top, research records, progress refresh, Clear chunk selection, and About. The custom title bar supports dragging, minimizing, maximizing, and closing; the bottom-right grip resizes the window.
 
-Keep Stock and Forever evidence and acceptance records separate. Pin real inventories to exact binary identities. Groups can reference shared functions, but totals must count unique functions. Completion must eventually be supported by agreed deliverables and evidence, not function counts alone. Preserve an unclassified category until binary evidence supports classification.
+## Preview mode
 
-Each individual bar is a research chunk. Its header identifies it; the two lines underneath separately report chunk status and function count. This labeling does not change the meter layout or introduce individually selectable pips.
-
-Each bar reports `Chunk: X / total chunks` (its ordinal in the project) and `Funcs: completed / total` for that chunk. Green means the chunk is complete, yellow means in progress, and red means not done. Project totals separately report completed chunks and completed functions. Yellow chunks still have work in progress.
-
-Meters are arranged two per row, retaining the same styling and fixed segment size. Right-click any meter to edit its chunk segment count (0–4096); its length follows that count. Counts are saved locally and separately for Stock and Forever. The meter panel scrolls for additional rows or long meters. Function counts remain separate. Progress is still illustrative sample data.
-
-For a local Stock assumptions preview, the app reads ignored `data/stock-preview.json` with a `meters` array of `name`, `functions`, and `chunks`. This replaces only the Stock sample meters; Forever is unchanged. The current local preview uses the indexed Stock bucket counts and an explicitly hypothetical one-chunk-per-64-functions estimate. All completion is unverified and starts unfinished. The file is local research data and is not committed.
+The local ignored `data/stock-preview.json` file supplies the Stock assumptions preview. Its function counts came from the existing index; its chunk counts are hypothetical. Forever's preview uses illustrative data. Preview meters allow segment counts to be changed through their context menu. Canonical meters derive segment counts from their chunk records.

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod research;
+
 use eframe::egui::{self, Color32, Vec2};
 
 const GREEN: Color32 = Color32::from_rgb(0, 210, 48);
@@ -8,64 +10,64 @@ const YELLOW: Color32 = Color32::from_rgb(238, 193, 55);
 
 #[derive(Clone)]
 struct Row {
-    name: &'static str,
-    groups: Vec<(&'static str, usize, usize, usize)>,
+    name: String,
+    groups: Vec<(String, usize, usize, usize)>,
 }
 
 fn rows() -> Vec<Row> {
     vec![
         Row {
-            name: "Rendering",
+            name: "Rendering".into(),
             groups: vec![
-                ("Frame", 42, 0, 42),
-                ("Views", 68, 0, 68),
-                ("Passes", 95, 1, 37),
-                ("Present", 24, 2, 0),
+                ("Frame".into(), 42, 0, 42),
+                ("Views".into(), 68, 0, 68),
+                ("Passes".into(), 95, 1, 37),
+                ("Present".into(), 24, 2, 0),
             ],
         },
         Row {
-            name: "Assets",
+            name: "Assets".into(),
             groups: vec![
-                ("Requests", 53, 0, 53),
-                ("Dependencies", 84, 1, 51),
-                ("Publication", 37, 2, 0),
-                ("Lifetime", 65, 2, 0),
+                ("Requests".into(), 53, 0, 53),
+                ("Dependencies".into(), 84, 1, 51),
+                ("Publication".into(), 37, 2, 0),
+                ("Lifetime".into(), 65, 2, 0),
             ],
         },
         Row {
-            name: "World",
+            name: "World".into(),
             groups: vec![
-                ("Maps", 31, 0, 31),
-                ("Spatial data", 102, 1, 26),
-                ("Visibility", 73, 2, 0),
-                ("Lifetime", 46, 2, 0),
+                ("Maps".into(), 31, 0, 31),
+                ("Spatial data".into(), 102, 1, 26),
+                ("Visibility".into(), 73, 2, 0),
+                ("Lifetime".into(), 46, 2, 0),
             ],
         },
         Row {
-            name: "Animation",
+            name: "Animation".into(),
             groups: vec![
-                ("States", 28, 0, 28),
-                ("Poses", 64, 1, 41),
-                ("Blending", 51, 2, 0),
-                ("Integration", 39, 2, 0),
+                ("States".into(), 28, 0, 28),
+                ("Poses".into(), 64, 1, 41),
+                ("Blending".into(), 51, 2, 0),
+                ("Integration".into(), 39, 2, 0),
             ],
         },
         Row {
-            name: "Interface",
+            name: "Interface".into(),
             groups: vec![
-                ("Input", 47, 0, 47),
-                ("Widgets", 88, 1, 19),
-                ("Layout", 56, 2, 0),
-                ("Drawing", 71, 2, 0),
+                ("Input".into(), 47, 0, 47),
+                ("Widgets".into(), 88, 1, 19),
+                ("Layout".into(), 56, 2, 0),
+                ("Drawing".into(), 71, 2, 0),
             ],
         },
         Row {
-            name: "Unclassified",
+            name: "Unclassified".into(),
             groups: vec![
-                ("Region A", 210, 2, 0),
-                ("Region B", 190, 2, 0),
-                ("Region C", 160, 2, 0),
-                ("Region D", 140, 2, 0),
+                ("Region A".into(), 210, 2, 0),
+                ("Region B".into(), 190, 2, 0),
+                ("Region C".into(), 160, 2, 0),
+                ("Region D".into(), 140, 2, 0),
             ],
         },
     ]
@@ -80,6 +82,8 @@ struct Dashboard {
     dark: bool,
     chunk_counts: Vec<usize>,
     stock_preview: Option<Vec<Row>>,
+    research: research::ResearchUi,
+    projects: Vec<research::ProjectView>,
 }
 
 impl Default for Dashboard {
@@ -93,6 +97,8 @@ impl Default for Dashboard {
             dark: true,
             chunk_counts: vec![64; 48],
             stock_preview: None,
+            research: research::ResearchUi::new(),
+            projects: vec![],
         }
     }
 }
@@ -232,12 +238,45 @@ fn led(
     }
 }
 
+fn draw_chunk_states(p: &egui::Painter, r: egui::Rect, states: &[usize]) {
+    p.rect_filled(r, 0.0, Color32::BLACK);
+    bevel(p, r, true);
+    let inner = r.shrink(3.0);
+    let half = (inner.height() - 1.0) / 2.0;
+    for (i, &state) in states.iter().enumerate() {
+        let color = match state {
+            0 => GREEN,
+            1 => YELLOW,
+            _ => Color32::from_rgb(76, 16, 13),
+        };
+        for bank in 0..2 {
+            p.rect_filled(
+                egui::Rect::from_min_size(
+                    inner.min + Vec2::new(i as f32 * 3.0, bank as f32 * (half + 1.0)),
+                    Vec2::new(2.0, half),
+                ),
+                0.0,
+                color,
+            );
+        }
+    }
+}
+
 impl eframe::App for Dashboard {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("dark_mode", self.dark.to_string());
         eframe::set_value(storage, "chunk_counts", &self.chunk_counts);
     }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) && self.research.has_unsaved() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.research.prevent_close();
+        }
+        if self.research.changed {
+            self.projects = self.research.snapshot();
+            self.research.changed = false;
+            self.selection = None;
+        }
         if ctx.style().visuals.dark_mode != self.dark {
             let mut visuals = if self.dark {
                 egui::Visuals::dark()
@@ -388,7 +427,8 @@ impl eframe::App for Dashboard {
                 }
                 let panel = r(3.0, 64.0, w - 6.0, h - 91.0);
                 bevel(&p, panel, false);
-                for (i, name) in ["Stock", "Forever"].iter().enumerate() {
+                for (i, project) in self.projects.iter().enumerate() {
+                    let name=&project.name;
                     let tab = r(5.0 + i as f32 * 61.0, 43.0, 61.0, 22.0);
                     p.rect_filled(tab, 0.0, bg);
                     bevel(&p, tab, false);
@@ -407,13 +447,18 @@ impl eframe::App for Dashboard {
                         self.selection = None;
                     }
                 }
-                let data = if self.project == 0 {
-                    self.stock_preview.clone().unwrap_or_else(rows)
-                } else {
-                    rows()
-                };
-                let meter_count: usize = data.iter().map(|r| r.groups.len()).sum();
-                let scale = self.project + 1;
+                let project_view=self.projects.get(self.project).cloned();
+                let live=project_view.as_ref().is_some_and(|p| !p.meters.is_empty() || (p.id!="stock"&&p.id!="forever"));
+                let live_meters=project_view.as_ref().map(|p|p.meters.clone()).unwrap_or_default();
+                let data = if live {
+                    let mut rows=Vec::new();
+                    for batch in live_meters.chunks(4) {
+                        rows.push(Row{name:String::new(),groups:batch.iter().map(|m|(m.name.clone(),m.functions,if m.states.iter().all(|&s|s==0)&&!m.states.is_empty(){0}else if m.states.iter().any(|&s|s!=2){1}else{2},m.completed_functions)).collect()});
+                    }
+                    if rows.is_empty(){rows.push(Row{name:String::new(),groups:vec![("No architecture records yet".into(),0,2,0)]});}rows
+                } else if self.project==0 {self.stock_preview.clone().unwrap_or_else(rows)} else {rows()};
+                let meter_count:usize=data.iter().map(|r|r.groups.len()).sum();
+                let scale=if live{1}else{self.project+1};
                 let mut counts = [0usize; 3];
                 for row in &data {
                     for g in &row.groups {
@@ -424,17 +469,11 @@ impl eframe::App for Dashboard {
                     }
                 }
                 let total: usize = counts.iter().sum();
-                let project_counts =
-                    &self.chunk_counts[self.project * 24..self.project * 24 + meter_count];
-                let total_chunks: usize = project_counts.iter().sum();
-                let done_chunks: usize = data
-                    .iter()
-                    .flat_map(|r| r.groups.iter())
-                    .zip(project_counts)
-                    .map(|(g, &count)| g.3 * count / g.1)
-                    .sum();
-                let selected = self.selection.unwrap_or((0, 2));
-                let (name, n, status, completed) = data[selected.0].groups[selected.1];
+                let project_counts:Vec<usize>=if live {live_meters.iter().map(|m|m.states.len()).chain(std::iter::repeat(0)).take(meter_count).collect()} else {self.chunk_counts[self.project*24..self.project*24+meter_count].to_vec()};
+                let total_chunks:usize=project_counts.iter().sum();
+                let done_chunks:usize=if live{live_meters.iter().flat_map(|m|m.states.iter()).filter(|&&s|s==0).count()}else{data.iter().flat_map(|r|r.groups.iter()).zip(&project_counts).map(|(g,&count)|g.3*count/g.1.max(1)).sum()};
+                let selected=self.selection.filter(|&(r,g)|r<data.len()&&g<data[r].groups.len()).unwrap_or((0,0));
+                let (name,n,status,completed)=data[selected.0].groups[selected.1].clone();
                 let top = 82.0;
                 let meter_h = (h - 282.0).max(218.0);
                 let left = r(15.0, top, 122.0, meter_h);
@@ -464,7 +503,7 @@ impl eframe::App for Dashboard {
                     &p,
                     well.left() + 7.0,
                     well.top() + 67.0,
-                    format!("{}% done", counts[0] * 100 / total),
+                    format!("{}% done", counts[0] * 100 / total.max(1)),
                     GREEN,
                 );
                 text(
@@ -509,12 +548,7 @@ impl eframe::App for Dashboard {
                             .id_salt(("meters", self.project))
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                let longest = self.chunk_counts
-                                    [self.project * 24..self.project * 24 + meter_count]
-                                    .iter()
-                                    .copied()
-                                    .max()
-                                    .unwrap_or(0);
+                                let longest=project_counts.iter().copied().max().unwrap_or(0);
                                 let col_width = meter_column_width(bank.width(), longest);
                                 let row_height = METER_ROW_HEIGHT;
                                 let (area, _) = ui.allocate_exact_size(
@@ -531,28 +565,24 @@ impl eframe::App for Dashboard {
                                         let index = ri * 4 + gi;
                                         let col = index % 2;
                                         let slot = index / 2;
-                                        let (chunk, num, state, finished) = data[ri].groups[gi];
+                                        let (chunk, num, state, finished) = data[ri].groups[gi].clone();
                                         let x = base.x + col as f32 * (col_width + 10.0);
                                         let y = base.y + slot as f32 * row_height;
                                         let count_index = self.project * 24 + index;
-                                        let segment_count = self.chunk_counts[count_index];
+                                        let segment_count = project_counts[index];
                                         let meter = egui::Rect::from_min_size(
                                             egui::pos2(x, y + 15.0),
                                             Vec2::new(meter_width(segment_count), METER_HEIGHT),
                                         );
-                                        led(
-                                            &p,
-                                            meter,
-                                            finished,
-                                            num,
-                                            [GREEN, YELLOW, RED][state],
-                                            segment_count,
-                                        );
+                                        if live {
+                                            draw_chunk_states(&p,meter,live_meters.get(index).map(|m|m.states.as_slice()).unwrap_or(&[]));
+                                        } else {led(&p,meter,finished,num,[GREEN,YELLOW,RED][state],segment_count);}
+
                                         text(
                                             &p,
                                             x,
                                             y + 5.0,
-                                            format!("{} / {chunk}", data[ri].name),
+                                            if live {chunk.clone()} else {format!("{} / {chunk}",data[ri].name)},
                                             Color32::BLACK,
                                         );
                                         text(
@@ -561,7 +591,7 @@ impl eframe::App for Dashboard {
                                             meter.bottom() + 10.0,
                                             format!(
                                                 "Chunks: {} / {}    Funcs: {} / {}",
-                                                finished * segment_count / num,
+                                                if live {live_meters.get(index).map(|m|m.states.iter().filter(|&&s|s==0).count()).unwrap_or(0)}else{finished * segment_count / num.max(1)},
                                                 segment_count,
                                                 finished * scale,
                                                 num * scale
@@ -591,7 +621,15 @@ impl eframe::App for Dashboard {
                                                 egui::StrokeKind::Outside,
                                             );
                                         }
+                                        if live && hit.double_clicked() {
+                                            if let (Some(project),Some(meter))=(&project_view,live_meters.get(index)){self.research.open_record(&project.id,meter.id);}
+                                        }
                                         hit.context_menu(|ui| {
+                                            if live {
+                                                if ui.button("Open architecture report").clicked(){if let (Some(project),Some(meter))=(&project_view,live_meters.get(index)){self.research.open_record(&project.id,meter.id);}}
+                                                ui.label("Segment counts come from this architecture's chunk records.");
+                                                return;
+                                            }
                                             ui.label("Chunk segments");
                                             ui.add(
                                                 egui::DragValue::new(
@@ -655,7 +693,7 @@ impl eframe::App for Dashboard {
                     ),
                     (
                         w * 0.33,
-                        if self.project == 0 && self.stock_preview.is_some() {
+                        if live {format!("App report: {:?}",project_view.as_ref().map(|p|p.app_status).unwrap_or(research::Status::NotStarted))} else if self.project == 0 && self.stock_preview.is_some() {
                             "Stock assumptions".to_string()
                         } else {
                             "Sample data".to_string()
@@ -718,6 +756,28 @@ impl eframe::App for Dashboard {
                             {
                                 toggle_theme = true;
                             }
+                            if menu == 2
+                                && ui
+                                    .add_sized(
+                                        [185.0, 23.0],
+                                        egui::Button::new("Research records...").frame(false),
+                                    )
+                                    .clicked()
+                            {
+                                self.research.open = true;
+                                self.menu = None;
+                            }
+                            if menu == 2
+                                && ui
+                                    .add_sized(
+                                        [185.0, 23.0],
+                                        egui::Button::new("Refresh research progress").frame(false),
+                                    )
+                                    .clicked()
+                            {
+                                self.research.changed = true;
+                                self.menu = None;
+                            }
                             let label = match menu {
                                 0 => "Exit",
                                 1 => {
@@ -763,6 +823,7 @@ impl eframe::App for Dashboard {
                 self.menu = None;
             }
         }
+        self.research.show(ctx);
         if self.about {
             egui::Window::new("About Research Task Manager")
                 .collapsible(false)
@@ -852,12 +913,12 @@ fn main() -> eframe::Result {
                                 );
                                 let functions =
                                     m["functions"].as_u64().unwrap_or(1).max(1) as usize;
-                                groups.push((name, functions, 2, 0));
+                                groups.push((name.to_string(), functions, 2, 0));
                                 app.chunk_counts[i * 4 + j] =
                                     m["chunks"].as_u64().unwrap_or(1).min(4096) as usize;
                             }
                             preview.push(Row {
-                                name: "Stock",
+                                name: "Stock".into(),
                                 groups,
                             });
                         }
