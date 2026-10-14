@@ -187,13 +187,10 @@ fn group_box(p: &egui::Painter, r: egui::Rect, title: &str) {
     );
 }
 const METER_HEIGHT: f32 = 46.0;
-const METER_ROW_HEIGHT: f32 = 90.0;
 fn meter_width(segments: usize) -> f32 {
     6.0 + segments as f32 * 3.0
 }
-fn meter_column_width(bank_width: f32, longest: usize) -> f32 {
-    ((bank_width - 28.0) / 2.0).max(meter_width(longest))
-}
+
 // CPU Usage meter from the reference, rotated clockwise: thin vertical
 // segments fill left-to-right, with the unlit lattice remaining visible.
 fn led(
@@ -474,71 +471,9 @@ impl eframe::App for Dashboard {
                 let done_chunks:usize=if live{live_meters.iter().flat_map(|m|m.states.iter()).filter(|&&s|s==0).count()}else{data.iter().flat_map(|r|r.groups.iter()).zip(&project_counts).map(|(g,&count)|g.3*count/g.1.max(1)).sum()};
                 let selected=self.selection.filter(|&(r,g)|r<data.len()&&g<data[r].groups.len()).unwrap_or((0,0));
                 let (name,n,status,completed)=data[selected.0].groups[selected.1].clone();
-                let top = 82.0;
-                let meter_h = (h - 282.0).max(218.0);
-                let left = r(15.0, top, 122.0, meter_h);
-                group_box(&p, left, "Function coverage");
-                let well = left.shrink2(Vec2::new(10.0, 17.0));
-                p.rect_filled(well, 0.0, Color32::BLACK);
-                bevel(&p, well, true);
-                text(
-                    &p,
-                    well.left() + 7.0,
-                    well.top() + 15.0,
-                    "All functions",
-                    GREEN,
-                );
-                led(
-                    &p,
-                    egui::Rect::from_min_size(
-                        well.min + Vec2::new(5.0, 29.0),
-                        Vec2::new(well.width() - 10.0, 22.0),
-                    ),
-                    counts[0],
-                    total,
-                    GREEN,
-                    ((well.width() - 16.0) / 3.0).floor() as usize,
-                );
-                text(
-                    &p,
-                    well.left() + 7.0,
-                    well.top() + 67.0,
-                    format!("{}% done", counts[0] * 100 / total.max(1)),
-                    GREEN,
-                );
-                text(
-                    &p,
-                    well.left() + 7.0,
-                    well.top() + 90.0,
-                    format!("Total: {total}"),
-                    GREEN,
-                );
-                text(
-                    &p,
-                    well.left() + 7.0,
-                    well.top() + 112.0,
-                    "Current chunk",
-                    GREEN,
-                );
-                led(
-                    &p,
-                    egui::Rect::from_min_size(
-                        well.min + Vec2::new(5.0, 125.0),
-                        Vec2::new(well.width() - 10.0, 22.0),
-                    ),
-                    completed,
-                    n,
-                    [GREEN, YELLOW, RED][status],
-                    ((well.width() - 16.0) / 3.0).floor() as usize,
-                );
-                text(
-                    &p,
-                    well.left() + 7.0,
-                    well.top() + 164.0,
-                    format!("Funcs: {} / {}", completed * scale, n * scale),
-                    GREEN,
-                );
-                let bank = r(149.0, top, w - 164.0, meter_h);
+                let top=82.0;
+                let meter_h=(h-270.0).max(218.0);
+                let bank=r(15.0,top,w-30.0,meter_h);
                 group_box(&p, bank, "Research chunks");
                 // Preserve meter styling; only the arrangement and configurable length change.
                 ui.scope_builder(
@@ -548,16 +483,20 @@ impl eframe::App for Dashboard {
                             .id_salt(("meters", self.project))
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                let longest=project_counts.iter().copied().max().unwrap_or(0);
-                                let col_width = meter_column_width(bank.width(), longest);
-                                let row_height = METER_ROW_HEIGHT;
-                                let (area, _) = ui.allocate_exact_size(
-                                    Vec2::new(
-                                        col_width * 2.0 + 10.0,
-                                        row_height * meter_count.div_ceil(2) as f32,
-                                    ),
-                                    egui::Sense::hover(),
-                                );
+                                let padding=8.0;
+                                let gap=12.0;
+                                let row_height=104.0;
+                                let panel_widths:Vec<f32>=data.iter().flat_map(|row|row.groups.iter().map(move |g|(row,g))).enumerate().map(|(index,(row,g))|{
+                                    let title=if live{g.0.clone()}else{format!("{} / {}",row.name,g.0)};
+                                    let count=project_counts[index];
+                                    let footer=format!("Chunks: {} / {}    Funcs: {} / {}",count,count,g.1*scale,g.1*scale);
+                                    let font=egui::FontId::proportional(11.0);
+                                    let title_w=ui.painter().layout_no_wrap(title,font.clone(),ink).size().x;
+                                    let footer_w=ui.painter().layout_no_wrap(footer,font,ink).size().x;
+                                    meter_width(count).max(title_w).max(footer_w)+padding*2.0
+                                }).collect();
+                                let content_width=panel_widths.chunks(2).map(|pair|pair.iter().sum::<f32>()+if pair.len()==2{gap}else{0.0}).fold(0.0_f32,f32::max);
+                                let (area,_)=ui.allocate_exact_size(Vec2::new(content_width,row_height*meter_count.div_ceil(2) as f32),egui::Sense::hover());
                                 let base = area.min;
                                 let p = ui.painter().clone();
                                 for ri in 0..data.len() {
@@ -566,8 +505,13 @@ impl eframe::App for Dashboard {
                                         let col = index % 2;
                                         let slot = index / 2;
                                         let (chunk, num, state, finished) = data[ri].groups[gi].clone();
-                                        let x = base.x + col as f32 * (col_width + 10.0);
-                                        let y = base.y + slot as f32 * row_height;
+                                        let panel_x=base.x+if col==0{0.0}else{panel_widths[index-1]+gap};
+                                        let panel_y=base.y+slot as f32*row_height;
+                                        let panel_rect=egui::Rect::from_min_size(egui::pos2(panel_x,panel_y),Vec2::new(panel_widths[index],row_height-gap));
+                                        p.rect_filled(panel_rect,0.0,bg);
+                                        bevel(&p,panel_rect,true);
+                                        let x=panel_x+padding;
+                                        let y=panel_y+padding;
                                         let count_index = self.project * 24 + index;
                                         let segment_count = project_counts[index];
                                         let meter = egui::Rect::from_min_size(
@@ -652,38 +596,14 @@ impl eframe::App for Dashboard {
                             });
                     },
                 );
-                let bottom = top + meter_h + 18.0;
-                let stats = r(15.0, bottom, 220.0, 116.0);
-                group_box(&p, stats, "Functions");
-                for (i, (label, value)) in [
-                    ("Total", total),
-                    ("Done", counts[0]),
-                    ("In progress", counts[1]),
-                    ("Not done", counts[2]),
-                ]
-                .iter()
-                .enumerate()
-                {
-                    t(26.0, bottom + 19.0 + i as f32 * 22.0, label.to_string());
-                    t(165.0, bottom + 19.0 + i as f32 * 22.0, value.to_string());
-                }
-                let detail = r(247.0, bottom, w - 262.0, 116.0);
-                group_box(&p, detail, "Current chunk");
-                for (i, (label, value)) in [
-                    ("Architecture", data[selected.0].name.to_string()),
-                    ("Chunk", name.to_string()),
-                    ("Funcs", format!("{} / {}", completed * scale, n * scale)),
-                    (
-                        "Status",
-                        ["Done", "In progress", "Not done"][status].to_string(),
-                    ),
-                ]
-                .iter()
-                .enumerate()
-                {
-                    t(258.0, bottom + 19.0 + i as f32 * 22.0, label.to_string());
-                    t(346.0, bottom + 19.0 + i as f32 * 22.0, value.clone());
-                }
+                let bottom=top+meter_h+18.0;
+                let summary=r(15.0,bottom,w-30.0,136.0);
+                group_box(&p,summary,"Total progress");
+                let total_meter=r(25.0,bottom+18.0,w-50.0,METER_HEIGHT);
+                led(&p,total_meter,counts[0],total,GREEN,((total_meter.width()-6.0)/3.0).floor().max(0.0) as usize);
+                t(26.0,bottom+80.0,format!("Chunks: {done_chunks} / {total_chunks}    Funcs: {} / {total}    Done: {}%",counts[0],counts[0]*100/total.max(1)));
+                t(26.0,bottom+101.0,format!("Functions in progress: {}    Not done: {}",counts[1],counts[2]));
+                t(26.0,bottom+122.0,format!("Selected: {}{}{}    Funcs: {} / {}    {}",data[selected.0].name,if live{""}else{" / "},name,completed*scale,n*scale,["Done","In progress","Not done"][status]));
                 let mut sx = 0.0;
                 for (width, label) in [
                     (w * 0.34, format!("Funcs: {} / {total}", counts[0])),
@@ -941,37 +861,4 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
-}
-
-#[cfg(test)]
-mod layout_tests {
-    use super::*;
-    #[test]
-    fn chunk_widths_preserve_segment_pitch_and_fit_columns() {
-        for bank in [888.0, 928.0, 1440.0] {
-            for count in [0, 1, 8, 32, 64, 128, 256, 4096] {
-                let width = meter_width(count);
-                assert_eq!(width, 6.0 + count as f32 * 3.0);
-                let column = meter_column_width(bank, count);
-                let second_x = column + 10.0;
-                assert!(width <= column);
-                assert!(width < second_x);
-                assert!(second_x + width <= column * 2.0 + 10.0);
-                // The last pip stays inside the 3px recessed right edge.
-                if count > 0 {
-                    assert!(3.0 + (count - 1) as f32 * 3.0 + 2.0 <= width - 3.0);
-                }
-            }
-        }
-    }
-    #[test]
-    fn long_meters_expand_scroll_extent_without_overlapping() {
-        let bank = 928.0;
-        assert!(meter_column_width(bank, 64) * 2.0 + 10.0 <= bank - 16.0);
-        assert!(meter_column_width(bank, 4096) * 2.0 + 10.0 > bank);
-        assert_eq!(meter_width(64), 198.0);
-        assert_eq!(meter_width(128), 390.0);
-        assert_eq!(meter_width(256), 774.0);
-        assert!(15.0 + METER_HEIGHT + 10.0 + 6.0 < METER_ROW_HEIGHT);
-    }
 }
