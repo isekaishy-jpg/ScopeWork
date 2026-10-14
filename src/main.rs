@@ -3,6 +3,7 @@
 use eframe::egui::{self, Color32, Vec2};
 
 const GREEN: Color32 = Color32::from_rgb(0, 210, 48);
+const RED: Color32 = Color32::from_rgb(228, 48, 40);
 const YELLOW: Color32 = Color32::from_rgb(238, 193, 55);
 
 struct Row {
@@ -174,35 +175,32 @@ fn group_box(p: &egui::Painter, r: egui::Rect, title: &str) {
         foreground(p.ctx().style().visuals.dark_mode),
     );
 }
-// Illustrative chunk records for each sample meter, independent of its function count.
-fn sample_chunks(state: usize) -> &'static [usize] {
-    match state {
-        0 => &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        1 => &[0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2],
-        _ => &[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
-    }
-}
-// One equally sized segment per chunk: complete, active, or not complete.
-fn led(p: &egui::Painter, r: egui::Rect, chunks: &[usize]) {
+// CPU Usage meter from the reference, rotated clockwise: thin vertical
+// segments fill left-to-right, with the unlit lattice remaining visible.
+fn led(p: &egui::Painter, r: egui::Rect, complete: usize, total: usize, color: Color32) {
     p.rect_filled(r, 0.0, Color32::BLACK);
     bevel(p, r, true);
     let inner = r.shrink(3.0);
-    let step = inner.width() / chunks.len().max(1) as f32;
-    for (i, &state) in chunks.iter().enumerate() {
-        let color = match state {
-            0 => GREEN,
-            1 => YELLOW,
-            _ => Color32::from_rgb(76, 16, 13),
-        };
+    let cells = (inner.width() / 3.0).floor().max(1.0) as usize;
+    let fraction = if total == 0 {
+        0.0
+    } else {
+        complete.min(total) as f32 / total as f32
+    };
+    let lit = (fraction * cells as f32).floor() as usize;
+    let dark = Color32::from_rgb(color.r() / 3, color.g() / 3, color.b() / 3);
+    for i in 0..cells {
+        // A black horizontal seam separates the two banks of the classic meter.
+        let cell_color = if i < lit { color } else { dark };
         let half = (inner.height() - 1.0) / 2.0;
         for bank in 0..2 {
             p.rect_filled(
                 egui::Rect::from_min_size(
-                    inner.min + Vec2::new(i as f32 * step, bank as f32 * (half + 1.0)),
-                    Vec2::new((step - 1.5).max(0.25), half.max(1.0)),
+                    inner.min + Vec2::new(i as f32 * 3.0, bank as f32 * (half + 1.0)),
+                    Vec2::new(2.0, half.max(1.0)),
                 ),
                 0.0,
-                color,
+                cell_color,
             );
         }
     }
@@ -394,16 +392,12 @@ impl eframe::App for Dashboard {
                     }
                 }
                 let total: usize = counts.iter().sum();
-                let all_chunks: Vec<usize> = data
+                let total_chunks: usize = data.iter().map(|r| r.groups.len()).sum();
+                let done_chunks = data
                     .iter()
-                    .flat_map(|row| {
-                        row.groups
-                            .iter()
-                            .flat_map(|g| sample_chunks(g.2).iter().copied())
-                    })
-                    .collect();
-                let total_chunks = all_chunks.len();
-                let done_chunks = all_chunks.iter().filter(|&&c| c == 0).count();
+                    .flat_map(|r| r.groups.iter())
+                    .filter(|g| g.2 == 0)
+                    .count();
                 let selected = self.selection.unwrap_or((0, 2));
                 let (name, n, status, completed) = data[selected.0].groups[selected.1];
                 let top = 82.0;
@@ -426,7 +420,9 @@ impl eframe::App for Dashboard {
                         well.min + Vec2::new(5.0, 29.0),
                         Vec2::new(well.width() - 10.0, 22.0),
                     ),
-                    &all_chunks,
+                    counts[0],
+                    total,
+                    GREEN,
                 );
                 text(
                     &p,
@@ -455,7 +451,9 @@ impl eframe::App for Dashboard {
                         well.min + Vec2::new(5.0, 125.0),
                         Vec2::new(well.width() - 10.0, 22.0),
                     ),
-                    sample_chunks(status),
+                    completed,
+                    n,
+                    [GREEN, YELLOW, RED][status],
                 );
                 text(
                     &p,
@@ -481,9 +479,7 @@ impl eframe::App for Dashboard {
                             egui::pos2(x, y + 15.0),
                             Vec2::new(col_width, 32.0),
                         );
-                        let chunks = sample_chunks(state);
-                        let complete_chunks = chunks.iter().filter(|&&c| c == 0).count();
-                        led(&p, meter, chunks);
+                        led(&p, meter, finished, num, [GREEN, YELLOW, RED][state]);
                         text(
                             &p,
                             x,
@@ -495,7 +491,7 @@ impl eframe::App for Dashboard {
                             &p,
                             x,
                             meter.bottom() + 10.0,
-                            format!("Chunks: {complete_chunks} / {}", chunks.len()),
+                            format!("Chunk: {} / {total_chunks}", index + 1),
                             Color32::BLACK,
                         );
                         text(
