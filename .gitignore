@@ -1,0 +1,8 @@
+/target/
+/data/
+/captures/
+/imports/
+*.exe
+*.dll
+*.pdb
+.env
