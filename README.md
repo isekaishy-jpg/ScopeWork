@@ -1,111 +1,69 @@
-# Scopework
+<p align="center">
+  <img src="assets/scopework.png" width="96" height="96" alt="Scopework icon">
+</p>
 
-Rust desktop research dashboard with the approved classic Task Manager layout, a modern dark palette, two meters per row, and separate chunk/function counts.
+<h1 align="center">Scopework</h1>
+<p align="center">A local research workbench for people and agents.</p>
+<p align="center">
+  <a href="https://github.com/isekaishy-jpg/ScopeWork/actions/workflows/windows.yml"><img src="https://github.com/isekaishy-jpg/ScopeWork/actions/workflows/windows.yml/badge.svg" alt="Windows build"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/platform-Windows_x64-0078D4" alt="Windows x64">
+</p>
 
-## Research records
+Scopework organizes binary research into a hierarchy of canonical reports. A desktop dashboard shows progress; a JSON CLI lets agents use the same records, dependencies and completion rules.
 
-Open **View > Research records...**. Stock and Forever start with separate app reports. Create future projects in the same window.
+**[Get started](docs/installation.md)** · **[Releases](https://github.com/isekaishy-jpg/ScopeWork/releases)** · **[CLI guide](docs/cli.md)** · **[Contributing](CONTRIBUTING.md)**
 
-Each project owns a complete hierarchy:
+## Research that stays bounded
 
-```
-<research-home>/projects/<project-id>/
-  project.json
-  app.md
-  architectures/<id>/research.md
-  chunks/<id>/research.md
-  functions/<RVA>/
-    research.md
-    data/                       # this function's captures, exports and raw evidence
-  tools/
-    README.md
-    profiles/
-    scripts/
-    instrumentation/
-    bin/
-    workspaces/                 # shared Ghidra / whole-binary analysis databases
-    logs/                       # shared tool run provenance
-    scratch/                    # shared temporary working data
+```text
+App / project understanding
+  Architecture
+    Chunk
+      Function + evidence
 ```
 
-Select a parent and create its child: App -> Architecture -> Chunk -> Function. Architectures are categories such as Asset Loading or Models. Enter the exact binary build/hash and image base before adding functions. Function identity is an RVA within that project's binary. A function cannot be duplicated elsewhere in the same project. Different binaries require separate projects.
+Each task has a fixed scope. Functions establish their own behavior and connections. Chunks synthesize completed functions; architectures synthesize chunks. Completed children make a parent ready for synthesis, but never automatically complete it.
 
-The editor updates each canonical Markdown file in place. Parent reports link their direct source reports: architecture to chunks, chunks to function files. Function evidence remains in the function file instead of being copied into parallel reports. Parent synthesis is authored in the parent's own report; linking children alone does not complete it.
+- **Isolated projects:** separate binary identities, reports and supporting data.
+- **One canonical report per item:** supporting captures stay beside the function they explain.
+- **Explicit prerequisites:** shared understanding is referenced, with dependent work reopened when it changes.
+- **Visible progress:** project tabs, chunk meters, function counts and a short research-topic header.
+- **GUI and CLI together:** agents can work while the dashboard is open; stale edits are rejected.
+- **Local files:** your research home stays under your control and survives uninstall.
 
-### Project research scope
+## Install
 
-Research Scope is a short topic label: for example, **Rendering** or **Asset platform**. Set it in **View > Research records > Research scope**. It appears in the header above the selected project's meters, and in CLI output so agents know what is being researched.
+Get a Windows x64 MSI from [Releases](https://github.com/isekaishy-jpg/ScopeWork/releases), or [build it yourself](docs/building.md). The wizard lets you choose the application folder, research home, PATH access and desktop shortcut.
 
-The label can describe a selected part of a binary. Editing it does not change completion states or assignments. Detailed understanding and completion criteria remain in the research reports and hierarchy.
-
-### Completion
-
-Research uses fixed assignments within expanding levels of understanding:
-
-- **Function:** Establish its behavior, inputs, outputs, side effects, boundaries and connections with evidence.
-- **Chunk:** Synthesize completed function reports to explain the chunk's behavior, control flow, data flow and external interactions.
-- **Architecture/category:** Synthesize completed chunk reports to explain subsystem behavior and interfaces.
-- **App:** Synthesize completed architecture reports to fulfill the project's declared research scope and explain relevant subsystem interactions.
-
-Completed children make a parent ready for synthesis; they do not automatically complete it. Each parent needs a separate review of its own understanding. The research editor shows completion criteria for the selected scope beside the completion control.
-
-Keep each assignment's scope fixed. Record missing knowledge outside it as a separate research task, and make it a prerequisite only when necessary to establish the current scope's behavior. A connection or call edge alone does not expand the assignment into the entire reachable graph. Known shared behavior is referenced through its canonical function report.
-
-Use the completion checkbox only after reviewing the report. Completion requires a written report, function evidence where applicable, and every required child complete. Empty parent reports and parents without children cannot be completed. Changing a child or adding a child reopens completed ancestors. SHA-256 checks detect externally changed completed files, and the editor rejects saves over a concurrently changed file. Use View > Refresh research progress after external edits. Completion is a human attestation supported by these structural checks, not automated judgment of research quality.
-
-Save or discard edits before navigating. Unsaved report edits prevent closing the app. GUI and CLI share short exclusive write operations. The GUI can stay open while agents work; use View > Refresh research progress to display their changes. Stale report or project revisions require reloading and review before saving.
-
-When a project has architecture records, its dashboard uses them: one meter per architecture, one existing-size segment per chunk (green complete, yellow in progress, dim red not started), and separate function counts. Double-click a meter to open its architecture report. The App report's completion status is separate from function coverage. The existing previews remain explicitly labeled for projects without architecture records; no historical completion claims are imported.
-
-Research lives outside the installation and checkout. The installer lets you choose a research home; new installations default to `%LOCALAPPDATA%\Scopework`. It contains `projects/` and one shared `complaints/` folder. The saved home is shared by the GUI and CLI. Earlier default homes continue to be used when present; no research is moved. Set `RESEARCH_DASHBOARD_HOME` to another absolute home before launching, or use CLI `--home PATH`. Projects have separate IDs, trees, metadata, evidence directories, and document membership. Do not copy research between projects without an explicit evidence reference and scope review.
-
-## Run
-
-Agents file narrow app complaints in the single `complaints/` folder under the research home, one Markdown report per issue. `research home` prints its path. Filing the report is the entire process. The [folder guide](complaints/README.md) is bundled into new homes.
+Open Scopework from Start or the desktop shortcut. With PATH enabled, open a new terminal:
 
 ```powershell
-cargo run --release
+research --help
+research home
+research project list
 ```
 
-Windows executable: `target/release/research-dashboard.exe`.
+In the app, use **View > Research records** to create a project and its research hierarchy. Set **Research scope** to a few words such as *Rendering* or *Asset platform*.
 
-Options > Dark mode switches palettes and saves the choice. Other menus provide Exit, Always on top, research records, progress refresh, Clear chunk selection, and About. The custom title bar supports dragging, minimizing, maximizing, and closing; the bottom-right grip resizes the window.
+## Status
 
-## Preview mode
+Scopework is in early development. MSI packages are unsigned. Read each release's validation notes before using it for important work. Completion records are evidence-backed attestations, not automatic proof of research quality. Projects without records may display explicitly labeled preview data.
 
-The optional `stock-preview.json` file in the research home supplies the Stock assumptions preview. Its function counts came from the existing index; its chunk counts are hypothetical. Forever's preview uses illustrative data. Preview meters allow segment counts to be changed through their context menu. Canonical meters derive segment counts from their chunk records.
+## Documentation
 
-Every function has its own folder: `research.md` plus `data/`. Use relative `data/<file>` links from that report. There is no new project-level evidence or data directory. Shared tool state lives under `tools/workspaces`, `tools/logs`, and `tools/scratch`. The research editor has an **Open this function's data folder** button.
+| Guide | What it covers |
+| --- | --- |
+| [Installation](docs/installation.md) | Setup choices, research locations, upgrades and uninstall |
+| [Research model](docs/research-model.md) | Hierarchy, evidence, completion and prerequisites |
+| [Agent CLI](docs/cli.md) | Creating records, writing reports and managing dependencies |
+| [Build guide](docs/building.md) | Source builds, MSI packaging and repository layout |
+| [Changelog](CHANGELOG.md) | Changes by version |
 
-There is no migration or import workflow. Existing material is carried over manually; the app never moves historical research into a new home.
+## Contribute
 
-Meter pairs use padded inset panels sized to their own meter and text widths. The second panel follows the first with a small gap rather than a fixed half-window offset. Large meters grow their own row and remain scrollable. The total-progress meter occupies a separate full-width panel below the meter bank.
+Bug reports and focused improvements are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Research datasets, captures and proprietary binaries do not belong in this repository.
 
-## Function prerequisite tags
+## License
 
-Each function folder also contains `dep.toml` (functions this report requires) and `prereq.toml` (functions that require this one). Both include project/binary identity, function RVAs, and relative canonical-report links. Tags stay within one project, do not duplicate research files, and do not add functions to coverage totals.
-
-The app maintains both directions from the project's dependency graph in `project.json`; these two TOML files are generated views. In a function's research editor, enter prerequisite RVAs separated by commas and use **Save prerequisite tags**. The reverse list is generated automatically. Self-dependencies, missing functions, duplicates and prerequisite cycles are rejected. These are understanding prerequisites, not a complete machine-code call graph.
-
-A dependent function cannot be marked complete until its prerequisites are complete. Its completion records which prerequisite revisions it used. Changes to a shared function reopen transitive dependents and their owning chunk/architecture/app reports. External changes are detected by the report hash checks. Merely referencing an already understood function does not reopen that shared function. Re-saving unchanged research does not invalidate dependents.
-
-Agents update tags with `research deps set`; see the [CLI guide](docs/cli.md). The dashboard may remain open. Both TOML files are maintained by the app; do not edit them directly.
-
-## Windows installation and CLI
-
-Build the installer with `powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1` (Rust and .NET SDK required). This permits the build script for that process only. The script installs a pinned local WiX build tool if needed and produces `dist/Scopework-0.3.0-x64.msi`.
-
-The per-user setup wizard has Welcome, Options, Summary, Progress and Finish pages. Options let you choose the application folder, research home and whether to add the agent CLI to your user PATH. Fresh defaults are `%LOCALAPPDATA%\Programs\Scopework` and `%LOCALAPPDATA%\Scopework`. Upgrades reuse saved choices. A Start menu shortcut and a Windows installed-app entry use the Scopework name and icon.
-
-Open a new terminal after installing with PATH enabled. Use `research --help` for the console CLI, `research gui` to open Scopework, and `research home` to locate research. Without PATH, invoke `research.exe` from the chosen application folder. Command names and executable filenames remain compatible with previous versions.
-
-Home precedence is CLI `--home`, then `RESEARCH_DASHBOARD_HOME`, then the installer-selected home, then the default. The home is initialized on first app/CLI use. Uninstall removes the program and its PATH entry while preserving research and its saved home setting. Choosing another home selects that library; it never imports or moves existing research.
-
-The MSI is unsigned; no signing certificate is configured. The [icon assets and generation prompt](assets/README.md) document the new visual identity. Re-running the same-version MSI offers Repair or Uninstall. Newer-version MSIs perform an upgrade.
-
-
-The [CLI guide](docs/cli.md) covers project/tab creation, hierarchy creation, report reading/writing, reviewed completion/reopening, prerequisite tags and progress. Successful commands emit JSON. CLI and GUI enforce the same hierarchy, dependency and completion rules.
-
-## Updating an installed app
-
-Install a newer-version MSI over the existing per-user installation. The stable MSI UpgradeCode and MajorUpgrade rule replace the older program; research remains in its separate home. Close the dashboard first. There is no automatic update checker or downloader. Releases must increment the three-part version in Cargo.toml; the MSI build script reads that version so CLI and installer versions stay aligned. Older-version MSI installation is blocked.
+Scopework is licensed under [MIT](LICENSE). Third-party dependencies retain their respective licenses.

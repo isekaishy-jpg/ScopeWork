@@ -19,6 +19,13 @@
       <RegistrySearch Id="FindPathOption" Root="HKCU" Key="Software\ResearchDashboard" Name="AddToPath" Type="raw" />
     </Property>
     <Property Id="ADDTOPATH" Secure="yes" />
+    <Property Id="SAVEDDESKTOP">
+      <RegistrySearch Id="FindDesktopOption" Root="HKCU" Key="Software\ResearchDashboard" Name="CreateDesktop" Type="raw" />
+    </Property>
+    <Property Id="DESKTOPSETTINGSEXIST">
+      <RegistrySearch Id="FindDesktopSetting" Root="HKCU" Key="Software\ResearchDashboard" Name="DesktopPreferenceSet" Type="raw" />
+    </Property>
+    <Property Id="CREATEDESKTOP" Secure="yes" />
     <Property Id="SCOPEOPTIONSINITIALIZED" Secure="yes" />
     <Property Id="INSTALLFOLDER" Secure="yes" />
     <Property Id="RESEARCHHOME" Secure="yes" />
@@ -27,7 +34,9 @@
     <SetProperty Id="RESEARCHHOME" Action="UseLegacyHome" Value="[LocalAppDataFolder]ResearchDashboard" After="SetRESEARCHHOME" Condition="OLDINSTALLDIR AND NOT SAVEDHOME AND NOT RESEARCHHOME" />
     <SetProperty Id="ADDTOPATH" Value="[SAVEDPATH]" After="AppSearch" Condition="NOT SCOPEOPTIONSINITIALIZED AND SETTINGS_EXIST AND NOT ADDTOPATH" />
     <SetProperty Id="ADDTOPATH" Action="DefaultPathChoice" Value="1" After="SetADDTOPATH" Condition="NOT SCOPEOPTIONSINITIALIZED AND NOT SETTINGS_EXIST AND NOT ADDTOPATH" />
-    <SetProperty Id="SCOPEOPTIONSINITIALIZED" Value="1" After="DefaultPathChoice" />
+    <SetProperty Id="CREATEDESKTOP" Value="[SAVEDDESKTOP]" After="DefaultPathChoice" Condition="NOT SCOPEOPTIONSINITIALIZED AND DESKTOPSETTINGSEXIST AND NOT CREATEDESKTOP" />
+    <SetProperty Id="CREATEDESKTOP" Action="DefaultDesktopChoice" Value="1" After="SetCREATEDESKTOP" Condition="NOT SCOPEOPTIONSINITIALIZED AND NOT DESKTOPSETTINGSEXIST AND NOT CREATEDESKTOP" />
+    <SetProperty Id="SCOPEOPTIONSINITIALIZED" Value="1" After="DefaultDesktopChoice" />
     <UIRef Id="ScopeworkUI" />
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">
@@ -47,13 +56,26 @@
           <Component Id="UserGuide" Guid="E4EFB6A4-CE73-4723-8D5B-225DBB6B9677">
             <File Source="$(SourceDir)\README.md" />
             <File Source="$(SourceDir)\AGENTS.md" />
+            <File Source="$(SourceDir)\LICENSE" />
+            <File Source="$(SourceDir)\CONTRIBUTING.md" />
+            <File Source="$(SourceDir)\CHANGELOG.md" />
             <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="Guide" Value="1" Type="integer" KeyPath="yes" />
           </Component>
           <Directory Id="DocsFolder" Name="docs">
             <Component Id="CliGuide" Guid="28D781C9-A270-4EE6-A861-F9D16C963B96">
               <File Source="$(SourceDir)\docs\cli.md" />
+              <File Source="$(SourceDir)\docs\research-model.md" />
+              <File Source="$(SourceDir)\docs\installation.md" />
+              <File Source="$(SourceDir)\docs\building.md" />
               <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="CliGuide" Value="1" Type="integer" KeyPath="yes" />
               <RemoveFolder Id="RemoveDocsFolder" On="uninstall" />
+            </Component>
+          </Directory>
+          <Directory Id="AssetsFolder" Name="assets">
+            <Component Id="ReadmeIcon" Guid="B221BD8D-B32B-4CF6-9EBA-4556738D8E63">
+              <File Source="$(SourceDir)\assets\scopework.png" />
+              <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="ReadmeIcon" Value="1" Type="integer" KeyPath="yes" />
+              <RemoveFolder Id="RemoveAssetsFolder" On="uninstall" />
             </Component>
           </Directory>
         </Directory>
@@ -64,6 +86,8 @@
           <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="ResearchHome" Value="[RESEARCHHOME]" Type="string" KeyPath="yes" />
           <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="AddToPath" Value="[ADDTOPATH]" Type="string" />
           <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="SettingsVersion" Value="1" Type="string" />
+          <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="CreateDesktop" Value="[CREATEDESKTOP]" Type="string" />
+          <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="DesktopPreferenceSet" Value="1" Type="string" />
         </Component>
       </Directory>
     </StandardDirectory>
@@ -76,14 +100,22 @@
         </Component>
       </Directory>
     </StandardDirectory>
-    <Feature Id="Main" Title="Research Dashboard" Level="1">
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcutComponent" Guid="5581AE80-4A5A-490B-8D65-1F4CA41F87A0" Condition="CREATEDESKTOP = &quot;1&quot;" Transitive="yes">
+        <Shortcut Id="DesktopShortcut" Name="Scopework" Target="[#DashboardExe]" WorkingDirectory="INSTALLFOLDER" Icon="ScopeworkIcon" IconIndex="0" />
+        <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="DesktopShortcut" Value="1" Type="integer" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+    <Feature Id="Main" Title="Scopework" Level="1">
       <ComponentRef Id="DesktopApp" />
       <ComponentRef Id="ConsoleApp" />
       <ComponentRef Id="OptionalPath" />
       <ComponentRef Id="ResearchHomeSettings" />
       <ComponentRef Id="UserGuide" />
       <ComponentRef Id="CliGuide" />
+      <ComponentRef Id="ReadmeIcon" />
       <ComponentRef Id="StartMenu" />
+      <ComponentRef Id="DesktopShortcutComponent" />
     </Feature>
   </Package>
 </Wix>

@@ -1,0 +1,31 @@
+name: Bug report
+description: Report one reproducible problem with Scopework.
+title: "[Bug] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Scopework and Windows versions
+      placeholder: Scopework 0.4.0, Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use a small synthetic example. Do not attach private research or proprietary binaries.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include relevant error text or a screenshot with private details removed.
+    validations:
+      required: true

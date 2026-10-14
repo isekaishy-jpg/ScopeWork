@@ -320,7 +320,7 @@ impl eframe::App for Dashboard {
                         Color32::from_rgb(0, 0, 128)
                     },
                 );
-                let icon = r(3.0, 3.0, 14.0, 14.0);
+                let icon = r(3.0, 2.0, 16.0, 16.0);
                 if let Some(texture) = &self.brand_icon {
                     p.image(texture.id(), icon, egui::Rect::from_min_max(egui::pos2(0.0,0.0),egui::pos2(1.0,1.0)),Color32::WHITE);
                 }
@@ -840,11 +840,14 @@ fn main() -> eframe::Result {
                 s.spacing.item_spacing = Vec2::new(8.0, 4.0);
             });
             let mut app = Dashboard::default();
+            let small_icon = image::load_from_memory(include_bytes!("../assets/scopework-16.png"))
+                .expect("bundled titlebar icon")
+                .into_rgba8();
             app.brand_icon = Some(cc.egui_ctx.load_texture(
                 "scopework",
                 egui::ColorImage::from_rgba_unmultiplied(
-                    [icon_image.width() as usize, icon_image.height() as usize],
-                    icon_image.as_raw(),
+                    [small_icon.width() as usize, small_icon.height() as usize],
+                    small_icon.as_raw(),
                 ),
                 egui::TextureOptions::LINEAR,
             ));

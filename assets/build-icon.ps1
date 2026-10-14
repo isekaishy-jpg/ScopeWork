@@ -9,11 +9,13 @@ try {
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
         $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
         $graphics.DrawImage($source, 0, 0, $size, $size)
         $memory = [System.IO.MemoryStream]::new()
         $bitmap.Save($memory, [System.Drawing.Imaging.ImageFormat]::Png)
         $frames += ,$memory.ToArray()
         if ($size -eq 256) { $bitmap.Save((Join-Path $PSScriptRoot 'scopework.png'), [System.Drawing.Imaging.ImageFormat]::Png) }
+        if ($size -eq 16) { $bitmap.Save((Join-Path $PSScriptRoot 'scopework-16.png'), [System.Drawing.Imaging.ImageFormat]::Png) }
         $memory.Dispose(); $graphics.Dispose(); $bitmap.Dispose()
     }
 } finally { $source.Dispose() }

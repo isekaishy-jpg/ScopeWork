@@ -24,7 +24,7 @@
         <Control Id="Title" Type="Text" X="88" Y="26" Width="315" Height="26" Text="{\ScopeTitle}Welcome to Scopework" />
         <Control Id="Version" Type="Text" X="88" Y="58" Width="300" Height="20" Text="Research workbench  [ProductVersion]" />
         <Control Id="Intro" Type="Text" X="25" Y="102" Width="380" Height="45" Text="Organize research into functions, chunks and systems. Keep evidence and understanding together in a local research home." />
-        <Control Id="Details" Type="Text" X="25" Y="157" Width="380" Height="56" Text="Setup installs the desktop app, agent CLI and a Start menu shortcut for your Windows account. Next, choose the application folder, research home and optional PATH access." />
+        <Control Id="Details" Type="Text" X="25" Y="157" Width="380" Height="56" Text="Setup installs the desktop app, agent CLI and a Start menu shortcut for your Windows account. Next, choose the application folder, research home, PATH access and desktop shortcut." />
         <Control Id="Upgrade" Type="Text" X="25" Y="228" Width="380" Height="40" Text="A newer version upgrades the existing app. Research is kept separately and is preserved when the app is uninstalled." />
         <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
         <Control Id="Next" Type="PushButton" X="270" Y="302" Width="68" Height="18" Default="yes" Text="Next &gt;">
@@ -51,7 +51,8 @@
         </Control>
         <Control Id="HomeNote" Type="Text" X="22" Y="166" Width="384" Height="34" Text="Use a writable folder. Existing research is never moved or imported. Uninstalling Scopework preserves this home." />
         <Control Id="PathOption" Type="CheckBox" X="22" Y="212" Width="384" Height="20" Property="ADDTOPATH" CheckBoxValue="1" Text="Add the agent CLI to my PATH (use research from any folder)" />
-        <Control Id="PathNote" Type="Text" X="22" Y="240" Width="384" Height="30" Text="PATH changes apply to new terminals. Environment or --home overrides still take precedence over the selected research home." />
+        <Control Id="DesktopOption" Type="CheckBox" X="22" Y="237" Width="384" Height="18" Property="CREATEDESKTOP" CheckBoxValue="1" Text="Create a desktop shortcut" />
+        <Control Id="PathNote" Type="Text" X="22" Y="262" Width="384" Height="18" Text="PATH changes apply to new terminals." />
         <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
         <Control Id="Back" Type="PushButton" X="195" Y="302" Width="68" Height="18" Text="&lt; Back"><Publish Event="NewDialog" Value="ScopeWelcome" /></Control>
         <Control Id="Next" Type="PushButton" X="270" Y="302" Width="68" Height="18" Default="yes" Text="Next &gt;">
@@ -68,7 +69,9 @@
         <Control Id="Home" Type="Text" X="22" Y="112" Width="384" Height="40" Text="Research home:&#13;&#10;[RESEARCHHOME]" />
         <Control Id="PathYes" Type="Text" X="22" Y="164" Width="384" Height="18" Hidden="yes" ShowCondition="ADDTOPATH = &quot;1&quot;" Text="Agent CLI on PATH: Yes" />
         <Control Id="PathNo" Type="Text" X="22" Y="164" Width="384" Height="18" Hidden="yes" ShowCondition="ADDTOPATH &lt;&gt; &quot;1&quot;" Text="Agent CLI on PATH: No" />
-        <Control Id="Summary" Type="Text" X="22" Y="200" Width="384" Height="60" Text="The desktop app, agent CLI, guides and Start menu shortcut will be installed for this account. Your selected research home is preserved on uninstall. Click Install to apply these choices." />
+        <Control Id="DesktopYes" Type="Text" X="22" Y="188" Width="384" Height="18" Hidden="yes" ShowCondition="CREATEDESKTOP = &quot;1&quot;" Text="Desktop shortcut: Yes" />
+        <Control Id="DesktopNo" Type="Text" X="22" Y="188" Width="384" Height="18" Hidden="yes" ShowCondition="CREATEDESKTOP &lt;&gt; &quot;1&quot;" Text="Desktop shortcut: No" />
+        <Control Id="Summary" Type="Text" X="22" Y="221" Width="384" Height="58" Text="The desktop app, agent CLI, guides and Start menu shortcut will be installed for this account. Your selected research home is preserved on uninstall. Click Install to apply these choices." />
         <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
         <Control Id="Back" Type="PushButton" X="195" Y="302" Width="68" Height="18" Text="&lt; Back"><Publish Event="NewDialog" Value="ScopeOptions" /></Control>
         <Control Id="Install" Type="PushButton" X="270" Y="302" Width="68" Height="18" Default="yes" Text="Install"><Publish Event="EndDialog" Value="Return" /></Control>
@@ -90,7 +93,7 @@
       </Dialog>
       <Dialog Id="ScopeRemove" Width="430" Height="330" Title="Scopework Setup" NoMinimize="yes">
         <Control Id="Title" Type="Text" X="22" Y="18" Width="385" Height="26" Text="{\ScopeTitle}Uninstall Scopework?" />
-        <Control Id="Info" Type="Text" X="22" Y="80" Width="384" Height="68" Text="The application, Start menu shortcut and its PATH entry will be removed. Research files and the saved research-home setting remain on this computer." />
+        <Control Id="Info" Type="Text" X="22" Y="80" Width="384" Height="68" Text="The application, its shortcuts and its PATH entry will be removed. Research files and the saved research-home setting remain on this computer." />
         <Control Id="Home" Type="Text" X="22" Y="162" Width="384" Height="60" Text="Preserved research home:&#13;&#10;[RESEARCHHOME]" />
         <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
         <Control Id="Back" Type="PushButton" X="195" Y="302" Width="68" Height="18" Text="&lt; Back"><Publish Event="NewDialog" Value="ScopeMaintenance" /></Control>

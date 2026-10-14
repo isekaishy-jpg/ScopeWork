@@ -9,3 +9,11 @@
 /.tools/
 /dist/
 /.wix/
+*.msi
+*.wixpdb
+.env.*
+!.env.example
+/.vs/
+.DS_Store
+Thumbs.db
+Desktop.ini

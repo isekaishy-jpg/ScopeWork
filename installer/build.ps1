@@ -3,11 +3,11 @@ $ErrorActionPreference = 'Stop'
 $repository = Split-Path $PSScriptRoot -Parent
 Push-Location $repository
 try {
-    $metadata = & cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    $metadata = & cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { throw 'Cannot read package version.' }
     $Version = ($metadata.packages | Where-Object { $_.name -eq 'research-dashboard' }).version
     if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'MSI requires a three-part numeric release version.' }
-    & cargo build --release --bins
+    & cargo build --release --locked --bins
     if ($LASTEXITCODE -ne 0) { throw 'Rust build failed.' }
     $wixTool = Join-Path $repository '.tools\wix.exe'
     if (-not (Test-Path -LiteralPath $wixTool)) {
@@ -22,4 +22,7 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $repository 'dist') | Out-Null
     & $wixTool build (Join-Path $PSScriptRoot 'Package.wxs') (Join-Path $PSScriptRoot 'Wizard.wxs') -ext $uiExtension -culture en-US -arch x64 -d "Version=$Version" -d "BuildDir=$repository\target\release" -d "SourceDir=$repository" -o "$repository\dist\Scopework-$Version-x64.msi"
     if ($LASTEXITCODE -ne 0) { throw 'MSI build failed.' }
+    $package = Join-Path $repository "dist\Scopework-$Version-x64.msi"
+    $checksum = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$checksum  $([System.IO.Path]::GetFileName($package))" | Set-Content -LiteralPath "$package.sha256" -Encoding ascii
 } finally { Pop-Location }
