@@ -237,7 +237,27 @@ fn run(args: Args) -> Result<Value, String> {
         return Ok(json!({"opened":true,"home":home}));
     }
     paths::initialize(&home)?;
-    let mut lib = Library::open(home.join("projects"))?;
+    let selected = match &args.command {
+        Command::Project(
+            ProjectCommand::Show { project }
+            | ProjectCommand::SetBinary { project, .. }
+            | ProjectCommand::SetScope { project, .. },
+        ) => Some(project.as_str()),
+        Command::Node(
+            NodeCommand::List { project }
+            | NodeCommand::Batch { project, .. }
+            | NodeCommand::RepairLinks { project, .. }
+            | NodeCommand::Create { project, .. }
+            | NodeCommand::Show { project, .. }
+            | NodeCommand::Save { project, .. }
+            | NodeCommand::Complete { project, .. }
+            | NodeCommand::Reopen { project, .. },
+        ) => Some(project.as_str()),
+        Command::Deps(DepsCommand::Get { project, .. } | DepsCommand::Set { project, .. })
+        | Command::Status { project } => Some(project.as_str()),
+        _ => None,
+    };
+    let mut lib = Library::open_project(home.join("projects"), selected)?;
     match args.command {
         Command::Init => Ok(locations),
         Command::Project(command) => match command {

@@ -289,6 +289,9 @@ impl Library {
         self.persist(p)
     }
     pub fn open(root: PathBuf) -> Result<Self> {
+        Self::open_project(root, None)
+    }
+    pub fn open_project(root: PathBuf, selected: Option<&str>) -> Result<Self> {
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         let lock = std::fs::OpenOptions::new()
             .read(true)
@@ -307,6 +310,9 @@ impl Library {
         };
         for e in fs::read_dir(&lib.root).map_err(|e| e.to_string())? {
             let e = e.map_err(|e| e.to_string())?;
+            if selected.is_some_and(|id| e.file_name().to_string_lossy() != id) {
+                continue;
+            }
             if e.file_type().map_err(|e| e.to_string())?.is_symlink() {
                 continue;
             }
@@ -363,15 +369,12 @@ impl Library {
             }
         }
         lib.projects.sort_by_key(|p| p.name.clone());
+        // Read canonical reports on demand. Scanning every unstarted function's file on each
+        // command would make a whole-binary catalog dominate unrelated operations.
+        // Accepted reports are still read/hash-checked by effective-state evaluation.
         for p in 0..lib.projects.len() {
-            lib.validate_dependencies(p, &lib.projects[p].dependencies)?;
-            for path in lib.report_paths(p).values() {
-                if !path.is_file() {
-                    return Err(
-                        "Canonical report missing. Restore the missing report before continuing."
-                            .into(),
-                    );
-                }
+            if !lib.dir(p).join("app.md").is_file() {
+                return Err("Canonical app report missing. Restore it before continuing.".into());
             }
         }
         Ok(lib)
@@ -593,6 +596,11 @@ impl Library {
         {
             return Ok(());
         }
+        let states = if complete {
+            self.effective_all(p)
+        } else {
+            Default::default()
+        };
         if complete {
             if body.trim().is_empty() {
                 return Err(
@@ -608,10 +616,7 @@ impl Library {
                 .filter(|k| k.parent == Some(id) && !k.context_only)
                 .collect();
             if n.kind != Kind::Function
-                && (kids.is_empty()
-                    || kids
-                        .iter()
-                        .any(|k| self.effective(p, k.id) != Status::Complete))
+                && (kids.is_empty() || kids.iter().any(|k| states[&k.id] != Status::Complete))
             {
                 return Err("Every required child must be complete, and the parent needs its own compiled report.".into());
             }
@@ -621,7 +626,7 @@ impl Library {
                 .dependencies
                 .iter()
                 .filter(|e| e.dependent == id)
-                .any(|e| self.effective(p, e.prerequisite) != Status::Complete)
+                .any(|e| states[&e.prerequisite] != Status::Complete)
         {
             return Err(
                 "Every tagged prerequisite must be complete before this function can be complete."

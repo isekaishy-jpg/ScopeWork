@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4 - 2026-10-14
+
+- Load only the targeted project for project/node/dependency CLI commands.
+- Read unstarted reports on demand instead of scanning every canonical file on every command. Accepted reports retain content-hash validation.
+- Reuse one effective-state calculation when checking completion of a large parent.
+
 ## 0.4.3 - 2026-10-14
 
 - Add revision-checked batch creation, move, rename, membership and sibling ordering with resumable journals.

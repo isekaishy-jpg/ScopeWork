@@ -127,3 +127,7 @@ research node repair-links example --expect-revision $project.revision
 ```
 
 This repairs recognized internal references through the same journaled operation using current canonical identities. Changed reports require review; it does not reinstate stale completion or alter external evidence. The equivalent batch flag is `"repair_legacy_links": true`.
+
+## Large-library reads
+
+From 0.4.4, commands naming a project load that project only. Unstarted report files are read on demand; accepted reports remain hash-checked when evaluating progress. A missing report produces an error when opened or saved, and cannot retain accepted completion. Ordinary CLI reads are not an implicit audit of every unstarted file in every project. The library write lock is still shared, so a large active batch can temporarily make other commands return a busy error.
