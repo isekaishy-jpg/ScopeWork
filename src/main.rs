@@ -499,7 +499,13 @@ impl eframe::App for Dashboard {
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(bank.shrink2(Vec2::new(8.0, 16.0))),
                     |ui| {
+                        ui.set_clip_rect(ui.clip_rect().intersect(bank.shrink2(Vec2::new(8.0,16.0))));
                         egui::ScrollArea::both()
+                            .max_width(bank.width()-16.0)
+                            .max_height(bank.height()-32.0)
+                            .min_scrolled_width(0.0)
+                            .min_scrolled_height(0.0)
+                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                             .id_salt(("meters", self.project))
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
@@ -516,7 +522,7 @@ impl eframe::App for Dashboard {
                                     meter_width(count).max(title_w).max(footer_w)+padding*2.0
                                 }).collect();
                                 let content_width=panel_widths.chunks(2).map(|pair|pair.iter().sum::<f32>()+if pair.len()==2{gap}else{0.0}).fold(0.0_f32,f32::max);
-                                let (area,_)=ui.allocate_exact_size(Vec2::new(content_width,row_height*meter_count.div_ceil(2) as f32),egui::Sense::hover());
+                                let (area,_)=ui.allocate_exact_size(Vec2::new(content_width,(row_height*meter_count.div_ceil(2) as f32-gap).max(0.0)),egui::Sense::hover());
                                 let base = area.min;
                                 let p = ui.painter().clone();
                                 for ri in 0..data.len() {
