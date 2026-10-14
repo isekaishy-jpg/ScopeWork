@@ -453,11 +453,11 @@ impl eframe::App for Dashboard {
                     &p,
                     well.left() + 7.0,
                     well.top() + 164.0,
-                    format!("{} / {} funcs", completed * scale, n * scale),
+                    format!("{} functions", n * scale),
                     GREEN,
                 );
                 let bank = r(149.0, top, w - 164.0, meter_h);
-                group_box(&p, bank, "Function groups");
+                group_box(&p, bank, "Research chunks");
                 // Four named chunks per architecture row, with readable meters and counts.
                 let row_height = (bank.height() - 28.0) / 6.0;
                 let col_width = (bank.width() - 46.0) / 4.0;
@@ -485,14 +485,14 @@ impl eframe::App for Dashboard {
                             &p,
                             x,
                             meter.bottom() + 10.0,
-                            format!("{} / {} funcs done", finished * scale, num * scale),
+                            format!("Chunk: {}", ["Done", "In progress", "Not done"][state]),
                             Color32::BLACK,
                         );
                         text(
                             &p,
                             x,
                             meter.bottom() + 24.0,
-                            ["Done", "In progress", "Not done"][state],
+                            format!("Functions: {}", num * scale),
                             Color32::from_gray(65),
                         );
                         let hit = ui.interact(
@@ -519,9 +519,8 @@ impl eframe::App for Dashboard {
                             );
                         }
                         hit.on_hover_text(format!(
-                            "{} / {chunk}: {} / {} functions done - {}",
+                            "{} / {chunk}: {} functions - {}",
                             data[ri].name,
-                            finished * scale,
                             num * scale,
                             ["Done", "In progress", "Not done"][state]
                         ));
@@ -547,10 +546,7 @@ impl eframe::App for Dashboard {
                 for (i, (label, value)) in [
                     ("Architecture", data[selected.0].name.to_string()),
                     ("Chunk", name.to_string()),
-                    (
-                        "Done / total",
-                        format!("{} / {}", completed * scale, n * scale),
-                    ),
+                    ("Functions", format!("{}", n * scale)),
                     (
                         "Status",
                         ["Done", "In progress", "Not done"][status].to_string(),

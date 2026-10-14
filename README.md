@@ -21,3 +21,5 @@ Windows executable: `target/release/research-dashboard.exe`.
 ## Research boundaries
 
 Keep Stock and Forever evidence and acceptance records separate. Pin real inventories to exact binary identities. Groups can reference shared functions, but totals must count unique functions. Completion must eventually be supported by agreed deliverables and evidence, not function counts alone. Preserve an unclassified category until binary evidence supports classification.
+
+Each individual bar is a research chunk. Its header identifies it; the two lines underneath separately report chunk status and function count. This labeling does not change the meter layout or introduce individually selectable pips.
