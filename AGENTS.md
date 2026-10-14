@@ -14,6 +14,7 @@ Build one Rust GUI for managing isolated binary research projects. Initial proje
 - Keep source installations and binaries read-only. Do not commit binaries, private captures, credentials, or research datasets.
 - Preserve provenance and distinguish observed, specification-defined, and inferred claims.
 - Do not add tests or run test commands unless the user asks for testing or verification.
+- File narrow complaints about the app as individual Markdown reports in the single repository-root complaints/ folder. Follow complaints/README.md; filing the report is the entire process.
 
 - Every research project owns tools/profiles, tools/scripts, tools/instrumentation and tools/bin. Shared tool databases and working data belong in tools/workspaces, tools/logs or tools/scratch. Function-specific captures, exports, logs and evidence belong in that function's data/ folder. Do not create project-level data/evidence dumps or parallel research reports. Canonical chunk and architecture reports are <kind>/<id>/research.md; the app report is app.md.
 

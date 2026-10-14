@@ -55,6 +55,8 @@ All research data is local and excluded from Git. Default root is `data/projects
 
 ## Run
 
+Agents can file narrow app complaints in [complaints/](complaints/README.md), one Markdown report per issue. This is a single shared folder across all research projects; filing the report is the entire process.
+
 ```powershell
 cargo run --release
 ```
