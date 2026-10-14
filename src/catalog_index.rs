@@ -170,6 +170,18 @@ impl<'a> Index<'a> {
         cache.insert(id, state);
         state
     }
+    pub fn states_for(
+        &self,
+        dir: &Path,
+        ids: impl IntoIterator<Item = u64>,
+    ) -> HashMap<u64, Status> {
+        let mut cache = HashMap::new();
+        let mut active = HashSet::new();
+        for id in ids {
+            self.state(dir, id, &mut cache, &mut active);
+        }
+        cache
+    }
     pub fn states(&self, dir: &Path) -> HashMap<u64, Status> {
         let mut cache = HashMap::new();
         let mut active = HashSet::new();

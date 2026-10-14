@@ -45,7 +45,7 @@ pub struct Order {
 pub struct ReportBatch {
     pub schema: u32,
     pub binary: String,
-    pub expect_revision: u64,
+    pub expect_revision: Option<u64>,
     pub reports: Vec<ReportSave>,
 }
 #[derive(Deserialize)]
@@ -98,7 +98,12 @@ fn same(a: &Project, b: &Project) -> bool {
     serde_json::to_value(a).unwrap() == serde_json::to_value(b).unwrap()
 }
 fn pending(root: &Path) -> PathBuf {
-    root.join("tools/workspaces/catalog-transactions/pending")
+    let legacy = root.join("tools/workspaces/catalog-transactions/pending");
+    if legacy.join("journal.json").is_file() {
+        legacy
+    } else {
+        root.join("tools/workspaces/catalog-transactions-v4/pending")
+    }
 }
 fn staged(root: &Path, id: u64) -> PathBuf {
     pending(root).join("moves").join(id.to_string())
@@ -233,6 +238,59 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
 }
 
 impl Library {
+    pub(super) fn commit_report(
+        &mut self,
+        p: usize,
+        before: Project,
+        after: Project,
+        id: u64,
+        original: String,
+        output: String,
+    ) -> Result<()> {
+        self.commit_metadata(p, before, after, vec![(id, original, output)], vec![])
+    }
+    pub(super) fn commit_metadata(
+        &mut self,
+        p: usize,
+        before: Project,
+        after: Project,
+        reports: Vec<(u64, String, String)>,
+        dependencies: Vec<u64>,
+    ) -> Result<()> {
+        let index = catalog_index::Index::new(&before);
+        let edits = reports
+            .into_iter()
+            .map(|(id, original, output)| {
+                let path = index.paths[&id].clone();
+                Edit {
+                    id,
+                    old: Some(path.clone()),
+                    new: path,
+                    before: Some(original),
+                    after: output,
+                }
+            })
+            .collect();
+        let journal = Journal {
+            before,
+            after,
+            edits,
+            moves: vec![],
+            dependencies,
+            sidecars: vec![],
+        };
+        let root = self.dir(p);
+        let folder = prepare_pending(&root)?;
+        atomic(
+            &folder.join("journal.json"),
+            &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
+        )?;
+        #[cfg(debug_assertions)]
+        if std::env::var("SCOPEWORK_METADATA_FAIL_AT").as_deref() == Ok("journal") {
+            std::process::exit(99);
+        }
+        resume(&root, &mut self.projects[p])
+    }
     pub fn read_reports(&self, p: usize, ids: &[u64]) -> Result<serde_json::Value> {
         let project = &self.projects[p];
         let index = catalog_index::Index::new(project);
@@ -247,7 +305,7 @@ impl Library {
             let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
             let (body, evidence) = parts(&text)?;
             reports.push(serde_json::json!({"id":id,"report":path,"body":body,"evidence":evidence,
-                "token":hash(&format!("{}\n{text}",project.revision)),"criteria":node.kind.completion_criteria()}));
+                "token":edit_tokens::draft(project,&index,*id,&text)?,"criteria":node.kind.completion_criteria()}));
         }
         Ok(
             serde_json::json!({"project":project.id,"binary":project.binary,"revision":project.revision,"reports":reports}),
@@ -257,13 +315,14 @@ impl Library {
     /// Independently validate all reports against one snapshot before any writes.
     /// Reuse the catalog transaction journal; saving can never attest completion.
     pub fn save_reports(&mut self, p: usize, batch: &ReportBatch) -> Result<Vec<u64>> {
-        if self._lock.is_none() {
+        if !self.writable(p) {
             return self.write_project(p, |l, p| l.save_reports(p, batch));
         }
         let before = self.projects[p].clone();
-        if batch.schema != 1
+        if !matches!(batch.schema, 1 | 2)
             || batch.binary != before.binary
-            || batch.expect_revision != before.revision
+            || (batch.schema == 1 && batch.expect_revision.is_none())
+            || batch.expect_revision.is_some_and(|r| r != before.revision)
         {
             return Err("Report batch schema, binary identity or revision does not match. Reload and review.".into());
         }
@@ -286,7 +345,12 @@ impl Library {
             let path = &index.paths[&input.id];
             contained(&root, &root.join(path))?;
             let original = fs::read_to_string(root.join(path)).map_err(|e| e.to_string())?;
-            if hash(&format!("{}\n{original}", before.revision)) != input.expect {
+            let current = if input.expect.starts_with("d4:") {
+                edit_tokens::draft(&before, &index, input.id, &original)?
+            } else {
+                hash(&format!("{}\n{original}", before.revision))
+            };
+            if current != input.expect {
                 return Err(format!(
                     "Report {} changed. Reload and review the batch; no reports were saved.",
                     input.id
@@ -363,12 +427,7 @@ impl Library {
             dependencies: vec![],
             sidecars: vec![],
         };
-        let folder = pending(&root);
-        contained(&root, &folder)?;
-        if folder.exists() {
-            return Err("Pending transaction exists; reopen to resume it".into());
-        }
-        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let folder = prepare_pending(&root)?;
         atomic(
             &folder.join("journal.json"),
             &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
@@ -378,9 +437,10 @@ impl Library {
     }
 
     pub fn batch(&mut self, p: usize, batch: &Batch) -> Result<Vec<u64>> {
-        if self._lock.is_none() {
+        if !self.writable(p) {
             return self.write_project(p, |l, p| l.batch(p, batch));
         }
+        self.ensure_structural(p)?;
         let before = self.projects[p].clone();
         if batch.schema != 1
             || batch.expect_revision != before.revision
@@ -557,8 +617,15 @@ impl Library {
                     continue;
                 }
             } else {
-                if root.join(&new.paths[&n.id]).exists() {
-                    return Err("New canonical report already exists".into());
+                if root
+                    .join(&new.paths[&n.id])
+                    .parent()
+                    .is_some_and(|p| p.exists())
+                {
+                    return Err(
+                        "New canonical folder already exists; refusing to adopt unrelated files"
+                            .into(),
+                    );
                 }
                 None
             };
@@ -642,7 +709,8 @@ impl Library {
             }
         }
         after.revision += 1;
-        after.layout_version = 3;
+        after.layout_version = before.layout_version.max(3);
+        after.structural_epoch += 1;
         let mut sidecars = vec![];
         let annotation_path = root.join("tools/profiles/annotations.json");
         if !moves.is_empty() && annotation_path.is_file() {
@@ -700,6 +768,28 @@ impl Library {
     }
 }
 
+fn prepare_pending(root: &Path) -> Result<PathBuf> {
+    let folder = pending(root);
+    contained(root, &folder)?;
+    if folder.exists() {
+        for entry in fs::read_dir(&folder).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let temp = name
+                .strip_prefix("journal.")
+                .and_then(|s| s.strip_suffix(".pending"))
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+            if !temp || !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+                return Err(
+                    "Pending transaction exists; reopen to recover or inspect its journal".into(),
+                );
+            }
+        }
+    }
+    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    Ok(folder)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,7 +834,7 @@ mod tests {
         ReportBatch {
             schema: 1,
             binary: lib.projects[0].binary.clone(),
-            expect_revision: lib.projects[0].revision,
+            expect_revision: Some(lib.projects[0].revision),
             reports: view["reports"]
                 .as_array()
                 .unwrap()
@@ -823,7 +913,7 @@ mod tests {
         let mut external = inputs(&lib, &[3, 4]);
         fs::write(lib.path(0, 4).unwrap(), "external edit").unwrap();
         assert!(lib.save_reports(0, &external).is_err());
-        external.expect_revision += 1;
+        external.expect_revision = external.expect_revision.map(|r| r + 1);
         assert!(lib.save_reports(0, &external).is_err());
         assert_eq!(fs::read(lib.path(0, 3).unwrap()).unwrap(), original);
     }
@@ -852,7 +942,7 @@ mod tests {
         let mut lib = workspace.populate("alpha");
         lib.set_dependencies(0, 4, "1000").unwrap();
         for id in [3, 4, 2, 1, 0] {
-            let token = lib.report_token(0, id).unwrap();
+            let token = lib.completion_token(0, id).unwrap();
             lib.save_report(0, id, "Reviewed fixture", "Fixture evidence", true, &token)
                 .unwrap();
         }
@@ -878,7 +968,7 @@ mod tests {
         assert!(
             lib.dir(0)
                 .join(format!(
-                    "tools/workspaces/catalog-transactions/revision-{}",
+                    "tools/workspaces/catalog-transactions-v4/revision-{}",
                     revision + 1
                 ))
                 .is_dir()
@@ -892,7 +982,7 @@ mod tests {
         lib.save_reports(0, &batch).unwrap();
         let root = lib.dir(0);
         let receipt = root.join(format!(
-            "tools/workspaces/catalog-transactions/revision-{}",
+            "tools/workspaces/catalog-transactions-v4/revision-{}",
             lib.projects[0].revision
         ));
         let journal: Journal =

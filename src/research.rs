@@ -79,6 +79,12 @@ pub struct Project {
     pub research_scope: String,
     pub next_id: u64,
     pub revision: u64,
+    #[serde(default)]
+    pub structural_epoch: u64,
+    #[serde(default)]
+    pub active_import: Option<String>,
+    #[serde(default)]
+    pub last_import: Option<String>,
     pub nodes: Vec<Node>,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
@@ -86,12 +92,18 @@ pub struct Project {
 fn legacy_layout() -> u32 {
     1
 }
+#[path = "background.rs"]
+mod background;
 #[path = "catalog_batch.rs"]
 mod catalog_batch;
 #[path = "catalog_browser.rs"]
 mod catalog_browser;
 #[path = "catalog_index.rs"]
 mod catalog_index;
+#[path = "edit_tokens.rs"]
+mod edit_tokens;
+#[path = "imports.rs"]
+pub mod imports;
 #[path = "layout.rs"]
 mod layout;
 pub use catalog_batch::Batch;
@@ -101,8 +113,16 @@ fn hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let temp = path.with_extension("pending");
-    fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    let temp = path.with_extension(format!("{}.pending", uuid::Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    file.write_all(bytes).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
     fs::rename(&temp, path).map_err(|e| format!("Cannot replace {}: {e}", path.display()))
 }
 fn valid_id(id: &str) -> bool {
@@ -111,7 +131,10 @@ fn valid_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && !["con", "prn", "aux", "nul", "com1", "lpt1"].contains(&id)
+        && !["con", "prn", "aux", "nul"].contains(&id)
+        && !(id.len() == 4
+            && (id.starts_with("com") || id.starts_with("lpt"))
+            && matches!(id.as_bytes()[3], b'1'..=b'9'))
 }
 fn relative(project: &Project, n: &Node) -> String {
     if n.kind == Kind::App {
@@ -188,10 +211,11 @@ pub struct Library {
 // executables take it exclusively, so mixed-version processes cannot race writes.
 struct OperationLocks {
     project: Option<String>,
+    writable: bool,
     _project: Option<fs::File>,
     _gate: fs::File,
 }
-fn project_lock(root: &Path, id: &str) -> Result<fs::File> {
+fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
     let folder = root.join(".project-locks");
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let file = fs::OpenOptions::new()
@@ -201,14 +225,50 @@ fn project_lock(root: &Path, id: &str) -> Result<fs::File> {
         .truncate(false)
         .open(folder.join(format!("{id}.lock")))
         .map_err(|e| e.to_string())?;
-    file.try_lock().map_err(|_| {
+    (if writable {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    })
+    .map_err(|_| {
         format!("Research project '{id}' is busy with another operation. Retry shortly.")
     })?;
     Ok(file)
 }
 impl Library {
+    fn commit_lease(root: &Path, id: &str) -> Result<OperationLocks> {
+        if !valid_id(id) {
+            return Err("Invalid project ID".into());
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let result: Result<OperationLocks> = (|| {
+                let gate = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(root.join(".library.lock"))
+                    .map_err(|e| e.to_string())?;
+                gate.try_lock_shared()
+                    .map_err(|_| "Research library is busy".to_string())?;
+                Ok(OperationLocks {
+                    project: Some(id.into()),
+                    writable: true,
+                    _project: Some(project_lock(root, id, true)?),
+                    _gate: gate,
+                })
+            })();
+            match result {
+                Err(e) if e.contains("is busy") && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                other => return other,
+            }
+        }
+    }
     pub fn set_scope(&mut self, p: usize, scope: &str, expected_revision: u64) -> Result<()> {
-        if self._lock.is_none() {
+        if !self.writable(p) {
             return self.write_project(p, |l, p| l.set_scope(p, scope, expected_revision));
         }
         if self.projects[p].revision != expected_revision {
@@ -227,10 +287,6 @@ impl Library {
         self.projects[p].research_scope = scope.into();
         self.projects[p].revision += 1;
         self.persist(p)
-    }
-    pub fn report_token(&self, p: usize, id: u64) -> Result<String> {
-        let content = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
-        Ok(hash(&format!("{}\n{content}", self.projects[p].revision)))
     }
     pub fn release(&mut self) {
         self._lock = None;
@@ -261,6 +317,7 @@ impl Library {
             .ok_or("Project no longer exists")?
             .id
             .clone();
+        self.release();
         let mut fresh = Self::open_project(self.root.clone(), Some(&id))?;
         let current = fresh
             .projects
@@ -280,9 +337,10 @@ impl Library {
         Ok(())
     }
     pub fn set_binary(&mut self, p: usize, binary: &str) -> Result<()> {
-        if self._lock.is_none() {
+        if !self.writable(p) {
             return self.write_project(p, |l, p| l.set_binary(p, binary));
         }
+        self.ensure_structural(p)?;
         if binary.trim().is_empty() {
             return Err("Binary identity cannot be empty.".into());
         }
@@ -293,142 +351,247 @@ impl Library {
         {
             return Err("Binary identity is locked after adding functions.".into());
         }
-        self.projects[p].binary = binary.into();
-        let ids: Vec<_> = self.projects[p].nodes.iter().map(|n| n.id).collect();
-        for id in ids {
-            let (body, evidence) = self.read(p, id)?;
-            self.write_report(p, id, &body, &evidence)?;
-            let n = self.projects[p]
-                .nodes
-                .iter_mut()
-                .find(|n| n.id == id)
-                .unwrap();
-            n.accepted_hash = None;
-            n.status = Status::InProgress;
-            n.revision += 1;
+        let before = self.projects[p].clone();
+        let mut after = before.clone();
+        after.structural_epoch += 1;
+        after.binary = binary.into();
+        after.revision += 1;
+        let old_index = catalog_index::Index::new(&before);
+        let index = catalog_index::Index::new(&after);
+        let mut reports = vec![];
+        for node in &before.nodes {
+            let original = fs::read_to_string(self.dir(p).join(&old_index.paths[&node.id]))
+                .map_err(|e| e.to_string())?;
+            edit_tokens::draft(&before, &old_index, node.id, &original)?;
+            let (body, evidence) = edit_tokens::parts(&original)?;
+            reports.push((
+                node.id,
+                original.clone(),
+                index.render(&after, node.id, body, evidence),
+            ));
         }
-        self.projects[p].revision += 1;
-        self.persist(p)
+        for node in &mut after.nodes {
+            node.accepted_hash = None;
+            node.accepted_prerequisites.clear();
+            if node.status == Status::Complete {
+                node.status = Status::InProgress;
+            }
+            node.revision += 1;
+        }
+        self.commit_metadata(p, before, after, reports, vec![])
+    }
+
+    fn writable(&self, p: usize) -> bool {
+        self._lock.as_ref().is_some_and(|l| {
+            l.writable && l.project.as_deref() == Some(self.projects[p].id.as_str())
+        })
+    }
+    fn ensure_structural(&self, p: usize) -> Result<()> {
+        if let Some(job) = &self.projects[p].active_import {
+            return Err(format!(
+                "structural_job_conflict: import {job} owns the structural reservation; pause does not release it. Commit or cancel the job first."
+            ));
+        }
+        Ok(())
     }
     pub fn open(root: PathBuf) -> Result<Self> {
         Self::open_project(root, None)
     }
     pub fn open_project(root: PathBuf, selected: Option<&str>) -> Result<Self> {
-        if selected.is_some_and(|id| !valid_id(id)) {
+        Self::open_mode(root, selected, true, true)
+    }
+    pub fn read_project(root: PathBuf, selected: &str) -> Result<Self> {
+        Self::open_mode(root, Some(selected), false, true)
+    }
+    fn open_mode(
+        root: PathBuf,
+        selected: Option<&str>,
+        writable: bool,
+        recover: bool,
+    ) -> Result<Self> {
+        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let Some(id) = selected else {
+            let mut lib = Self {
+                root: root.clone(),
+                projects: vec![],
+                busy_projects: vec![],
+                _lock: None,
+            };
+            for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                if entry.file_type().map_err(|e| e.to_string())?.is_symlink()
+                    || !entry.path().join("project.json").is_file()
+                {
+                    continue;
+                }
+                let id = entry.file_name().to_string_lossy().into_owned();
+                match Self::read_project(root.clone(), &id) {
+                    Ok(mut project) => lib.projects.append(&mut project.projects),
+                    Err(e) if e.contains("is busy") => lib.busy_projects.push(id),
+                    Err(e) => return Err(e),
+                }
+            }
+            lib.projects.sort_by_key(|p| p.name.clone());
+            return Ok(lib);
+        };
+        if !valid_id(id) {
             return Err("Invalid project identity".into());
         }
-        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(root.join(".library.lock"))
-            .map_err(|e| e.to_string())?;
-        lock.try_lock_shared().map_err(|_| {
-            "Research library is busy with another operation. Retry shortly.".to_string()
-        })?;
-        let selected_lock = selected.map(|id| project_lock(&root, id)).transpose()?;
-        let mut lib = Self {
-            root,
-            projects: vec![],
-            busy_projects: vec![],
-            _lock: Some(OperationLocks {
-                project: selected.map(str::to_owned),
-                _project: selected_lock,
-                _gate: lock,
-            }),
+        let acquire = |exclusive_gate: bool, write: bool| -> Result<OperationLocks> {
+            let gate = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(root.join(".library.lock"))
+                .map_err(|e| e.to_string())?;
+            (if exclusive_gate {
+                gate.try_lock()
+            } else {
+                gate.try_lock_shared()
+            })
+            .map_err(|_| {
+                "Research library is busy with another operation. Retry shortly.".to_string()
+            })?;
+            Ok(OperationLocks {
+                project: Some(id.into()),
+                writable: write,
+                _project: Some(project_lock(&root, id, write)?),
+                _gate: gate,
+            })
         };
-        for e in fs::read_dir(&lib.root).map_err(|e| e.to_string())? {
-            let e = e.map_err(|e| e.to_string())?;
-            if selected.is_some_and(|id| e.file_name().to_string_lossy() != id) {
-                continue;
+        let mut locks = acquire(false, writable)?;
+        let dir = root.join(id);
+        if dir.exists() {
+            layout::inside(&root, &dir)?;
+        }
+        let path = dir.join("project.json");
+        let mut project: Option<Project> = if path.is_file() {
+            Some(
+                serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
+        if project.as_ref().is_some_and(|p| p.layout_version < 4) {
+            if !recover {
+                return Err("migration_required: open this project with the current CLI before planning an import".into());
             }
-            if e.file_type().map_err(|e| e.to_string())?.is_symlink() {
-                continue;
+            // Never upgrade a held shared lease. Exclude legacy writers during migration.
+            drop(locks);
+            locks = acquire(true, true)?;
+            let mut p: Project =
+                serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+            catalog_batch::resume(&dir, &mut p)?;
+            Self::validate_project(&p, id)?;
+            layout::migrate(&dir, &mut p)?;
+            if p.layout_version < 4 {
+                let backup = dir.join("tools/workspaces/layout-migration-v4");
+                fs::create_dir_all(&backup).map_err(|e| e.to_string())?;
+                if !backup.join("before.json").exists() {
+                    atomic(
+                        &backup.join("before.json"),
+                        &serde_json::to_vec_pretty(&p).map_err(|e| e.to_string())?,
+                    )?;
+                }
+                p.layout_version = 4;
+                atomic(
+                    &path,
+                    &serde_json::to_vec_pretty(&p).map_err(|e| e.to_string())?,
+                )?;
+                atomic(
+                    &backup.join("migration.json"),
+                    b"{\"format\":4,\"authored_reports_changed\":false}",
+                )?;
             }
-            let path = e.path().join("project.json");
-            if path.exists() {
-                let id = e.file_name().to_string_lossy().into_owned();
-                if !valid_id(&id) {
-                    return Err("Invalid project identity".into());
-                }
-                let _snapshot_lock = if selected.is_none() {
-                    match project_lock(&lib.root, &id) {
-                        Ok(lock) => Some(lock),
-                        Err(error) if error.contains("is busy") => {
-                            lib.busy_projects.push(id);
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                } else {
-                    None
-                };
-                let mut p: Project =
-                    serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
-                        .map_err(|e| e.to_string())?;
-                if !valid_id(&p.id) || e.file_name().to_string_lossy() != p.id {
-                    return Err("Invalid project identity".into());
-                }
-                catalog_batch::resume(&lib.root.join(&p.id), &mut p)?;
-                let lookup: std::collections::HashMap<_, _> =
-                    p.nodes.iter().map(|n| (n.id, n)).collect();
-                let mut ids = std::collections::HashSet::new();
-                let mut rvas = std::collections::HashSet::new();
-                for n in &p.nodes {
-                    if !ids.insert(n.id) {
-                        return Err("Duplicate node identity".into());
-                    }
-                    if n.kind == Kind::Function && (n.rva.is_none() || !rvas.insert(n.rva)) {
-                        return Err("Invalid or duplicate function RVA".into());
-                    }
-                    if n.kind != Kind::App {
-                        let parent = n
-                            .parent
-                            .and_then(|id| lookup.get(&id).copied())
-                            .ok_or("Missing report parent")?;
-                        if parent.kind.child() != Some(n.kind) {
-                            return Err("Invalid research hierarchy".into());
-                        }
-                    } else if n.parent.is_some() {
-                        return Err("App cannot have a parent".into());
-                    }
-                }
-                if p.nodes.iter().filter(|n| n.kind == Kind::App).count() != 1 {
-                    return Err("Project must contain exactly one app report".into());
-                }
-                if !p.nodes.iter().any(|n| n.id == 0 && n.kind == Kind::App)
-                    || p.nodes.iter().any(|n| n.id >= p.next_id)
-                {
-                    return Err("Invalid app ID or next node ID".into());
-                }
-                // Reject malformed dependencies before any migration changes files.
-                let validation = Self {
-                    root: lib.root.clone(),
-                    projects: vec![p.clone()],
-                    busy_projects: vec![],
-                    _lock: None,
-                };
-                validation.validate_dependencies(0, &p.dependencies)?;
-                layout::migrate(&lib.root.join(&p.id), &mut p)?;
-                ensure_folders(&lib.root.join(&p.id))?;
-                if !lib.root.join(&p.id).join("app.md").is_file() {
-                    return Err(
-                        "Canonical app report missing. Restore it before continuing.".into(),
-                    );
-                }
-                lib.projects.push(p);
+            drop(locks);
+            locks = acquire(false, writable)?;
+            project = Some(
+                serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        if let Some(p) = &mut project {
+            if p.layout_version != 4 {
+                return Err("Unsupported catalog format; upgrade Scopework.".into());
+            }
+            let pending = dir
+                .join("tools/workspaces/catalog-transactions/pending/journal.json")
+                .is_file()
+                || dir
+                    .join("tools/workspaces/catalog-transactions-v4/pending/journal.json")
+                    .is_file()
+                || imports::needs_recovery(&dir, p);
+            if pending && !recover {
+                return Err(
+                    "recovery_required: resolve pending publication before planning an import"
+                        .into(),
+                );
+            }
+            if pending && !locks.writable {
+                drop(locks);
+                locks = acquire(false, true)?;
+                *p = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+            }
+            if locks.writable {
+                catalog_batch::resume(&dir, p)?;
+                imports::recover(&dir, p)?;
+            }
+            Self::validate_project(p, id)?;
+            if !dir.join("app.md").is_file() {
+                return Err("Canonical app report missing. Restore it before continuing.".into());
             }
         }
-        lib.projects.sort_by_key(|p| p.name.clone());
-        // Read canonical reports on demand. Scanning every unstarted function's file on each
-        // command would make a whole-binary catalog dominate unrelated operations.
-        // Accepted reports are still read/hash-checked by effective-state evaluation.
-        if selected.is_none() {
-            lib.release();
+        Ok(Self {
+            root,
+            projects: project.into_iter().collect(),
+            busy_projects: vec![],
+            _lock: Some(locks),
+        })
+    }
+    fn validate_project(p: &Project, id: &str) -> Result<()> {
+        use std::collections::{HashMap, HashSet};
+        if p.id != id || !valid_id(&p.id) {
+            return Err("Invalid project identity".into());
         }
-        Ok(lib)
+        let lookup: HashMap<_, _> = p.nodes.iter().map(|n| (n.id, n)).collect();
+        let mut ids = HashSet::new();
+        let mut rvas = HashSet::new();
+        for n in &p.nodes {
+            if !ids.insert(n.id) {
+                return Err("Duplicate node identity".into());
+            }
+            if n.kind == Kind::Function && (n.rva.is_none() || !rvas.insert(n.rva)) {
+                return Err("Invalid or duplicate function RVA".into());
+            }
+            if n.kind != Kind::App {
+                let parent = n
+                    .parent
+                    .and_then(|id| lookup.get(&id))
+                    .ok_or("Missing report parent")?;
+                if parent.kind.child() != Some(n.kind) {
+                    return Err("Invalid research hierarchy".into());
+                }
+            } else if n.parent.is_some() {
+                return Err("App cannot have a parent".into());
+            }
+        }
+        if p.nodes.iter().filter(|n| n.kind == Kind::App).count() != 1
+            || !p.nodes.iter().any(|n| n.id == 0 && n.kind == Kind::App)
+            || p.nodes.iter().any(|n| n.id >= p.next_id)
+        {
+            return Err("Invalid app ID or next node ID".into());
+        }
+        let validation = Self {
+            root: PathBuf::new(),
+            projects: vec![p.clone()],
+            busy_projects: vec![],
+            _lock: None,
+        };
+        validation.validate_dependencies(0, &p.dependencies)
     }
     fn dir(&self, p: usize) -> PathBuf {
         self.root.join(&self.projects[p].id)
@@ -443,7 +606,7 @@ impl Library {
         if self
             ._lock
             .as_ref()
-            .is_none_or(|locks| locks.project.as_deref() != Some(id))
+            .is_none_or(|locks| !locks.writable || locks.project.as_deref() != Some(id))
         {
             let mut fresh = Self::open_project(self.root.clone(), Some(id))?;
             fresh.create(id, name, binary)?;
@@ -458,10 +621,18 @@ impl Library {
             return Err("That project already exists.".into());
         }
         let dir = self.root.join(id);
-        fs::create_dir(&dir).map_err(|e| e.to_string())?;
-        ensure_folders(&dir)?;
-        self.projects.push(Project {
-            layout_version: 3,
+        let stage = self
+            .root
+            .join(".project-staging")
+            .join(uuid::Uuid::new_v4().to_string());
+        layout::inside(&self.root, &stage)?;
+        fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+        ensure_folders(&stage)?;
+        let project = Project {
+            layout_version: 4,
+            structural_epoch: 0,
+            active_import: None,
+            last_import: None,
             id: id.into(),
             name: name.into(),
             binary: binary.into(),
@@ -481,10 +652,16 @@ impl Library {
                 accepted_hash: None,
                 accepted_prerequisites: Default::default(),
             }],
-        });
-        let p = self.projects.len() - 1;
-        self.write_report(p, 0, "", "")?;
-        self.persist(p)
+        };
+        let text = catalog_index::Index::new(&project).render(&project, 0, "", "");
+        atomic(&stage.join("app.md"), text.as_bytes())?;
+        atomic(
+            &stage.join("project.json"),
+            &serde_json::to_vec_pretty(&project).map_err(|e| e.to_string())?,
+        )?;
+        fs::rename(&stage, &dir).map_err(|e| e.to_string())?;
+        self.projects.push(project);
+        Ok(())
     }
     pub fn path(&self, p: usize, id: u64) -> Result<PathBuf> {
         let n = self.projects[p]
@@ -492,7 +669,9 @@ impl Library {
             .iter()
             .find(|n| n.id == id)
             .ok_or("Unknown report")?;
-        Ok(self.dir(p).join(relative(&self.projects[p], n)))
+        let path = self.dir(p).join(relative(&self.projects[p], n));
+        layout::inside(&self.dir(p), &path)?;
+        Ok(path)
     }
     pub fn read(&self, p: usize, id: u64) -> Result<(String, String)> {
         let full = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
@@ -505,25 +684,6 @@ impl Library {
             .split_once("\n<!-- research-evidence -->\n")
             .ok_or("Evidence marker missing")?;
         Ok((body.to_string(), evidence.to_string()))
-    }
-    fn write_report(&self, p: usize, id: u64, body: &str, evidence: &str) -> Result<()> {
-        if body.contains("<!-- research-") || evidence.contains("<!-- research-") {
-            return Err("Reserved report markers cannot appear in report content.".into());
-        }
-        let project = &self.projects[p];
-        let n = project
-            .nodes
-            .iter()
-            .find(|n| n.id == id)
-            .ok_or("Unknown report")?;
-        let md = catalog_index::Index::new(project).render(project, id, body, evidence);
-        let path = self.path(p, id)?;
-        let folder = path.parent().ok_or("Missing report folder")?;
-        fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-        if n.kind == Kind::Function {
-            fs::create_dir_all(folder.join("data")).map_err(|e| e.to_string())?;
-        }
-        atomic(&path, md.as_bytes())
     }
     fn invalidate(&mut self, p: usize, id: u64) {
         let mut cursor = self.projects[p]
@@ -571,9 +731,10 @@ impl Library {
             .unwrap_or(Status::NotStarted)
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
-        if self._lock.is_none() {
+        if !self.writable(p) {
             return self.write_project(p, |l, p| l.add(p, parent, name, rva));
         }
+        self.ensure_structural(p)?;
         if name.trim().is_empty() {
             return Err("Enter a name.".into());
         }
@@ -601,33 +762,24 @@ impl Library {
         } else {
             None
         };
-        let id = self.projects[p].next_id;
-        self.projects[p].next_id += 1;
-        let relnode = Node {
-            context_only: false,
-            id,
-            parent: Some(parent),
-            kind,
-            name: name.trim().into(),
-            rva: address,
-            status: Status::NotStarted,
-            revision: 0,
-            accepted_hash: None,
-            accepted_prerequisites: Default::default(),
+        let batch = Batch {
+            schema: 1,
+            binary: self.projects[p].binary.clone(),
+            expect_revision: self.projects[p].revision,
+            create: vec![catalog_batch::Create {
+                parent,
+                name: name.trim().into(),
+                rva: address,
+                context_only: false,
+            }],
+            update: vec![],
+            reorder: vec![],
+            repair_legacy_links: false,
         };
-        let path = self.dir(p).join(relative(&self.projects[p], &relnode));
-        if path.exists() {
-            return Err("Canonical file already exists; refusing to replace it.".into());
-        }
-        let (body, evidence) = self.read(p, parent)?;
-        self.projects[p].nodes.push(relnode);
-        self.write_report(p, id, "", "")?;
-        self.invalidate(p, id);
-        self.write_report(p, parent, &body, &evidence)?;
-        self.projects[p].revision += 1;
-        self.sync_dependency_subset(p, Some(&[id].into_iter().collect()))?;
-        self.persist(p)?;
-        Ok(id)
+        self.batch(p, &batch)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Creation returned no identity".into())
     }
     pub fn save_report(
         &mut self,
@@ -638,13 +790,31 @@ impl Library {
         complete: bool,
         expected: &str,
     ) -> Result<()> {
-        if self._lock.is_none() {
+        if !self.writable(p) {
             return self.write_project(p, |l, p| {
                 l.save_report(p, id, body, evidence, complete, expected)
             });
         }
-        if self.report_token(p, id)? != expected {
-            return Err("This report changed outside the editor. Reload it before saving; your text has not been overwritten.".into());
+        self.check_edit_token(
+            p,
+            id,
+            expected,
+            if complete { "completion" } else { "draft" },
+        )?;
+        if !complete {
+            let batch = catalog_batch::ReportBatch {
+                schema: 2,
+                binary: self.projects[p].binary.clone(),
+                expect_revision: None,
+                reports: vec![catalog_batch::ReportSave {
+                    id,
+                    expect: expected.into(),
+                    body: body.into(),
+                    evidence: evidence.into(),
+                }],
+            };
+            self.save_reports(p, &batch)?;
+            return Ok(());
         }
         let n = self.projects[p].nodes.iter().find(|n| n.id == id).unwrap();
         let (old_body, old_evidence) = self.read(p, id)?;
@@ -697,8 +867,12 @@ impl Library {
         } else {
             Default::default()
         };
-        self.write_report(p, id, body, evidence)?;
-        let report = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
+        if body.contains("<!-- research-") || evidence.contains("<!-- research-") {
+            return Err("Reserved report markers cannot appear in report content.".into());
+        }
+        let before = self.projects[p].clone();
+        let original = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
+        let report = catalog_index::Index::new(&before).render(&before, id, body, evidence);
         let n = self.projects[p]
             .nodes
             .iter_mut()
@@ -717,24 +891,39 @@ impl Library {
         self.invalidate(p, id);
         self.invalidate_dependents(p, id);
         self.projects[p].revision += 1;
-        self.persist(p)
+        let after = std::mem::replace(&mut self.projects[p], before.clone());
+        self.commit_report(p, before, after, id, original, report)
     }
 }
+
+type ActionResult = Result<Option<(String, u64)>>;
 
 pub struct ResearchUi {
     browser: catalog_browser::Browser,
     ui_projects: Vec<std::sync::Arc<Project>>,
     pub open: bool,
-    pub library: Option<Library>,
+    root: Option<PathBuf>,
     pub changed: bool,
     project: usize,
     project_id: String,
     last_poll: std::time::Instant,
     fingerprint: String,
+    views: Vec<ProjectView>,
+    browser_data: Vec<std::sync::Arc<catalog_browser::BrowserData>>,
+    refresh_task: Option<(u64, std::sync::mpsc::Receiver<Result<()>>)>,
+    snapshot_inbox: Option<background::SnapshotInbox>,
+    load_task: Option<(u64, std::sync::mpsc::Receiver<Result<background::Loaded>>)>,
+    action_task: Option<std::sync::mpsc::Receiver<ActionResult>>,
+    generation: u64,
+    refresh_generation: u64,
+    requested: Option<(String, u64)>,
+    import_file: String,
+    jobs: std::collections::HashMap<String, imports::Job>,
     node: u64,
     body: String,
     evidence: String,
     loaded_hash: String,
+    completion_hash: String,
     dirty: bool,
     message: String,
     new_name: String,
@@ -756,32 +945,34 @@ impl Default for ResearchUi {
 
 impl ResearchUi {
     pub fn new() -> Self {
-        let (library, message) = match crate::paths::home(None)
-            .and_then(|h| crate::paths::initialize(&h).map(|()| h))
-            .and_then(|h| Library::open(h.join("projects")))
-        {
-            Ok(mut l) => {
-                l.release();
-                (Some(l), String::new())
-            }
-            Err(e) => (None, e),
-        };
-        let mut s = Self {
+        Self {
             browser: Default::default(),
             ui_projects: vec![],
             open: false,
-            library,
+            root: None,
             changed: true,
             project: 0,
             project_id: String::new(),
-            last_poll: std::time::Instant::now(),
+            last_poll: std::time::Instant::now() - std::time::Duration::from_secs(3),
             fingerprint: String::new(),
+            views: vec![],
+            browser_data: vec![],
+            refresh_task: None,
+            snapshot_inbox: None,
+            load_task: None,
+            action_task: None,
+            refresh_generation: 0,
+            generation: 0,
+            requested: None,
+            import_file: String::new(),
+            jobs: Default::default(),
             node: 0,
             body: String::new(),
             evidence: String::new(),
             loaded_hash: String::new(),
+            completion_hash: String::new(),
             dirty: false,
-            message,
+            message: String::new(),
             new_name: String::new(),
             rva: String::new(),
             dependency_rvas: String::new(),
@@ -792,54 +983,46 @@ impl ResearchUi {
             scope_dirty: false,
             scope_revision: 0,
             complete: false,
-        };
-        if s.library
-            .as_ref()
-            .is_some_and(|lib| !lib.projects.is_empty())
-        {
-            s.load(0, 0);
         }
-        s
     }
     fn load(&mut self, p: usize, id: u64) {
-        let Some(lib) = &self.library else {
-            return;
-        };
-        if p >= lib.projects.len() {
+        if let Some(project) = self.ui_projects.get(p) {
+            self.generation += 1;
+            self.requested = Some((project.id.clone(), id));
+            self.dirty = false;
+            self.scope_dirty = false;
+        }
+    }
+    fn action(
+        &mut self,
+        work: impl FnOnce(PathBuf) -> Result<Option<(String, u64)>> + Send + 'static,
+    ) {
+        if self.action_task.is_some() {
             return;
         }
-        match lib.read(p, id) {
-            Ok((body, evidence)) => {
-                self.project = p;
-                self.project_id = lib.projects[p].id.clone();
-                self.node = id;
-                self.body = body;
-                self.evidence = evidence;
-                self.loaded_hash = lib.report_token(p, id).unwrap_or_default();
-                self.complete = lib.effective(p, id) == Status::Complete;
-                self.binary = lib.projects[p].binary.clone();
-                self.scope = lib.projects[p].research_scope.clone();
-                self.scope_dirty = false;
-                self.scope_revision = lib.projects[p].revision;
-                self.dependency_rvas = lib.projects[p]
-                    .dependencies
-                    .iter()
-                    .filter(|e| e.dependent == id)
-                    .filter_map(|e| {
-                        lib.projects[p]
-                            .nodes
-                            .iter()
-                            .find(|n| n.id == e.prerequisite)
-                            .and_then(|n| n.rva)
-                    })
-                    .map(|r| format!("0x{r:08X}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.dirty = false;
-                self.message.clear();
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        self.action_task = Some(recv);
+        std::thread::spawn(move || {
+            let result = crate::paths::home(None)
+                .map(|h| h.join("projects"))
+                .and_then(work);
+            let _ = send.send(result);
+        });
+    }
+    fn mutate(
+        &mut self,
+        work: impl FnOnce(&mut Library, usize, u64) -> Result<u64> + Send + 'static,
+    ) {
+        let project = self.project_id.clone();
+        let id = self.node;
+        self.action(move |root| {
+            let mut lib = Library::open_project(root, Some(&project))?;
+            if lib.projects.is_empty() {
+                return Err("Project was removed".into());
             }
-            Err(e) => self.message = e,
-        }
+            let id = work(&mut lib, 0, id)?;
+            Ok(Some((project, id)))
+        });
     }
     pub fn show(&mut self, ctx: &egui::Context) {
         if !self.open {
@@ -847,25 +1030,20 @@ impl ResearchUi {
         }
         let mut open = self.open;
         let mut nav = None;
-        let mut navigation_ids: Vec<_> = self
-            .library
-            .as_ref()
-            .map(|l| l.projects.iter().map(|p| p.id.clone()).collect())
-            .unwrap_or_default();
+        let navigation_ids: Vec<_> = self.ui_projects.iter().map(|p| p.id.clone()).collect();
         egui::Window::new("Research records").open(&mut open).default_size([950.0,700.0]).vscroll(true).show(ctx,|ui| {
             if !self.message.is_empty(){ui.colored_label(egui::Color32::from_rgb(230,170,80),&self.message);}
-            let Some(lib)=&self.library else{return;};
-            if self.ui_projects.len() != lib.projects.len() || self.ui_projects.iter().zip(&lib.projects).any(|(a,b)| a.id != b.id || a.revision != b.revision) {
-                self.ui_projects = lib.projects.iter().cloned().map(std::sync::Arc::new).collect();
-            }
+            if self.root.is_none() {ui.label("Loading research library...");return;}
+            let working=self.action_task.is_some() || self.load_task.is_some() || self.requested.is_some();
+            if working {ui.label("Working...");ui.disable();}
             let projects=self.ui_projects.clone();
             egui::CollapsingHeader::new("New project").default_open(projects.is_empty()).show(ui,|ui|{
                 ui.horizontal(|ui|{ui.label("ID");ui.text_edit_singleline(&mut self.new_project_id);ui.label("Name");ui.text_edit_singleline(&mut self.new_project_name);});
-                if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{navigation_ids.push(self.new_project_id.clone());nav=Some((navigation_ids.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
+                if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){let id=self.new_project_id.clone();let name=self.new_project_name.clone();self.action(move |root|{let mut lib=Library::open(root)?;lib.create(&id,&name,"")?;Ok(Some((id,0)))})}
             });
             let found = projects.iter().position(|p| p.id == self.project_id);
             if let Some(p) = found { self.project = p; }
-            let orphan = found.is_none() || !projects[self.project].nodes.iter().any(|n| n.id == self.node);
+            let orphan = found.is_none() || self.browser_data[self.project].node(&projects[self.project],self.node).is_none();
             if orphan && self.has_unsaved() {
                 ui.label("The project or report was removed. Your unsaved draft is retained here.");
                 if ui.button("Copy draft").clicked() { ui.ctx().copy_text(format!("Scope: {}\n\n{}\n\n{}",self.scope,self.body,self.evidence)); }
@@ -879,10 +1057,10 @@ impl ResearchUi {
                 ui.label("Create a project above to start researching.");
                 return;
             };
-            let lib=self.library.as_ref().unwrap();
+            let project_dir=self.root.as_ref().unwrap().join(&project.id);
             ui.horizontal_wrapped(|ui|{for (i,p) in projects.iter().enumerate(){if ui.add_enabled(!self.has_unsaved(),egui::Button::new(&p.name).selected(i==self.project)).clicked(){nav=Some((i,0));}}});
-            ui.label(format!("Isolated project: {}",lib.dir(self.project).display()));
-            let project_dir=lib.dir(self.project);
+            ui.label(format!("Isolated project: {}",project_dir.display()));
+
             egui::CollapsingHeader::new("Project tools and data folders").show(ui,|ui|{
                 ui.horizontal_wrapped(|ui|{
                     for (label,folder) in [("Tools","tools"),("Profiles","tools/profiles"),("Shared analysis","tools/workspaces"),("Tool logs","tools/logs")] {
@@ -891,12 +1069,33 @@ impl ResearchUi {
                 });
                 ui.label("Each function owns research.md and data/ in its function folder. Only shared tool workspaces, logs and scratch stay under tools/.");
             });
+            egui::CollapsingHeader::new("Inventory import").show(ui,|ui|{
+                ui.label("Creation-only JSON batch (exact binary identity and project revision)");
+                ui.text_edit_singleline(&mut self.import_file);
+                if ui.button("Start background import").clicked() {
+                    let file=self.import_file.clone();let project=project.id.clone();
+                    self.action(move |root|{let batch:Batch=serde_json::from_slice(&fs::read(file).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;let job=imports::reserve(&root,&project,&batch)?;background::launch_import(&root,&project,&job.id)?;Ok(None)});
+                }
+                if let Some(job)=self.jobs.get(&project.id).cloned() {
+                    ui.label(format!("{:?}: {} / {} prepared; committed inventory remains separate",job.state,job.prepared,job.total));
+                    if job.state==imports::JobState::Verifying {ui.label(format!("{} / {} records verified",job.verified,job.total));}
+                    if let Some(error)=&job.error {ui.colored_label(egui::Color32::YELLOW,error);}
+                    ui.label(format!("Job {}",job.id));
+                    if !matches!(job.state,imports::JobState::Committed|imports::JobState::Cancelled) {
+                        ui.horizontal(|ui|{
+                            if ui.button("Pause").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{imports::request(&root,&project,&id,false)?;Ok(None)});}
+                            if ui.button("Resume").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{background::launch_import(&root,&project,&id)?;Ok(None)});}
+                            if ui.button("Cancel import").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{imports::request(&root,&project,&id,true)?;Ok(None)});}
+                        });
+                    }
+                }
+            });
             egui::CollapsingHeader::new("Research scope").default_open(true).show(ui,|ui|{
                 ui.label("A few words describing what is being researched, e.g. Rendering or Asset platform.");
                 if ui.add(egui::TextEdit::singleline(&mut self.scope).desired_width(f32::INFINITY)).changed(){self.scope_dirty=true;}
                 ui.horizontal(|ui|{
                     if ui.add_enabled(!self.dirty,egui::Button::new("Save research scope")).clicked(){
-                        match self.library.as_mut().unwrap().set_scope(self.project,&self.scope,self.scope_revision){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}
+                        let scope=self.scope.clone();let revision=self.scope_revision;self.mutate(move |lib,p,id|{lib.set_scope(p,&scope,revision)?;Ok(id)});
                     }
                     if ui.button("Discard scope edits").clicked(){self.scope=project.research_scope.clone();self.scope_revision=project.revision;self.scope_dirty=false;}
                 });
@@ -906,40 +1105,39 @@ impl ResearchUi {
                 let locked=project.nodes.iter().any(|n|n.kind==Kind::Function);
                 ui.add_enabled(!locked,egui::TextEdit::singleline(&mut self.binary).desired_width(f32::INFINITY));
                 if ui.add_enabled(!locked&&!self.has_unsaved(),egui::Button::new("Save binary identity")).clicked(){
-                    let result=self.library.as_mut().unwrap().set_binary(self.project,&self.binary);
-                    match result{Ok(())=>nav=Some((self.project,self.node)),Err(e)=>self.message=e}
+                    let binary=self.binary.clone();self.mutate(move |lib,p,id|{lib.set_binary(p,&binary)?;Ok(id)});
                 }
             });
             ui.separator();
             ui.columns(2,|columns| {
                 let dirty = self.has_unsaved();
-                if let Some(id) = self.browser.show(&mut columns[0], project, self.node, dirty) { nav = Some((self.project, id)); }
-                let n=project.nodes.iter().find(|n|n.id==self.node).unwrap();
+                if let Some(id) = self.browser.show(&mut columns[0], &self.browser_data[self.project], self.node, dirty) { nav = Some((self.project, id)); }
+                let n=self.browser_data[self.project].node(project,self.node).unwrap();
                 let ui=&mut columns[1];ui.strong(format!("{} — {}",n.kind.label(),n.name));
-                ui.label(self.library.as_ref().unwrap().path(self.project,self.node).unwrap().display().to_string());
+                ui.label(project_dir.join(&self.browser_data[self.project].paths[&self.node]).display().to_string());
                 ui.label(if self.browser.required(n.id) { "Required research (including explicit prerequisites)" } else { "Context inventory; preserved outside required progress" });
                 let mut context_only = n.context_only;
                 if n.kind != Kind::App && ui.add_enabled(!self.has_unsaved(), egui::Checkbox::new(&mut context_only, "Context-only child membership")).changed() {
                     let batch = Batch { schema: 1, repair_legacy_links: false, binary: project.binary.clone(), expect_revision: project.revision, create: vec![], update: vec![catalog_batch::Update { id: n.id, parent: None, name: None, context_only: Some(context_only) }], reorder: vec![] };
-                    match self.library.as_mut().unwrap().batch(self.project, &batch) { Ok(_) => { self.changed=true; nav=Some((self.project,self.node)); }, Err(e) => self.message=e }
+                    self.mutate(move |lib,p,id|{lib.batch(p,&batch)?;Ok(id)});
                 }
                 if n.kind==Kind::Function && ui.button("Open this function's data folder").clicked(){
-                    let path=self.library.as_ref().unwrap().path(self.project,self.node).unwrap().parent().unwrap().join("data");
+                    let path=project_dir.join(&self.browser_data[self.project].paths[&self.node]).parent().unwrap().join("data");
                     if let Err(e)=open_folder(&path){self.message=e;}
                 }
 
                 if let Some(kind)=n.kind.child() {
                     ui.label(format!("Add {} here",kind.label()));ui.text_edit_singleline(&mut self.new_name);
                     if kind==Kind::Function {ui.horizontal(|ui|{ui.label("RVA (hex)");ui.text_edit_singleline(&mut self.rva);});}
-                    if ui.add_enabled(!self.has_unsaved(),egui::Button::new(format!("Create {} file",kind.label()))).clicked(){match self.library.as_mut().unwrap().add(self.project,self.node,&self.new_name,&self.rva){Ok(id)=>{self.new_name.clear();self.rva.clear();self.changed=true;nav=Some((self.project,id));},Err(e)=>self.message=e}}
+                    if ui.add_enabled(!self.has_unsaved(),egui::Button::new(format!("Create {} file",kind.label()))).clicked(){let name=self.new_name.clone();let rva=self.rva.clone();self.mutate(move |lib,p,id|lib.add(p,id,&name,&rva));}
                 }
                 if n.kind==Kind::Function {
                     ui.separator();ui.label("Prerequisites (function RVAs, comma separated)");
                     ui.text_edit_singleline(&mut self.dependency_rvas);
                     if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Save prerequisite tags")).clicked(){
-                        match self.library.as_mut().unwrap().set_dependencies(self.project,self.node,&self.dependency_rvas){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}
+                        let rvas=self.dependency_rvas.clone();self.mutate(move |lib,p,id|{lib.set_dependencies(p,id,&rvas)?;Ok(id)});
                     }
-                    let inbound:Vec<_>=project.dependencies.iter().filter(|e|e.prerequisite==self.node).filter_map(|e|project.nodes.iter().find(|n|n.id==e.dependent)).map(|n|format!("{} (0x{:08X})",n.name,n.rva.unwrap())).collect();
+                    let inbound:Vec<_>=project.dependencies.iter().filter(|e|e.prerequisite==self.node).filter_map(|e|self.browser_data[self.project].node(project,e.dependent)).map(|n|format!("{} (0x{:08X})",n.name,n.rva.unwrap())).collect();
                     ui.label(format!("Required by: {}",if inbound.is_empty(){"none".into()}else{inbound.join(", ")}));
                     ui.label("dep.toml lists prerequisites; prereq.toml lists dependents. Managed together by the app.");
                 }
@@ -949,7 +1147,7 @@ impl ResearchUi {
             if ui.add(egui::TextEdit::multiline(&mut self.body).desired_width(f32::INFINITY).desired_rows(12).code_editor()).changed(){self.dirty=true;}
             ui.label("Evidence — cite source/build, VA/RVA, artifact or capture; label observed / specification-defined / inferred");
             if ui.add(egui::TextEdit::multiline(&mut self.evidence).desired_width(f32::INFINITY).desired_rows(4).code_editor()).changed(){self.dirty=true;}
-            let kind=project.nodes.iter().find(|n|n.id==self.node).unwrap().kind;
+            let kind=self.browser_data[self.project].node(project,self.node).unwrap().kind;
             egui::CollapsingHeader::new("Completion criteria for this scope").show(ui,|ui|{
                 ui.label(kind.completion_criteria());
                 ui.label("Completed children make a parent ready for synthesis; the parent's own understanding must be reviewed separately.");
@@ -957,19 +1155,15 @@ impl ResearchUi {
             });
             if ui.checkbox(&mut self.complete,"Mark complete (I reviewed the scope criteria, understanding and evidence)").changed(){self.dirty=true;}
             ui.horizontal(|ui|{
-                if ui.add_enabled(!self.scope_dirty,egui::Button::new("Save canonical report")).clicked(){match self.library.as_mut().unwrap().save_report(self.project,self.node,&self.body,&self.evidence,self.complete,&self.loaded_hash){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}}
+                if ui.add_enabled(!self.scope_dirty,egui::Button::new("Save canonical report")).clicked(){let body=self.body.clone();let evidence=self.evidence.clone();let complete=self.complete;let token=if complete{self.completion_hash.clone()}else{self.loaded_hash.clone()};self.mutate(move |lib,p,id|{lib.save_report(p,id,&body,&evidence,complete,&token)?;Ok(id)});}
                 if ui.button("Discard / reload").clicked(){nav=Some((self.project,self.node));}
                 if self.has_unsaved(){ui.label("Unsaved edits");}
             });
         });
         if let Some((p, id)) = nav
-            && let Some(current) = navigation_ids.get(p).and_then(|id| {
-                self.library
-                    .as_ref()?
-                    .projects
-                    .iter()
-                    .position(|v| &v.id == id)
-            })
+            && let Some(current) = navigation_ids
+                .get(p)
+                .and_then(|id| self.ui_projects.iter().position(|v| &v.id == id))
         {
             self.load(current, id);
         }
@@ -997,179 +1191,183 @@ pub struct ProjectView {
 }
 impl ResearchUi {
     pub fn poll(&mut self, ctx: &egui::Context) {
-        ctx.request_repaint_after(std::time::Duration::from_secs(2));
-        if self.last_poll.elapsed() < std::time::Duration::from_secs(2) {
-            return;
-        }
-        self.last_poll = std::time::Instant::now();
-        let mut signature = String::new();
-        if let Some(lib) = &self.library {
-            if let Ok(entries) = fs::read_dir(&lib.root) {
-                let mut paths: Vec<_> = entries
-                    .flatten()
-                    .map(|e| e.path().join("project.json"))
-                    .filter(|p| p.is_file())
-                    .collect();
-                paths.sort();
-                for path in paths {
-                    signature.push_str(&format!(
-                        "{}:{:?};",
-                        path.display(),
-                        fs::metadata(&path).map(|m| (m.len(), m.modified().ok()))
-                    ));
+        use std::sync::mpsc::TryRecvError;
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        if let Some(task) = &self.action_task {
+            match task.try_recv() {
+                Ok(result) => {
+                    self.action_task = None;
+                    match result {
+                        Ok(target) => {
+                            self.message = "Operation finished. Refreshing...".into();
+                            if let Some(target) = target {
+                                self.generation += 1;
+                                self.requested = Some(target);
+                                self.dirty = false;
+                                self.scope_dirty = false;
+                            }
+                            self.refresh_library();
+                        }
+                        Err(e) => self.message = e,
+                    }
                 }
+                Err(TryRecvError::Disconnected) => {
+                    self.action_task = None;
+                    self.message =
+                        "Background operation failed; reload to inspect committed state.".into();
+                }
+                Err(TryRecvError::Empty) => {}
             }
-            for (p, project) in lib.projects.iter().enumerate() {
-                let paths = lib.report_paths(p);
-                for n in &project.nodes {
-                    if n.status == Status::Complete || (p == self.project && n.id == self.node) {
-                        let path = &paths[&n.id];
-                        signature.push_str(&format!(
-                            "{:?};",
-                            fs::metadata(path).map(|m| (m.len(), m.modified().ok()))
-                        ));
+        }
+        if let Some((generation, task)) = &self.load_task {
+            let generation = *generation;
+            match task.try_recv() {
+                Ok(result) => {
+                    self.load_task = None;
+                    if generation == self.generation {
+                        match result {
+                            Ok(v) => {
+                                self.project_id = v.project;
+                                self.node = v.id;
+                                self.body = v.body;
+                                self.evidence = v.evidence;
+                                self.loaded_hash = v.draft;
+                                self.completion_hash = v.completion;
+                                self.complete = v.complete;
+                                self.binary = v.binary;
+                                self.scope = v.scope;
+                                self.scope_revision = v.revision;
+                                self.dependency_rvas = v.dependencies;
+                                self.dirty = false;
+                                self.scope_dirty = false;
+                                self.message.clear();
+                            }
+                            Err(e) => self.message = e,
+                        }
+                    }
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.load_task = None;
+                    self.message = "Report loader failed".into();
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if self.load_task.is_none()
+            && let Some((project, id)) = self.requested.take()
+        {
+            let (send, recv) = std::sync::mpsc::sync_channel(1);
+            self.load_task = Some((self.generation, recv));
+            std::thread::spawn(move || {
+                let _ = send.send(background::load(&project, id));
+            });
+        }
+        let delivered = self
+            .snapshot_inbox
+            .as_mut()
+            .and_then(|inbox| match inbox.take() {
+                Ok(v) => v,
+                Err(e) => Some(Err(e)),
+            });
+        if let Some((generation, task)) = &self.refresh_task {
+            let generation = *generation;
+            let outcome = match delivered {
+                Some(value) => Ok(value),
+                None => match task.try_recv() {
+                    Ok(Err(e)) => Ok(Err(e)),
+                    Ok(Ok(())) | Err(TryRecvError::Empty) => Err(TryRecvError::Empty),
+                    Err(TryRecvError::Disconnected) => Err(TryRecvError::Disconnected),
+                },
+            };
+            match outcome {
+                Ok(Ok(v)) if generation == self.refresh_generation => {
+                    self.refresh_task = None;
+                    self.fingerprint = v.fingerprint;
+                    self.jobs = v.jobs;
+                    if let Some(root) = v.root {
+                        self.root = Some(root);
+                        let retired = (
+                            std::mem::replace(&mut self.ui_projects, v.projects),
+                            std::mem::replace(&mut self.browser_data, v.browser),
+                            std::mem::replace(&mut self.views, v.views),
+                        );
+                        std::thread::spawn(move || drop(retired));
+                        self.changed = true;
+                        if let Some(p) = self
+                            .ui_projects
+                            .iter()
+                            .position(|p| p.id == self.project_id)
+                        {
+                            self.project = p;
+                        }
+                        if !self.has_unsaved()
+                            && self.load_task.is_none()
+                            && self.requested.is_none()
+                            && let Some(p) = self.ui_projects.get(self.project)
+                        {
+                            let id = if self.browser_data[self.project].node(p, self.node).is_some()
+                            {
+                                self.node
+                            } else {
+                                0
+                            };
+                            self.load(self.project, id);
+                        }
+                    }
+                }
+                Ok(Ok(stale)) => {
+                    std::thread::spawn(move || drop(stale));
+                    self.refresh_task = None;
+                }
+                Ok(Err(e)) => {
+                    self.refresh_task = None;
+                    self.message = e;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.refresh_task = None;
+                    self.message = "Snapshot worker failed".into();
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if self.refresh_task.is_none()
+            && self.last_poll.elapsed() >= std::time::Duration::from_secs(2)
+        {
+            if self.snapshot_inbox.is_none() {
+                match background::SnapshotInbox::new() {
+                    Ok(inbox) => self.snapshot_inbox = Some(inbox),
+                    Err(e) => {
+                        self.message = e;
+                        return;
                     }
                 }
             }
-        }
-        let fingerprint = hash(&signature);
-        if self.library.is_none()
-            || fingerprint != self.fingerprint
-            || self
-                .library
-                .as_ref()
-                .is_some_and(|l| !l.busy_projects.is_empty())
-        {
-            match self.refresh_library_inner() {
-                Ok(()) => self.fingerprint = fingerprint,
-                Err(e) if e.contains("library is busy") => {}
-                Err(e) => {
-                    self.message = e;
-                    self.open = true;
-                }
-            }
+            let owner = self.snapshot_inbox.as_ref().unwrap().sender();
+            self.last_poll = std::time::Instant::now();
+            let (send, recv) = std::sync::mpsc::sync_channel(1);
+            self.refresh_task = Some((self.refresh_generation, recv));
+            let fingerprint = self.fingerprint.clone();
+            let projects = self.ui_projects.clone();
+            let browser = self.browser_data.clone();
+            let selected = (self.project_id.clone(), self.node);
+            let views = self.views.clone();
+            std::thread::spawn(move || {
+                let result = background::snapshot(fingerprint, projects, browser, views, selected);
+                let posted = owner
+                    .try_post(solworker::SWPhase(1), move |slot| *slot = Some(result))
+                    .map(|_| ())
+                    .map_err(|e| format!("Snapshot delivery rejected: {:?}", e.reason));
+                let _ = send.send(posted);
+            });
         }
     }
     pub fn refresh_library(&mut self) {
-        if let Err(e) = self.refresh_library_inner() {
-            self.message = e;
-            self.open = true;
-        }
-    }
-    fn refresh_library_inner(&mut self) -> Result<()> {
-        if let Some(lib) = &mut self.library {
-            lib.refresh()?;
-        } else {
-            let mut lib =
-                crate::paths::home(None).and_then(|h| Library::open(h.join("projects")))?;
-            lib.release();
-            self.library = Some(lib);
-        }
-        self.changed = true;
-        let lib = self.library.as_ref().unwrap();
-        if !lib.busy_projects.is_empty() {
-            self.message = format!(
-                "Busy projects retain their last snapshot: {}. Other projects remain available.",
-                lib.busy_projects.join(", ")
-            );
-        }
-        let selected = lib.projects.iter().position(|p| p.id == self.project_id);
-        if let Some(p) = selected {
-            self.project = p;
-        }
-        if !self.has_unsaved() {
-            let p = selected.unwrap_or(0);
-            let id = lib
-                .projects
-                .get(p)
-                .and_then(|p| p.nodes.iter().find(|n| n.id == self.node))
-                .filter(|_| selected.is_some())
-                .map(|n| n.id)
-                .unwrap_or(0);
-            if lib.projects.is_empty() {
-                self.project = 0;
-                self.project_id.clear();
-                self.node = 0;
-            } else {
-                if !lib.busy_projects.contains(&lib.projects[p].id) {
-                    self.load(p, id);
-                }
-            }
-        }
-        Ok(())
+        self.refresh_generation += 1;
+        self.fingerprint.clear();
+        self.last_poll = std::time::Instant::now() - std::time::Duration::from_secs(3);
     }
     pub fn snapshot(&self) -> Vec<ProjectView> {
-        let Some(lib) = &self.library else {
-            return vec![];
-        };
-        lib.projects
-            .iter()
-            .enumerate()
-            .map(|(p, project)| {
-                let index = catalog_index::Index::new(project);
-                let states_all = index.states(&lib.dir(p));
-                let meters = project
-                    .nodes
-                    .iter()
-                    .filter(|n| n.kind == Kind::Architecture)
-                    .map(|a| {
-                        let chunks: Vec<_> = project
-                            .nodes
-                            .iter()
-                            .filter(|c| c.parent == Some(a.id) && index.required.contains(&c.id))
-                            .collect();
-                        let states = chunks
-                            .iter()
-                            .map(|c| match states_all[&c.id] {
-                                Status::Complete => 0,
-                                Status::InProgress => 1,
-                                Status::NotStarted => 2,
-                            })
-                            .collect();
-                        let functions: Vec<_> = project
-                            .nodes
-                            .iter()
-                            .filter(|f| {
-                                f.kind == Kind::Function
-                                    && index.required.contains(&f.id)
-                                    && f.parent.and_then(|id| index.nodes[&id].parent) == Some(a.id)
-                            })
-                            .collect();
-                        Meter {
-                            id: a.id,
-                            name: if index.required.contains(&a.id) {
-                                a.name.clone()
-                            } else {
-                                format!("{} [context]", a.name)
-                            },
-                            functions: functions.len(),
-                            completed_functions: functions
-                                .iter()
-                                .filter(|f| states_all[&f.id] == Status::Complete)
-                                .count(),
-                            states,
-                        }
-                    })
-                    .collect();
-                ProjectView {
-                    inventory_functions: project
-                        .nodes
-                        .iter()
-                        .filter(|n| n.kind == Kind::Function)
-                        .count(),
-                    required_functions: project
-                        .nodes
-                        .iter()
-                        .filter(|n| n.kind == Kind::Function && index.required.contains(&n.id))
-                        .count(),
-                    app_status: states_all[&0],
-                    id: project.id.clone(),
-                    name: project.name.clone(),
-                    meters,
-                    research_scope: project.research_scope.clone(),
-                }
-            })
-            .collect()
+        self.views.clone()
     }
     pub fn open_record(&mut self, project_id: &str, id: u64) {
         self.open = true;
@@ -1178,11 +1376,7 @@ impl ResearchUi {
                 "Save or discard the current edits before opening another report.".into();
             return;
         }
-        if let Some(p) = self
-            .library
-            .as_ref()
-            .and_then(|l| l.projects.iter().position(|p| p.id == project_id))
-        {
+        if let Some(p) = self.ui_projects.iter().position(|p| p.id == project_id) {
             self.load(p, id);
         }
     }
@@ -1403,9 +1597,10 @@ impl Library {
         }
     }
     pub fn set_dependencies(&mut self, p: usize, id: u64, rvas: &str) -> Result<()> {
-        if self._lock.is_none() {
+        if !self.writable(p) {
             return self.write_project(p, |l, p| l.set_dependencies(p, id, rvas));
         }
+        self.ensure_structural(p)?;
         if !self.projects[p]
             .nodes
             .iter()
@@ -1450,6 +1645,8 @@ impl Library {
             .flat_map(|e| [e.dependent, e.prerequisite])
             .chain([id])
             .collect();
+        let before = self.projects[p].clone();
+        self.projects[p].structural_epoch += 1;
         self.projects[p].dependencies = edges;
         let n = self.projects[p]
             .nodes
@@ -1465,8 +1662,8 @@ impl Library {
         self.invalidate(p, id);
         self.invalidate_dependents(p, id);
         self.projects[p].revision += 1;
-        self.sync_dependency_subset(p, Some(&affected))?;
-        self.persist(p)
+        let after = std::mem::replace(&mut self.projects[p], before.clone());
+        self.commit_metadata(p, before, after, vec![], affected.into_iter().collect())
     }
     pub fn set_dependencies_by_rva(
         &mut self,
@@ -1491,5 +1688,185 @@ impl Library {
             .ok_or("Unknown function RVA in this project")?
             .id;
         self.set_dependencies(p, id, dependencies)
+    }
+}
+
+impl Library {
+    fn views(&self) -> Vec<ProjectView> {
+        let lib = self;
+        lib.projects
+            .iter()
+            .enumerate()
+            .map(|(p, project)| {
+                let index = catalog_index::Index::new(project);
+                let states_all = index.states(&lib.dir(p));
+                let mut counts = std::collections::HashMap::<u64, (usize, usize)>::new();
+                let mut inventory_functions = 0;
+                let mut required_functions = 0;
+                for n in &project.nodes {
+                    if n.kind == Kind::Function {
+                        inventory_functions += 1;
+                        if index.required.contains(&n.id) {
+                            required_functions += 1;
+                            if let Some(arch) = n.parent.and_then(|id| index.nodes[&id].parent) {
+                                let count = counts.entry(arch).or_default();
+                                count.0 += 1;
+                                count.1 += usize::from(states_all[&n.id] == Status::Complete);
+                            }
+                        }
+                    }
+                }
+                let meters = project
+                    .nodes
+                    .iter()
+                    .filter(|n| n.kind == Kind::Architecture)
+                    .map(|a| {
+                        let (functions, completed_functions) =
+                            counts.get(&a.id).copied().unwrap_or_default();
+                        let states = index
+                            .children
+                            .get(&a.id)
+                            .into_iter()
+                            .flatten()
+                            .filter(|id| index.required.contains(id))
+                            .map(|id| match states_all[id] {
+                                Status::Complete => 0,
+                                Status::InProgress => 1,
+                                Status::NotStarted => 2,
+                            })
+                            .collect();
+                        Meter {
+                            id: a.id,
+                            name: if index.required.contains(&a.id) {
+                                a.name.clone()
+                            } else {
+                                format!("{} [context]", a.name)
+                            },
+                            functions,
+                            completed_functions,
+                            states,
+                        }
+                    })
+                    .collect();
+                ProjectView {
+                    inventory_functions,
+                    required_functions,
+                    app_status: states_all[&0],
+                    id: project.id.clone(),
+                    name: project.name.clone(),
+                    meters,
+                    research_scope: project.research_scope.clone(),
+                }
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod background_ui_tests {
+    use super::*;
+    fn isolated_ui() -> ResearchUi {
+        let mut ui = ResearchUi::new();
+        ui.root = Some(PathBuf::from("C:/unused-background-ui-fixture"));
+        ui.last_poll = std::time::Instant::now();
+        ui
+    }
+    fn loaded(project: &str, id: u64) -> background::Loaded {
+        background::Loaded {
+            project: project.into(),
+            id,
+            body: "loaded".into(),
+            evidence: String::new(),
+            draft: "d4:test".into(),
+            completion: "c4:test".into(),
+            complete: false,
+            binary: "fixture".into(),
+            scope: String::new(),
+            revision: 1,
+            dependencies: String::new(),
+        }
+    }
+    #[test]
+    fn obsolete_report_load_cannot_replace_current_selection_or_draft() {
+        let mut ui = isolated_ui();
+        ui.generation = 2;
+        ui.project_id = "newer".into();
+        ui.body = "unsaved prose".into();
+        ui.dirty = true;
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        send.send(Ok(loaded("older", 42))).unwrap();
+        ui.load_task = Some((1, recv));
+        ui.poll(&egui::Context::default());
+        assert_eq!(ui.project_id, "newer");
+        assert_eq!(ui.body, "unsaved prose");
+        assert!(ui.dirty);
+        assert!(ui.load_task.is_none());
+    }
+    #[test]
+    fn newer_meters_publish_without_discarding_unsaved_text() {
+        let mut ui = isolated_ui();
+        ui.body = "unsaved prose".into();
+        ui.dirty = true;
+        let inbox = background::SnapshotInbox::new().unwrap();
+        let value = background::Snapshot {
+            root: Some(ui.root.clone().unwrap()),
+            projects: vec![],
+            browser: vec![],
+            views: vec![ProjectView {
+                inventory_functions: 12,
+                required_functions: 10,
+                app_status: Status::InProgress,
+                id: "fixture".into(),
+                name: "Fixture".into(),
+                meters: vec![],
+                research_scope: "Scope".into(),
+            }],
+            jobs: Default::default(),
+            fingerprint: "new".into(),
+        };
+        assert!(
+            inbox
+                .sender()
+                .try_post(solworker::SWPhase(1), move |slot| *slot = Some(Ok(value)))
+                .is_ok()
+        );
+        let (_send, recv) = std::sync::mpsc::sync_channel(1);
+        ui.refresh_task = Some((0, recv));
+        ui.snapshot_inbox = Some(inbox);
+        ui.poll(&egui::Context::default());
+        assert_eq!(ui.views[0].inventory_functions, 12);
+        assert_eq!(ui.body, "unsaved prose");
+        assert!(ui.dirty);
+        assert!(ui.requested.is_none());
+    }
+    #[test]
+    fn obsolete_snapshot_is_rejected_and_owner_shutdown_rejects_late_delivery() {
+        let mut ui = isolated_ui();
+        ui.refresh_generation = 2;
+        ui.fingerprint = "current".into();
+        let inbox = background::SnapshotInbox::new().unwrap();
+        let sender = inbox.sender();
+        let value = background::Snapshot {
+            root: None,
+            projects: vec![],
+            browser: vec![],
+            views: vec![],
+            jobs: Default::default(),
+            fingerprint: "obsolete".into(),
+        };
+        assert!(
+            sender
+                .try_post(solworker::SWPhase(1), move |slot| *slot = Some(Ok(value)))
+                .is_ok()
+        );
+        // Capacity is one; providers cannot accumulate snapshot generations.
+        assert!(sender.try_post(solworker::SWPhase(1), |_| {}).is_err());
+        let (_send, recv) = std::sync::mpsc::sync_channel(1);
+        ui.refresh_task = Some((1, recv));
+        ui.snapshot_inbox = Some(inbox);
+        ui.poll(&egui::Context::default());
+        assert_eq!(ui.fingerprint, "current");
+        drop(ui);
+        assert!(sender.try_post(solworker::SWPhase(1), |_| {}).is_err());
     }
 }

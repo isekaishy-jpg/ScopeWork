@@ -74,16 +74,19 @@ fn bevel(p: &egui::Painter, r: egui::Rect, inset: bool) {
     };
     p.line_segment(
         [r.left_bottom(), r.left_top()],
-        egui::Stroke::new(1.0, light),
+        egui::Stroke::new(1.0_f32, light),
     );
-    p.line_segment([r.left_top(), r.right_top()], egui::Stroke::new(1.0, light));
+    p.line_segment(
+        [r.left_top(), r.right_top()],
+        egui::Stroke::new(1.0_f32, light),
+    );
     p.line_segment(
         [r.right_top(), r.right_bottom()],
-        egui::Stroke::new(1.0, dark),
+        egui::Stroke::new(1.0_f32, dark),
     );
     p.line_segment(
         [r.right_bottom(), r.left_bottom()],
-        egui::Stroke::new(1.0, dark),
+        egui::Stroke::new(1.0_f32, dark),
     );
 }
 fn text(p: &egui::Painter, x: f32, y: f32, s: impl ToString, color: Color32) {
@@ -322,25 +325,25 @@ impl eframe::App for Dashboard {
                         0 => {
                             p.line_segment(
                                 [b.min + Vec2::new(4.0, 10.0), b.min + Vec2::new(11.0, 10.0)],
-                                egui::Stroke::new(2.0, ink),
+                                egui::Stroke::new(2.0_f32, ink),
                             );
                         }
                         1 => {
                             p.rect_stroke(
                                 b.shrink(3.0),
                                 0.0,
-                                egui::Stroke::new(1.0, ink),
+                                egui::Stroke::new(1.0_f32, ink),
                                 egui::StrokeKind::Inside,
                             );
                         }
                         _ => {
                             p.line_segment(
                                 [b.min + Vec2::new(4.0, 3.0), b.max - Vec2::new(4.0, 3.0)],
-                                egui::Stroke::new(1.0, ink),
+                                egui::Stroke::new(1.0_f32, ink),
                             );
                             p.line_segment(
                                 [b.min + Vec2::new(4.0, 11.0), b.min + Vec2::new(12.0, 3.0)],
-                                egui::Stroke::new(1.0, ink),
+                                egui::Stroke::new(1.0_f32, ink),
                             );
                         }
                     }
@@ -397,7 +400,7 @@ impl eframe::App for Dashboard {
                     if self.project == i {
                         p.line_segment(
                             [tab.left_bottom(), tab.right_bottom()],
-                            egui::Stroke::new(2.0, bg),
+                            egui::Stroke::new(2.0_f32, bg),
                         );
                     }
                     t(17.0 + i as f32 * 61.0, 54.0, name.to_string());
@@ -545,7 +548,7 @@ impl eframe::App for Dashboard {
                                                 meter.expand(1.0),
                                                 0.0,
                                                 egui::Stroke::new(
-                                                    1.0,
+                                                    1.0_f32,
                                                     if self.dark {
                                                         Color32::from_rgb(125, 170, 239)
                                                     } else {
@@ -603,7 +606,7 @@ impl eframe::App for Dashboard {
                             o + Vec2::new(w - 11.0 + d, h - 3.0),
                             o + Vec2::new(w - 3.0, h - 11.0 + d),
                         ],
-                        egui::Stroke::new(1.0, Color32::from_gray(110)),
+                        egui::Stroke::new(1.0_f32, Color32::from_gray(110)),
                     );
                 }
                 if ui
@@ -629,7 +632,7 @@ impl eframe::App for Dashboard {
                 .show(ctx, |ui| {
                     egui::Frame::new()
                         .fill(bg)
-                        .stroke(egui::Stroke::new(1.0, Color32::from_gray(100)))
+                        .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(100)))
                         .inner_margin(3.0)
                         .show(ui, |ui| {
                             if menu == 1

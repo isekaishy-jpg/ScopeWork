@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use research_dashboard::{
     paths,
-    research::{Kind, Library, Status},
+    research::{Batch, Kind, Library, Status, imports},
 };
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
@@ -32,6 +32,8 @@ enum Command {
         scope: Scope,
     },
     #[command(subcommand)]
+    Import(ImportCommand),
+    #[command(subcommand)]
     Project(ProjectCommand),
     #[command(subcommand)]
     Node(NodeCommand),
@@ -56,6 +58,45 @@ impl Scope {
             Self::Function => Kind::Function,
         }
     }
+}
+#[derive(Subcommand)]
+enum ImportCommand {
+    /// Validate an additive request and estimate output counts.
+    Plan {
+        project: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Reserve identities and prepare/publish without blocking existing research.
+    Start {
+        project: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        paused: bool,
+    },
+    /// Read durable job progress without waiting for the runner.
+    Status { project: String, job: String },
+    /// Request a pause after in-flight file writes settle.
+    Pause { project: String, job: String },
+    /// Continue an interrupted/paused job with its reserved identities.
+    Resume { project: String, job: String },
+    /// Cancel unpublished work, preserving unknown or changed files.
+    Cancel { project: String, job: String },
+}
+fn job_result(job: imports::Job) -> Result<Value, String> {
+    if matches!(
+        job.state,
+        imports::JobState::Failed | imports::JobState::Conflict
+    ) {
+        return Err(format!(
+            "import_failed: {} {:?}: {}",
+            job.id,
+            job.state,
+            job.error.as_deref().unwrap_or("Inspect import status")
+        ));
+    }
+    serde_json::to_value(job).map_err(|e| e.to_string())
 }
 #[derive(Subcommand)]
 enum ProjectCommand {
@@ -184,46 +225,11 @@ fn project(lib: &Library, id: &str) -> Result<usize, String> {
         .ok_or_else(|| format!("Unknown project: {id}"))
 }
 fn node_view(lib: &Library, p: usize, id: u64) -> Result<Value, String> {
-    let node = lib.projects[p]
-        .nodes
-        .iter()
-        .find(|n| n.id == id)
-        .ok_or("Unknown node")?;
-    let (body, evidence) = lib.read(p, id)?;
-    let path = lib.path(p, id)?;
-    let children: Vec<_> = lib.projects[p]
-        .nodes
-        .iter()
-        .filter(|n| n.parent == Some(id))
-        .map(|n| n.id)
-        .collect();
-    let requires: Vec<_> = lib.projects[p]
-        .dependencies
-        .iter()
-        .filter(|e| e.dependent == id)
-        .map(|e| e.prerequisite)
-        .collect();
-    let required_by: Vec<_> = lib.projects[p]
-        .dependencies
-        .iter()
-        .filter(|e| e.prerequisite == id)
-        .map(|e| e.dependent)
-        .collect();
-    Ok(
-        json!({"project": lib.projects[p].id, "node": node, "effective_status": lib.effective(p,id), "report":path,
-        "data": if node.kind == Kind::Function {Some(path.parent().unwrap().join("data"))} else {None},
-        "body":body, "evidence":evidence, "token":lib.report_token(p,id)?, "criteria":node.kind.completion_criteria(), "research_scope":lib.projects[p].research_scope,
-        "children":children, "requires":requires, "required_by":required_by}),
-    )
+    serde_json::to_value(lib.record(p, id)?).map_err(|e| e.to_string())
 }
+
 fn expect(lib: &Library, p: usize, id: u64, token: &str) -> Result<(), String> {
-    if lib.report_token(p, id)? != token {
-        return Err(
-            "Research changed since it was read. Read node show again and review before retrying."
-                .into(),
-        );
-    }
-    Ok(())
+    lib.check_edit_token(p, id, token, "structural")
 }
 fn run(args: Args) -> Result<Value, String> {
     if let Command::Criteria { scope } = &args.command {
@@ -249,6 +255,62 @@ fn run(args: Args) -> Result<Value, String> {
         return Ok(json!({"opened":true,"home":home}));
     }
     paths::initialize(&home)?;
+    let root = home.join("projects");
+    if let Command::Import(command) = &args.command {
+        return match command {
+            ImportCommand::Plan { project, file } => {
+                let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                imports::plan(&root, project, &batch)
+            }
+            ImportCommand::Start {
+                project,
+                file,
+                paused,
+            } => {
+                let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                let job = imports::reserve(&root, project, &batch)?;
+                job_result(if *paused {
+                    imports::request(&root, project, &job.id, false)?
+                } else {
+                    imports::run(&root, project, &job.id)?
+                })
+            }
+            ImportCommand::Status { project, job } => {
+                serde_json::to_value(imports::status(&root, project, job)?)
+                    .map_err(|e| e.to_string())
+            }
+            ImportCommand::Pause { project, job } => {
+                job_result(imports::request(&root, project, job, false)?)
+            }
+            ImportCommand::Resume { project, job } => {
+                job_result(imports::resume_job(&root, project, job)?)
+            }
+            ImportCommand::Cancel { project, job } => {
+                job_result(imports::request(&root, project, job, true)?)
+            }
+        };
+    }
+    if let Command::Node(NodeCommand::Batch { project, file }) = &args.command {
+        let batch: Batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        if !batch.create.is_empty()
+            && batch.update.is_empty()
+            && batch.reorder.is_empty()
+            && !batch.repair_legacy_links
+        {
+            let job = imports::reserve(&root, project, &batch)?;
+            let job = imports::run(&root, project, &job.id)?;
+            if job.state != imports::JobState::Committed {
+                return job_result(job);
+            }
+            return Ok(
+                json!({"project":project,"revision":job.revision,"created":(job.first_id..job.end_id).collect::<Vec<_>>(),"job":job.id}),
+            );
+        }
+    }
+
     let selected = match &args.command {
         Command::Project(
             ProjectCommand::Show { project }
@@ -271,8 +333,22 @@ fn run(args: Args) -> Result<Value, String> {
         | Command::Status { project } => Some(project.as_str()),
         _ => None,
     };
-    let mut lib = Library::open_project(home.join("projects"), selected)?;
+    let read_only = matches!(
+        &args.command,
+        Command::Project(ProjectCommand::Show { .. })
+            | Command::Node(
+                NodeCommand::Show { .. } | NodeCommand::List { .. } | NodeCommand::ReadBatch { .. }
+            )
+            | Command::Deps(DepsCommand::Get { .. })
+            | Command::Status { .. }
+    );
+    let mut lib = if read_only {
+        Library::read_project(home.join("projects"), selected.unwrap())?
+    } else {
+        Library::open_project(home.join("projects"), selected)?
+    };
     match args.command {
+        Command::Import(_) => unreachable!("import commands handled before opening a library"),
         Command::Init => Ok(locations),
         Command::Project(command) => match command {
             ProjectCommand::List => {
@@ -485,7 +561,19 @@ fn main() {
     match run(Args::parse()) {
         Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
         Err(error) => {
-            eprintln!("{}", json!({"error":error}));
+            let kind = error
+                .split_once(':')
+                .map(|(prefix, _)| prefix)
+                .filter(|prefix| {
+                    !prefix.is_empty()
+                        && prefix.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
+                })
+                .unwrap_or(if error.contains("is busy") {
+                    "busy"
+                } else {
+                    "operation_failed"
+                });
+            eprintln!("{}", json!({"error":error,"kind":kind}));
             std::process::exit(1);
         }
     }

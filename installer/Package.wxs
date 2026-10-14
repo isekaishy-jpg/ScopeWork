@@ -67,6 +67,8 @@
               <File Source="$(SourceDir)\docs\research-model.md" />
               <File Source="$(SourceDir)\docs\installation.md" />
               <File Source="$(SourceDir)\docs\building.md" />
+              <File Source="$(SourceDir)\docs\concurrent-import-design.md" />
+              <File Source="$(SourceDir)\docs\qualification-0.5.0.md" />
               <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="CliGuide" Value="1" Type="integer" KeyPath="yes" />
               <RemoveFolder Id="RemoveDocsFolder" On="uninstall" />
             </Component>

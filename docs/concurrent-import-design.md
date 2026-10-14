@@ -1,6 +1,6 @@
 # Concurrent imports and responsive project work
 
-Status: proposed implementation design. This document specifies an upgrade; it does not describe capabilities already shipped. Baseline: Scopework 0.4.5, commit `56c2b7d`. Date: 2026-10-14.
+Status: implementation contract for the 0.5.0 upgrade. See the CLI guide for implemented commands and release qualification notes for measurements. Baseline: Scopework 0.4.5, commit `56c2b7d`. Date: 2026-10-14.
 
 ## Outcome
 
@@ -166,9 +166,9 @@ This applies Stack Threads' retained-input and validated-publication principles.
 
 Replace repeated UI-thread full-catalog path construction with cached snapshot indexes. Poll only cheap change/job markers, or use a qualified notification adapter with a fallback poll. Show committed inventory counts, import stage, prepared counts, publication status, pause/resume and actionable conflicts without changing meter completion semantics.
 
-## Proposed CLI surface
+## CLI surface
 
-These commands are design proposals, not shipped commands:
+The upgrade implements these commands:
 
 ```text
 research import plan PROJECT --file REQUEST.json

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 - 2026-10-14
+
+See [qualification and performance limits](docs/qualification-0.5.0.md).
+
+- Add durable, resumable additive imports with bounded CPU/file preparation, ID reservations, pause/cancel controls and recoverable catalog-last publication. Existing reports remain editable during preparation.
+- Introduce format-4 compatibility gating and purpose-bound draft, completion and structural tokens. Schema-2 batch draft saves can omit a global revision precondition.
+- Move project refresh, meters, report loading/saving and browser search off the input thread; publish retained snapshots through bounded owner callbacks and preserve unsaved drafts.
+- Pin Rust 1.98.0 and the Solworker Git revision for reproducible GUI/CLI packaging.
+- Add multi-process recovery, concurrency, conflict, cancellation, provider-failure and UI freshness regression coverage.
+
+
 ## 0.4.5 - 2026-10-14
 
 - Fit extra meters per row within the viewport; wrap before overflow, retaining horizontal scrolling for oversized baseline pairs.

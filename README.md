@@ -30,7 +30,8 @@ Each task has a fixed scope. Functions establish their own behavior and connecti
 - **Explicit prerequisites:** shared understanding is referenced, with dependent work reopened when it changes.
 - **Whole-binary inventory:** batch enrollment and reorganization, searchable collapsed records, and explicit context membership.
 - **Visible progress:** project tabs, chunk meters, required and inventory function counts, and a short research-topic header.
-- **GUI and CLI together:** agents can work while the dashboard is open; stale edits are rejected.
+- **GUI and CLI together:** background snapshots update meters; independent draft edits can proceed during additive imports.
+- **Resumable imports:** durable reservations, preparation checkpoints, pause/resume/cancel, and catalog-last publication.
 - **Local files:** your research home stays under your control and survives uninstall.
 
 ## Install
@@ -60,7 +61,8 @@ Scopework is in early development. MSI packages are unsigned. Read each release'
 | [Agent CLI](docs/cli.md) | Creating records, writing reports and managing dependencies |
 | [Build guide](docs/building.md) | Source builds, MSI packaging and repository layout |
 | [Changelog](CHANGELOG.md) | Changes by version |
-| [Concurrent import design](docs/concurrent-import-design.md) | Proposed upgrade for imports, concurrent research edits, and responsive snapshots |
+| [0.5.0 qualification](docs/qualification-0.5.0.md) | Recovery, concurrency, scale measurements and installer checks |
+| [Concurrent import design](docs/concurrent-import-design.md) | Storage and concurrency design for imports, edits, and responsive snapshots |
 
 ## Contribute
 

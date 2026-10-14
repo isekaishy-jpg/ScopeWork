@@ -45,31 +45,31 @@ The label appears above the project's meters and in `project show/list`, `node s
 
 ## Edit and review
 
-Read the node before editing. Its `token` detects stale report or project metadata. Write UTF-8 Markdown body and evidence inputs, then save through the CLI. These are editing inputs; the canonical report remains the file returned by `node show`. Saving leaves the record open for review.
+Read the node before editing. Its draft `token` binds that record, its authored content and relevant structural context. Unrelated draft saves, import ID reservations and scope-label edits do not invalidate it. Write UTF-8 Markdown body and evidence inputs, then save through the CLI. These are editing inputs; the canonical report remains the file returned by `node show`. Saving leaves the record open for review.
 
 ```powershell
 $record = research node show example 3 | ConvertFrom-Json
 research node save example 3 --body-file C:\work\body.md --evidence-file C:\work\evidence.md --expect $record.token
 $record = research node show example 3 | ConvertFrom-Json
 # Review the actual report, evidence and scope criteria before attesting.
-research node complete example 3 --expect $record.token --reviewed
+research node complete example 3 --expect $record.completion_token --reviewed
 $record = research node show example 3 | ConvertFrom-Json
 research node reopen example 3 --expect $record.token
 ```
 
-After another project edit, read again and review rather than blindly retrying a stale write. Evidence must cite exact source/build, addresses or captures and classify claims as observed, specification-defined or inferred. Completion remains an attestation of understanding, not an automated semantic judgment. Completed children enable parent synthesis; they do not complete it. Each assignment stays within its own scope.
+After a record conflict, read again and review rather than blindly retrying. Completion requires its own `completion_token`, binding applicable required children, prerequisites and acceptance state. Dependency changes require `structural_token`. These opaque purposes are not interchangeable. Old unprefixed tokens retain their conservative project-revision semantics. Evidence must cite exact source/build, addresses or captures and classify claims as observed, specification-defined or inferred. Completion remains an attestation of understanding, not an automated semantic judgment. Completed children enable parent synthesis; they do not complete it. Each assignment stays within its own scope.
 
 ## Prerequisites
 
 ```powershell
 research deps get example 3
 $record = research node show example 3 | ConvertFrom-Json
-research deps set example 3 --expect $record.token 000ABCDE 00012345
+research deps set example 3 --expect $record.structural_token 000ABCDE 00012345
 ```
 
 Prerequisite RVAs must already have canonical function records in the same project. Omit the RVAs to clear the list. The app maintains `dep.toml` and `prereq.toml` together; never edit these generated views directly. Only necessary understanding prerequisites belong here, not every call edge.
 
-The dashboard can stay open during CLI work. Writes reload the latest catalog under a project-specific exclusive lock. Concurrent operations on the same project receive a busy error and may retry; different projects proceed independently. Conflicting report edits require review. Use **View > Refresh research progress** to display CLI changes. Unsaved editor text is retained and stale saves are rejected.
+The dashboard can stay open during CLI work. Writes reload the latest catalog under a project-specific exclusive lock. Reads share a coherent project lease. Writes serialize; contention may return a busy error and can be retried. Additive import preparation releases the project lease, allowing existing records to remain usable. Different projects proceed independently. Conflicting report edits require review. Background polling updates meters and catalog snapshots automatically; **View > Refresh research progress** requests an immediate refresh. Unsaved editor text is retained and stale saves are rejected.
 
 ## Complaints
 
@@ -101,11 +101,11 @@ These IDs are illustrative; referenced nodes must exist. JSON RVAs are unsigned 
 
 `update` moves or renames nodes without changing their IDs or RVAs. Omitted fields are preserved. `reorder` must contain every direct child exactly once; it controls browser, meter and generated source-link order. Arrays may be omitted. Existing research bodies, evidence and data stay with their nodes. New records start unresearched; the batch cannot import completion claims or fabricate report content.
 
-The operation holds the project write lock, records the original catalog and affected reports under `tools/workspaces/catalog-transactions/pending`, stages moved folders, updates reports and affected dependency views, and commits the catalog last. The next CLI/GUI open resumes interrupted work after checking recorded inputs. Completed journals remain under `revision-N`; preserve them if recovery reports a conflict. Do not manually edit files during a pending transaction. The journal does not back up arbitrary supporting data; maintain ordinary backups separately.
+Mixed batches containing updates/reordering/link repair hold the project write lock, records the original catalog and affected reports under `tools/workspaces/catalog-transactions-v4/pending`, stages moved folders, updates reports and affected dependency views, and commits the catalog last. The next CLI/GUI open resumes interrupted work after checking recorded inputs. Completed journals remain under `revision-N`; preserve them if recovery reports a conflict. Do not manually edit files during a pending transaction. The journal does not back up arbitrary supporting data; maintain ordinary backups separately.
 
 Ownership, membership, name, order and report changes reopen affected accepted reports and their consumers/ancestors for review. Recognized internal Markdown and prose paths are rebased; external URLs and paths outside the project are retained. Schema-1 annotation-ledger report paths follow moves while original review hashes remain pinned, requiring review of changed evidence.
 
-Batch changes use catalog format 3. Upgrade the GUI and all CLI workers to 0.4.3 or later before using them. Earlier versions refuse these catalogs rather than losing membership information.
+Current operations use catalog format 4. Upgrade the GUI and all CLI workers together to 0.5.0. First open migrates under exclusive compatibility access, retaining metadata under `tools/workspaces/layout-migration-v4`. Earlier versions refuse the new format; do not manually lower its version to downgrade.
 
 ## Required research versus context inventory
 
@@ -160,3 +160,49 @@ Save with `research node save-batch example --file C:\work\reports.json`. IDs an
 The catalog is loaded/indexed once, changed reports are journaled together, and the catalog revision advances once. Exact unchanged open reports are skipped. Saving an accepted report reopens it even when its text is unchanged. Changed reports and affected consumers/ancestors lose acceptance; no batch field can attest completion. Supporting data is retained. Successful JSON returns `saved` node IDs and the resulting `revision`.
 
 The durable `catalog-transactions` journal used for catalog edits makes interrupted report publication resumable on the next open. Preserve journals and do not edit canonical files during pending publication. Completion remains a separate, individually reviewed operation.
+
+
+## Concurrent additive imports (0.5.0)
+
+Creation-only `node batch` requests now use the durable additive pipeline and retain their exact binary/revision admission precondition. They still run to a final receipt in the foreground. Mixed requests retain their existing atomic, exclusive behavior.
+
+```powershell
+research import plan example --file C:\work\inventory.json
+research import start example --file C:\work\inventory.json
+# To reserve without starting preparation:
+research import start example --file C:\work\inventory.json --paused
+research import status example JOB-UUID
+research import pause example JOB-UUID
+research import resume example JOB-UUID
+research import cancel example JOB-UUID
+```
+
+`plan` does not modify catalog or report data. It reports counts, affected existing parents and estimated metadata bytes. A legacy catalog or pending publication must be opened/recovered before planning. Lock files may be created to coordinate the read.
+
+One active import reserves a range of IDs and fixes structural context. Existing report reads, independent drafts and valid completion remain available during preparation. Structural changes and a second import return a structural-job conflict. Pausing retains the reservation; cancellation releases it. Reserved IDs are never reused.
+
+Prepared files live at reserved canonical paths but remain absent from ordinary inventory until the catalog commit. Raw directory enumeration can see these files; use the CLI/catalog for committed inventory. Import progress is not research completion. New nodes always start NotStarted. Existing parent prose and evidence are preserved when generated source links are published.
+
+Durable jobs live under `tools/workspaces/import-jobs/<UUID>`. `status` reports state, prepared/total counts, errors, preserved-file warnings and phase durations. A live OS runner lock prevents competing runners; a dead PID alone proves nothing. Resume validates the immutable request, reservation and prepared output hashes. Pause/cancel is acknowledged after current file work settles. Once publication starts, recovery finishes the commit.
+
+Cancellation deletes only owned outputs whose bytes still match the manifest. Changed reports and additional data are retained and reported in `warnings`. Preserve job journals and receipts when investigating errors. Publication recovery covers process termination, including catalog replacement before the receipt; power-loss ordering and storage-controller failures are not guaranteed.
+
+In **Research records > Inventory import**, enter the request file path and start a hidden CLI runner. Pause, resume and cancel operate on its durable job. Closing the dashboard leaves that runner independent. If launch fails, the reserved job can be resumed from the CLI.
+
+## Independent batch draft saves
+
+Use schema 2 to omit a global revision precondition while retaining all-or-nothing record-token validation:
+
+```json
+{
+  "schema": 2,
+  "binary": "EXACT binary identity from project show",
+  "reports": [
+    {"id": 3, "expect": "d4:opaque-token-from-read", "body": "Authored Markdown", "evidence": "Evidence references"}
+  ]
+}
+```
+
+Submit with `research node save-batch PROJECT --file INPUT.json`. An optional `expect_revision` adds a deliberately strict project-wide precondition. Schema 1 still requires it. Every input is checked against the same starting snapshot before any report changes. Draft batches never attest completion.
+
+Errors retain the JSON `error` message on stderr and include a machine-readable `kind` (for example `record_conflict`, `structural_job_conflict`, `busy`, or `operation_failed`). Successful JSON stays on stdout. See [0.5.0 qualification](qualification-0.5.0.md) for large-catalog latency limits.

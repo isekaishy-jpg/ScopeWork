@@ -154,8 +154,14 @@ impl Rewriter {
 pub(super) fn inside(root: &Path, path: &Path) -> Result<()> {
     let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
     let mut ancestor = path;
-    while !ancestor.exists() {
-        ancestor = ancestor.parent().ok_or("Invalid migration path")?;
+    loop {
+        match fs::symlink_metadata(ancestor) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().ok_or("Invalid migration path")?
+            }
+            Err(e) => return Err(e.to_string()),
+        }
     }
     let actual = fs::canonicalize(ancestor).map_err(|e| e.to_string())?;
     if !actual.starts_with(root) {
@@ -167,7 +173,7 @@ pub(super) fn inside(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
-    if matches!(project.layout_version, 2 | 3) {
+    if matches!(project.layout_version, 2..=4) {
         return Ok(());
     }
     if project.layout_version != 1 {
