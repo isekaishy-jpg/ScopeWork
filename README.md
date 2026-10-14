@@ -2,9 +2,11 @@
 
 A compact Rust desktop dashboard for binary research, with a separate tab for Stock and Forever.
 
-Each project uses one classic Task Manager-style page: small Tahoma text, grey beveled tabs and framing, and a tightly stacked bank of thin horizontal black meters. Each meter represents one function chunk, with green for done, red for in progress, and grey for not done. Chunk function counts sit beside the meters; architecture totals appear once per group. The bottom strip shows project totals and the current or selected chunk count. Hover or click a meter to inspect it.
+The entire application uses classic Task Manager styling: custom blue title bar and window buttons, grey beveled window frame, File/Options/View/Help menus, research tabs, recessed panels, small Tahoma text, and a three-part status strip. Drag the title bar to move the window; double-click it or use the maximize button to maximize. The lower-right grip resizes it.
 
-The current sample page fits 24 chunk meters in a single 800 x 600 window.
+Each project page has horizontal segmented meters, a total-function coverage meter, and function/chunk count fields. Green means done, red means in progress, and grey means not done. Click a chunk meter to inspect its architecture, name, function count, and state. The initial current chunk is the first in-progress sample chunk. The sample page holds 24 meters in a 740 x 520 window.
+
+Menus provide Exit, Always on top, Clear chunk selection, and About.
 
 All current categories, counts, and statuses are labeled sample data. The research inventory, deliverables, and acceptance rules will be defined later. Existing research claims have not been imported.
 
