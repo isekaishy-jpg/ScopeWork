@@ -473,7 +473,27 @@ impl eframe::App for Dashboard {
                 let (name,n,status,completed)=data[selected.0].groups[selected.1].clone();
                 let top=82.0;
                 let meter_h=(h-270.0).max(218.0);
-                let bank=r(15.0,top,w-30.0,meter_h);
+                let detail=r(15.0,top,174.0,meter_h);
+                group_box(&p,detail,"Selected meter");
+                let well=detail.shrink2(Vec2::new(10.0,17.0));
+                p.rect_filled(well,0.0,Color32::BLACK);bevel(&p,well,true);
+                let selected_index=selected.0*4+selected.1;
+                let selected_chunks=project_counts[selected_index];
+                let selected_done=if live {live_meters.get(selected_index).map(|m|m.states.iter().filter(|&&s|s==0).count()).unwrap_or(0)}else{completed*selected_chunks/n.max(1)};
+                let title=if live {name.clone()} else {format!("{} / {name}",data[selected.0].name)};
+                let heading=p.layout(title,egui::FontId::proportional(11.0),GREEN,well.width()-14.0);
+                let heading_height=heading.size().y;
+                p.galley(well.min+Vec2::new(7.0,8.0),heading,GREEN);
+                let bar=egui::Rect::from_min_size(well.min+Vec2::new(6.0,heading_height+20.0),Vec2::new(well.width()-12.0,32.0));
+                led(&p,bar,selected_done,selected_chunks,[GREEN,YELLOW,RED][status],((bar.width()-6.0)/3.0).floor() as usize);
+                let readout=bar.bottom()+19.0;
+                text(&p,well.left()+7.0,readout,["Complete","In progress","Not done"][status],GREEN);
+                text(&p,well.left()+7.0,readout+24.0,format!("Chunks: {selected_done} / {selected_chunks}"),GREEN);
+                text(&p,well.left()+7.0,readout+45.0,format!("Funcs: {} / {}",completed*scale,n*scale),GREEN);
+                text(&p,well.left()+7.0,readout+69.0,format!("{}% chunks complete",selected_done*100/selected_chunks.max(1)),GREEN);
+                let hint=p.layout("Click a meter to inspect it.".into(),egui::FontId::proportional(11.0),Color32::from_gray(150),well.width()-14.0);
+                p.galley(egui::pos2(well.left()+7.0,readout+96.0),hint,Color32::from_gray(150));
+                let bank=r(201.0,top,w-216.0,meter_h);
                 group_box(&p, bank, "Research chunks");
                 // Preserve meter styling; only the arrangement and configurable length change.
                 ui.scope_builder(
