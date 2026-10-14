@@ -70,20 +70,58 @@ fn rows() -> [Row; 6] {
     ]
 }
 
-#[derive(Default)]
 struct Dashboard {
     project: usize,
     selection: Option<(usize, usize)>,
     menu: Option<usize>,
     on_top: bool,
     about: bool,
+    dark: bool,
+}
+
+impl Default for Dashboard {
+    fn default() -> Self {
+        Self {
+            project: 0,
+            selection: None,
+            menu: None,
+            on_top: false,
+            about: false,
+            dark: true,
+        }
+    }
+}
+fn background(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(27, 30, 36)
+    } else {
+        BG
+    }
+}
+fn foreground(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(221, 226, 234)
+    } else {
+        Color32::BLACK
+    }
 }
 
 fn bevel(p: &egui::Painter, r: egui::Rect, inset: bool) {
-    let (light, dark) = if inset {
-        (Color32::from_gray(110), Color32::WHITE)
+    let dark_mode = p.ctx().style().visuals.dark_mode;
+    let highlight = if dark_mode {
+        Color32::from_rgb(58, 64, 75)
     } else {
-        (Color32::WHITE, Color32::from_gray(110))
+        Color32::WHITE
+    };
+    let shadow = if dark_mode {
+        Color32::from_rgb(15, 18, 23)
+    } else {
+        Color32::from_gray(110)
+    };
+    let (light, dark) = if inset {
+        (shadow, highlight)
+    } else {
+        (highlight, shadow)
     };
     p.line_segment(
         [r.left_bottom(), r.left_top()],
@@ -100,6 +138,13 @@ fn bevel(p: &egui::Painter, r: egui::Rect, inset: bool) {
     );
 }
 fn text(p: &egui::Painter, x: f32, y: f32, s: impl ToString, color: Color32) {
+    let color = if p.ctx().style().visuals.dark_mode
+        && (color == Color32::BLACK || color == Color32::from_gray(65))
+    {
+        foreground(true)
+    } else {
+        color
+    };
     p.text(
         egui::pos2(x, y),
         egui::Align2::LEFT_CENTER,
@@ -114,7 +159,7 @@ fn group_box(p: &egui::Painter, r: egui::Rect, title: &str) {
     let galley = p.layout_no_wrap(
         title.into(),
         egui::FontId::proportional(11.0),
-        Color32::BLACK,
+        foreground(p.ctx().style().visuals.dark_mode),
     );
     p.rect_filled(
         egui::Rect::from_min_size(
@@ -122,9 +167,13 @@ fn group_box(p: &egui::Painter, r: egui::Rect, title: &str) {
             galley.size() + Vec2::new(6.0, 0.0),
         ),
         0.0,
-        BG,
+        background(p.ctx().style().visuals.dark_mode),
     );
-    p.galley(r.min + Vec2::new(10.0, -6.0), galley, Color32::BLACK);
+    p.galley(
+        r.min + Vec2::new(10.0, -6.0),
+        galley,
+        foreground(p.ctx().style().visuals.dark_mode),
+    );
 }
 // CPU Usage meter from the reference, rotated clockwise: thin vertical
 // segments fill left-to-right, with the unlit lattice remaining visible.
@@ -158,9 +207,33 @@ fn led(p: &egui::Painter, r: egui::Rect, complete: usize, total: usize, color: C
 }
 
 impl eframe::App for Dashboard {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string("dark_mode", self.dark.to_string());
+    }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if ctx.style().visuals.dark_mode != self.dark {
+            let mut visuals = if self.dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            };
+            visuals.override_text_color = Some(foreground(self.dark));
+            visuals.panel_fill = background(self.dark);
+            for widget in [
+                &mut visuals.widgets.noninteractive,
+                &mut visuals.widgets.inactive,
+                &mut visuals.widgets.hovered,
+                &mut visuals.widgets.active,
+                &mut visuals.widgets.open,
+            ] {
+                widget.corner_radius = egui::CornerRadius::ZERO;
+            }
+            ctx.set_visuals(visuals);
+        }
+        let bg = background(self.dark);
+        let ink = foreground(self.dark);
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(4.0))
+            .frame(egui::Frame::new().fill(bg).inner_margin(4.0))
             .show(ctx, |ui| {
                 let o = ui.min_rect().min;
                 let w = ui.available_width();
@@ -173,9 +246,17 @@ impl eframe::App for Dashboard {
                 bevel(&p, r(-2.0, -2.0, w + 4.0, h + 4.0), false);
                 // Own the window chrome as well as the content, avoiding modern Windows decoration.
                 let title = r(0.0, 0.0, w, 20.0);
-                p.rect_filled(title, 0.0, Color32::from_rgb(0, 0, 128));
+                p.rect_filled(
+                    title,
+                    0.0,
+                    if self.dark {
+                        Color32::from_rgb(37, 48, 66)
+                    } else {
+                        Color32::from_rgb(0, 0, 128)
+                    },
+                );
                 let icon = r(3.0, 3.0, 14.0, 14.0);
-                p.rect_filled(icon, 0.0, BG);
+                p.rect_filled(icon, 0.0, bg);
                 bevel(&p, icon, false);
                 p.rect_filled(icon.shrink(3.0), 0.0, Color32::BLACK);
                 p.line_segment(
@@ -207,31 +288,31 @@ impl eframe::App for Dashboard {
                 }
                 for i in 0..3 {
                     let b = r(w - 55.0 + i as f32 * 18.0, 3.0, 16.0, 14.0);
-                    p.rect_filled(b, 0.0, BG);
+                    p.rect_filled(b, 0.0, bg);
                     bevel(&p, b, false);
                     match i {
                         0 => {
                             p.line_segment(
                                 [b.min + Vec2::new(4.0, 10.0), b.min + Vec2::new(11.0, 10.0)],
-                                egui::Stroke::new(2.0, Color32::BLACK),
+                                egui::Stroke::new(2.0, ink),
                             );
                         }
                         1 => {
                             p.rect_stroke(
                                 b.shrink(3.0),
                                 0.0,
-                                egui::Stroke::new(1.0, Color32::BLACK),
+                                egui::Stroke::new(1.0, ink),
                                 egui::StrokeKind::Inside,
                             );
                         }
                         _ => {
                             p.line_segment(
                                 [b.min + Vec2::new(4.0, 3.0), b.max - Vec2::new(4.0, 3.0)],
-                                egui::Stroke::new(1.0, Color32::BLACK),
+                                egui::Stroke::new(1.0, ink),
                             );
                             p.line_segment(
                                 [b.min + Vec2::new(4.0, 11.0), b.min + Vec2::new(12.0, 3.0)],
-                                egui::Stroke::new(1.0, Color32::BLACK),
+                                egui::Stroke::new(1.0, ink),
                             );
                         }
                     }
@@ -259,7 +340,15 @@ impl eframe::App for Dashboard {
                 {
                     let mr = r(*x, 22.0, if i == 1 { 54.0 } else { 34.0 }, 18.0);
                     if self.menu == Some(i) {
-                        p.rect_filled(mr, 0.0, Color32::from_gray(190));
+                        p.rect_filled(
+                            mr,
+                            0.0,
+                            if self.dark {
+                                Color32::from_rgb(50, 57, 69)
+                            } else {
+                                Color32::from_gray(190)
+                            },
+                        );
                         bevel(&p, mr, true);
                     }
                     t(*x + 4.0, 31.0, label.to_string());
@@ -274,12 +363,12 @@ impl eframe::App for Dashboard {
                 bevel(&p, panel, false);
                 for (i, name) in ["Stock", "Forever"].iter().enumerate() {
                     let tab = r(5.0 + i as f32 * 61.0, 43.0, 61.0, 22.0);
-                    p.rect_filled(tab, 0.0, BG);
+                    p.rect_filled(tab, 0.0, bg);
                     bevel(&p, tab, false);
                     if self.project == i {
                         p.line_segment(
                             [tab.left_bottom(), tab.right_bottom()],
-                            egui::Stroke::new(2.0, BG),
+                            egui::Stroke::new(2.0, bg),
                         );
                     }
                     t(17.0 + i as f32 * 61.0, 54.0, name.to_string());
@@ -418,7 +507,14 @@ impl eframe::App for Dashboard {
                             p.rect_stroke(
                                 meter.expand(1.0),
                                 0.0,
-                                egui::Stroke::new(1.0, Color32::from_rgb(0, 0, 128)),
+                                egui::Stroke::new(
+                                    1.0,
+                                    if self.dark {
+                                        Color32::from_rgb(125, 170, 239)
+                                    } else {
+                                        Color32::from_rgb(0, 0, 128)
+                                    },
+                                ),
                                 egui::StrokeKind::Outside,
                             );
                         }
@@ -503,15 +599,31 @@ impl eframe::App for Dashboard {
         if let Some(menu) = self.menu {
             let x = [8.0, 42.0, 98.0, 136.0][menu];
             let mut action = false;
+            let mut toggle_theme = false;
             let popup = egui::Area::new(egui::Id::new("classic menu"))
                 .fixed_pos(egui::pos2(x, 44.0))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     egui::Frame::new()
-                        .fill(BG)
+                        .fill(bg)
                         .stroke(egui::Stroke::new(1.0, Color32::from_gray(100)))
                         .inner_margin(3.0)
                         .show(ui, |ui| {
+                            if menu == 1
+                                && ui
+                                    .add_sized(
+                                        [185.0, 23.0],
+                                        egui::Button::new(if self.dark {
+                                            "✓ Dark mode"
+                                        } else {
+                                            "Dark mode"
+                                        })
+                                        .frame(false),
+                                    )
+                                    .clicked()
+                            {
+                                toggle_theme = true;
+                            }
                             let label = match menu {
                                 0 => "Exit",
                                 1 => {
@@ -532,7 +644,11 @@ impl eframe::App for Dashboard {
                             }
                         });
                 });
-            if action {
+            if toggle_theme {
+                self.dark = !self.dark;
+                self.menu = None;
+                ctx.request_repaint();
+            } else if action {
                 match menu {
                     0 => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                     1 => {
@@ -608,7 +724,11 @@ fn main() -> eframe::Result {
             cc.egui_ctx.style_mut(|s| {
                 s.spacing.item_spacing = Vec2::new(8.0, 4.0);
             });
-            Ok(Box::new(Dashboard::default()))
+            let mut app = Dashboard::default();
+            if let Some(value) = cc.storage.and_then(|s| s.get_string("dark_mode")) {
+                app.dark = value != "false";
+            }
+            Ok(Box::new(app))
         }),
     )
 }
