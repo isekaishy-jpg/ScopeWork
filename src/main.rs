@@ -77,6 +77,7 @@ struct Dashboard {
     on_top: bool,
     about: bool,
     dark: bool,
+    chunk_counts: Vec<usize>,
 }
 
 impl Default for Dashboard {
@@ -88,6 +89,7 @@ impl Default for Dashboard {
             on_top: false,
             about: false,
             dark: true,
+            chunk_counts: vec![64; 48],
         }
     }
 }
@@ -177,11 +179,18 @@ fn group_box(p: &egui::Painter, r: egui::Rect, title: &str) {
 }
 // CPU Usage meter from the reference, rotated clockwise: thin vertical
 // segments fill left-to-right, with the unlit lattice remaining visible.
-fn led(p: &egui::Painter, r: egui::Rect, complete: usize, total: usize, color: Color32) {
+fn led(
+    p: &egui::Painter,
+    r: egui::Rect,
+    complete: usize,
+    total: usize,
+    color: Color32,
+    cells: usize,
+) {
     p.rect_filled(r, 0.0, Color32::BLACK);
     bevel(p, r, true);
     let inner = r.shrink(3.0);
-    let cells = (inner.width() / 3.0).floor().max(1.0) as usize;
+
     let fraction = if total == 0 {
         0.0
     } else {
@@ -215,6 +224,7 @@ fn led(p: &egui::Painter, r: egui::Rect, complete: usize, total: usize, color: C
 impl eframe::App for Dashboard {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("dark_mode", self.dark.to_string());
+        eframe::set_value(storage, "chunk_counts", &self.chunk_counts);
     }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if ctx.style().visuals.dark_mode != self.dark {
@@ -398,12 +408,14 @@ impl eframe::App for Dashboard {
                     }
                 }
                 let total: usize = counts.iter().sum();
-                let total_chunks: usize = data.iter().map(|r| r.groups.len()).sum();
-                let done_chunks = data
+                let project_counts = &self.chunk_counts[self.project * 24..self.project * 24 + 24];
+                let total_chunks: usize = project_counts.iter().sum();
+                let done_chunks: usize = data
                     .iter()
                     .flat_map(|r| r.groups.iter())
-                    .filter(|g| g.2 == 0)
-                    .count();
+                    .zip(project_counts)
+                    .map(|(g, &count)| g.3 * count / g.1)
+                    .sum();
                 let selected = self.selection.unwrap_or((0, 2));
                 let (name, n, status, completed) = data[selected.0].groups[selected.1];
                 let top = 82.0;
@@ -429,6 +441,7 @@ impl eframe::App for Dashboard {
                     counts[0],
                     total,
                     GREEN,
+                    ((well.width() - 16.0) / 3.0).floor() as usize,
                 );
                 text(
                     &p,
@@ -460,6 +473,7 @@ impl eframe::App for Dashboard {
                     completed,
                     n,
                     [GREEN, YELLOW, RED][status],
+                    ((well.width() - 16.0) / 3.0).floor() as usize,
                 );
                 text(
                     &p,
@@ -470,74 +484,126 @@ impl eframe::App for Dashboard {
                 );
                 let bank = r(149.0, top, w - 164.0, meter_h);
                 group_box(&p, bank, "Research chunks");
-                // Four named chunks per architecture row, with readable meters and counts.
-                let row_height = (bank.height() - 28.0) / 6.0;
-                let col_width = (bank.width() - 46.0) / 4.0;
-                for ri in 0..6 {
-                    for gi in 0..4 {
-                        let index = ri * 4 + gi;
-                        let col = index % 4;
-                        let slot = index / 4;
-                        let (chunk, num, state, finished) = data[ri].groups[gi];
-                        let x = bank.left() + 8.0 + col as f32 * (col_width + 10.0);
-                        let y = bank.top() + 16.0 + slot as f32 * row_height;
-                        let meter = egui::Rect::from_min_size(
-                            egui::pos2(x, y + 15.0),
-                            Vec2::new(col_width, 32.0),
-                        );
-                        led(&p, meter, finished, num, [GREEN, YELLOW, RED][state]);
-                        text(
-                            &p,
-                            x,
-                            y + 5.0,
-                            format!("{} / {chunk}", data[ri].name),
-                            Color32::BLACK,
-                        );
-                        text(
-                            &p,
-                            x,
-                            meter.bottom() + 10.0,
-                            format!("Chunk: {} / {total_chunks}", index + 1),
-                            Color32::BLACK,
-                        );
-                        text(
-                            &p,
-                            x,
-                            meter.bottom() + 24.0,
-                            format!("Funcs: {} / {}", finished * scale, num * scale),
-                            Color32::from_gray(65),
-                        );
-                        let hit = ui.interact(
-                            meter,
-                            ui.id().with((ri, gi, "chunk")),
-                            egui::Sense::click(),
-                        );
-                        if hit.clicked() {
-                            self.selection = Some((ri, gi));
-                        }
-                        if selected == (ri, gi) {
-                            p.rect_stroke(
-                                meter.expand(1.0),
-                                0.0,
-                                egui::Stroke::new(
-                                    1.0,
-                                    if self.dark {
-                                        Color32::from_rgb(125, 170, 239)
-                                    } else {
-                                        Color32::from_rgb(0, 0, 128)
-                                    },
-                                ),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                        hit.on_hover_text(format!(
-                            "{} / {chunk}: {} functions - {}",
-                            data[ri].name,
-                            num * scale,
-                            ["Done", "In progress", "Not done"][state]
-                        ));
-                    }
-                }
+                // Preserve meter styling; only the arrangement and configurable length change.
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(bank.shrink2(Vec2::new(8.0, 16.0))),
+                    |ui| {
+                        egui::ScrollArea::both()
+                            .id_salt(("meters", self.project))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let longest = self.chunk_counts
+                                    [self.project * 24..self.project * 24 + 24]
+                                    .iter()
+                                    .copied()
+                                    .max()
+                                    .unwrap_or(0);
+                                let col_width =
+                                    ((bank.width() - 28.0) / 2.0).max(longest as f32 * 3.0 + 6.0);
+                                let row_height = 90.0;
+                                let (area, _) = ui.allocate_exact_size(
+                                    Vec2::new(col_width * 2.0 + 10.0, row_height * 12.0),
+                                    egui::Sense::hover(),
+                                );
+                                let base = area.min;
+                                let p = ui.painter().clone();
+                                for ri in 0..6 {
+                                    for gi in 0..4 {
+                                        let index = ri * 4 + gi;
+                                        let col = index % 2;
+                                        let slot = index / 2;
+                                        let (chunk, num, state, finished) = data[ri].groups[gi];
+                                        let x = base.x + col as f32 * (col_width + 10.0);
+                                        let y = base.y + slot as f32 * row_height;
+                                        let count_index = self.project * 24 + index;
+                                        let segment_count = self.chunk_counts[count_index];
+                                        let meter = egui::Rect::from_min_size(
+                                            egui::pos2(x, y + 15.0),
+                                            Vec2::new(6.0 + segment_count as f32 * 3.0, 32.0),
+                                        );
+                                        led(
+                                            &p,
+                                            meter,
+                                            finished,
+                                            num,
+                                            [GREEN, YELLOW, RED][state],
+                                            segment_count,
+                                        );
+                                        text(
+                                            &p,
+                                            x,
+                                            y + 5.0,
+                                            format!("{} / {chunk}", data[ri].name),
+                                            Color32::BLACK,
+                                        );
+                                        text(
+                                            &p,
+                                            x,
+                                            meter.bottom() + 10.0,
+                                            format!(
+                                                "Chunks: {} / {}",
+                                                finished * segment_count / num,
+                                                segment_count
+                                            ),
+                                            Color32::BLACK,
+                                        );
+                                        text(
+                                            &p,
+                                            x,
+                                            meter.bottom() + 24.0,
+                                            format!(
+                                                "Funcs: {} / {}",
+                                                finished * scale,
+                                                num * scale
+                                            ),
+                                            Color32::from_gray(65),
+                                        );
+                                        let hit = ui.interact(
+                                            meter,
+                                            ui.id().with((ri, gi, "chunk")),
+                                            egui::Sense::click(),
+                                        );
+                                        if hit.clicked() {
+                                            self.selection = Some((ri, gi));
+                                        }
+                                        if selected == (ri, gi) {
+                                            p.rect_stroke(
+                                                meter.expand(1.0),
+                                                0.0,
+                                                egui::Stroke::new(
+                                                    1.0,
+                                                    if self.dark {
+                                                        Color32::from_rgb(125, 170, 239)
+                                                    } else {
+                                                        Color32::from_rgb(0, 0, 128)
+                                                    },
+                                                ),
+                                                egui::StrokeKind::Outside,
+                                            );
+                                        }
+                                        hit.context_menu(|ui| {
+                                            ui.label("Chunk segments");
+                                            ui.add(
+                                                egui::DragValue::new(
+                                                    &mut self.chunk_counts[count_index],
+                                                )
+                                                .range(0..=4096),
+                                            );
+                                            ui.label(
+                                                "One segment per chunk. Saved for this project.",
+                                            );
+                                        });
+                                        hit.on_hover_text(format!(
+                                            "{} / {chunk}: {} functions - {}",
+                                            data[ri].name,
+                                            num * scale,
+                                            ["Done", "In progress", "Not done"][state]
+                                        ));
+                                    }
+                                }
+                            });
+                    },
+                );
                 let bottom = top + meter_h + 18.0;
                 let stats = r(15.0, bottom, 220.0, 116.0);
                 group_box(&p, stats, "Functions");
@@ -738,6 +804,14 @@ fn main() -> eframe::Result {
             let mut app = Dashboard::default();
             if let Some(value) = cc.storage.and_then(|s| s.get_string("dark_mode")) {
                 app.dark = value != "false";
+            }
+            if let Some(saved) = cc
+                .storage
+                .and_then(|s| eframe::get_value::<Vec<usize>>(s, "chunk_counts"))
+            {
+                if saved.len() == 48 {
+                    app.chunk_counts = saved.into_iter().map(|n| n.min(4096)).collect();
+                }
             }
             Ok(Box::new(app))
         }),

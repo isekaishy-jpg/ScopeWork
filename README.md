@@ -25,3 +25,5 @@ Keep Stock and Forever evidence and acceptance records separate. Pin real invent
 Each individual bar is a research chunk. Its header identifies it; the two lines underneath separately report chunk status and function count. This labeling does not change the meter layout or introduce individually selectable pips.
 
 Each bar reports `Chunk: X / total chunks` (its ordinal in the project) and `Funcs: completed / total` for that chunk. Green means the chunk is complete, yellow means in progress, and red means not done. Project totals separately report completed chunks and completed functions. Yellow chunks still have work in progress.
+
+Meters are arranged two per row, retaining the same styling and fixed segment size. Right-click any meter to edit its chunk segment count (0–4096); its length follows that count. Counts are saved locally and separately for Stock and Forever. The meter panel scrolls for additional rows or long meters. Function counts remain separate. Progress is still illustrative sample data.
