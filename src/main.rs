@@ -177,6 +177,14 @@ fn group_box(p: &egui::Painter, r: egui::Rect, title: &str) {
         foreground(p.ctx().style().visuals.dark_mode),
     );
 }
+const METER_HEIGHT: f32 = 46.0;
+const METER_ROW_HEIGHT: f32 = 90.0;
+fn meter_width(segments: usize) -> f32 {
+    6.0 + segments as f32 * 3.0
+}
+fn meter_column_width(bank_width: f32, longest: usize) -> f32 {
+    ((bank_width - 28.0) / 2.0).max(meter_width(longest))
+}
 // CPU Usage meter from the reference, rotated clockwise: thin vertical
 // segments fill left-to-right, with the unlit lattice remaining visible.
 fn led(
@@ -498,9 +506,8 @@ impl eframe::App for Dashboard {
                                     .copied()
                                     .max()
                                     .unwrap_or(0);
-                                let col_width =
-                                    ((bank.width() - 28.0) / 2.0).max(longest as f32 * 3.0 + 6.0);
-                                let row_height = 90.0;
+                                let col_width = meter_column_width(bank.width(), longest);
+                                let row_height = METER_ROW_HEIGHT;
                                 let (area, _) = ui.allocate_exact_size(
                                     Vec2::new(col_width * 2.0 + 10.0, row_height * 12.0),
                                     egui::Sense::hover(),
@@ -519,7 +526,7 @@ impl eframe::App for Dashboard {
                                         let segment_count = self.chunk_counts[count_index];
                                         let meter = egui::Rect::from_min_size(
                                             egui::pos2(x, y + 15.0),
-                                            Vec2::new(6.0 + segment_count as f32 * 3.0, 32.0),
+                                            Vec2::new(meter_width(segment_count), METER_HEIGHT),
                                         );
                                         led(
                                             &p,
@@ -541,22 +548,13 @@ impl eframe::App for Dashboard {
                                             x,
                                             meter.bottom() + 10.0,
                                             format!(
-                                                "Chunks: {} / {}",
+                                                "Chunks: {} / {}    Funcs: {} / {}",
                                                 finished * segment_count / num,
-                                                segment_count
-                                            ),
-                                            Color32::BLACK,
-                                        );
-                                        text(
-                                            &p,
-                                            x,
-                                            meter.bottom() + 24.0,
-                                            format!(
-                                                "Funcs: {} / {}",
+                                                segment_count,
                                                 finished * scale,
                                                 num * scale
                                             ),
-                                            Color32::from_gray(65),
+                                            Color32::BLACK,
                                         );
                                         let hit = ui.interact(
                                             meter,
@@ -816,4 +814,37 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    #[test]
+    fn chunk_widths_preserve_segment_pitch_and_fit_columns() {
+        for bank in [888.0, 928.0, 1440.0] {
+            for count in [0, 1, 8, 32, 64, 128, 256, 4096] {
+                let width = meter_width(count);
+                assert_eq!(width, 6.0 + count as f32 * 3.0);
+                let column = meter_column_width(bank, count);
+                let second_x = column + 10.0;
+                assert!(width <= column);
+                assert!(width < second_x);
+                assert!(second_x + width <= column * 2.0 + 10.0);
+                // The last pip stays inside the 3px recessed right edge.
+                if count > 0 {
+                    assert!(3.0 + (count - 1) as f32 * 3.0 + 2.0 <= width - 3.0);
+                }
+            }
+        }
+    }
+    #[test]
+    fn long_meters_expand_scroll_extent_without_overlapping() {
+        let bank = 928.0;
+        assert!(meter_column_width(bank, 64) * 2.0 + 10.0 <= bank - 16.0);
+        assert!(meter_column_width(bank, 4096) * 2.0 + 10.0 > bank);
+        assert_eq!(meter_width(64), 198.0);
+        assert_eq!(meter_width(128), 390.0);
+        assert_eq!(meter_width(256), 774.0);
+        assert!(15.0 + METER_HEIGHT + 10.0 + 6.0 < METER_ROW_HEIGHT);
+    }
 }
