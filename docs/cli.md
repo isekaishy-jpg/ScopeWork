@@ -15,7 +15,7 @@ research home
 research init
 research gui
 research project list
-research project create example --name "Example" --scope "Archive lookup only; exclude rendering and networking." --binary "Build ...; SHA-256 ...; image base ..."
+research project create example --name "Example" --scope "Asset platform" --binary "Build ...; SHA-256 ...; image base ..."
 research project show example
 research project set-binary example --binary "Build ...; SHA-256 ...; image base ..."
 research node create example --parent 0 --name "Asset loading"
@@ -34,14 +34,14 @@ Use the actual IDs returned by creation; the numbers above illustrate a fresh pr
 
 ## Project research scope
 
-Use `project create --scope "..."` or set a longer UTF-8 Markdown scope from a file:
+Research Scope is a few words naming the research topic, such as Rendering or Asset platform. Set it during project creation with `--scope`, or update it directly:
 
 ```powershell
 $project = research project show example | ConvertFrom-Json
-research project set-scope example --scope-file C:\work\scope.md --expect-revision $project.revision
+research project set-scope example --scope "Asset platform" --expect-revision $project.revision
 ```
 
-State the objective, included behavior, exclusions and boundaries. The scope may cover a whole binary or a selected part. It is required before completing records; `node show`, `project show/list`, and `status` include it. The app report represents completion of this declared scope, not automatically the entire executable. Agents must review that the hierarchy covers the scope; the app cannot infer coverage from prose. Changing scope reopens app synthesis for review and rejects stale project revisions. Update affected child assignments explicitly.
+The label appears above the project's meters and in `project show/list`, `node show`, and `status`. It identifies what agents are researching. Changing it does not reopen completed reports or change assignments. Pass an empty label to clear it.
 
 ## Edit and review
 

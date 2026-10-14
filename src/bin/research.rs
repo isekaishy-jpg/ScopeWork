@@ -66,7 +66,7 @@ enum ProjectCommand {
         name: String,
         #[arg(long, default_value = "")]
         binary: String,
-        /// Optional initial research objective and boundaries; required before completion.
+        /// Short research topic, such as Rendering or Asset platform.
         #[arg(long)]
         scope: Option<String>,
     },
@@ -79,11 +79,11 @@ enum ProjectCommand {
         #[arg(long)]
         binary: String,
     },
-    /// Set the objective/boundaries. Reopens the app synthesis report for review.
+    /// Set the short research-topic label displayed above the meters.
     SetScope {
         project: String,
         #[arg(long)]
-        scope_file: PathBuf,
+        scope: String,
         /// Revision from project show; rejects concurrent project edits.
         #[arg(long)]
         expect_revision: u64,
@@ -236,8 +236,8 @@ fn run(args: Args) -> Result<Value, String> {
                     .collect::<Vec<_>>()
             )),
             ProjectCommand::Create { id, name, binary, scope } => {
-                if scope.as_ref().is_some_and(|s| s.trim().is_empty() || s.contains("<!-- research-")) {
-                    return Err("Scope must be nonempty and contain no reserved report markers.".into());
+                if scope.as_ref().is_some_and(|s| s.trim().chars().any(char::is_control)) {
+                    return Err("Scope must be a single-line topic label.".into());
                 }
                 lib.create(&id, &name, &binary)?;
                 if let Some(scope) = scope { let p=project(&lib,&id)?; lib.set_scope(p,&scope,0)?; }
@@ -255,9 +255,8 @@ fn run(args: Args) -> Result<Value, String> {
                 lib.set_binary(p, &binary)?;
                 Ok(json!({"project":id,"binary":binary}))
             }
-            ProjectCommand::SetScope { project:id, scope_file, expect_revision } => {
+            ProjectCommand::SetScope { project:id, scope, expect_revision } => {
                 let p=project(&lib,&id)?;
-                let scope=fs::read_to_string(scope_file).map_err(|e| e.to_string())?;
                 lib.set_scope(p,&scope,expect_revision)?;
                 Ok(json!({"project":id,"research_scope":lib.projects[p].research_scope,"revision":lib.projects[p].revision}))
             }
@@ -349,9 +348,9 @@ fn run(args: Args) -> Result<Value, String> {
                 let blocked_children:Vec<_>=children.iter().filter(|c|lib.effective(p,c.id)!=Status::Complete).map(|c|c.id).collect();
                 let blocked_prerequisites:Vec<_>=lib.projects[p].dependencies.iter().filter(|e|e.dependent==n.id&&lib.effective(p,e.prerequisite)!=Status::Complete).map(|e|e.prerequisite).collect();
                 json!({"id":n.id,"name":n.name,"kind":n.kind,"status":lib.effective(p,n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
-                    "ready_for_review":!lib.projects[p].research_scope.trim().is_empty()&&lib.effective(p,n.id)!=Status::Complete&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty())})
+                    "ready_for_review":lib.effective(p,n.id)!=Status::Complete&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty())})
             }).collect();
-            Ok(json!({"project":id,"app_status":lib.effective(p,0),"research_scope":lib.projects[p].research_scope,"scope_required":lib.projects[p].research_scope.trim().is_empty(),"records":records}))
+            Ok(json!({"project":id,"app_status":lib.effective(p,0),"research_scope":lib.projects[p].research_scope,"records":records}))
         }
         Command::Home | Command::Gui | Command::Criteria { .. } => unreachable!(),
     }

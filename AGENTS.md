@@ -22,4 +22,4 @@ Build one Rust GUI for managing isolated binary research projects. Initial proje
 
 - Use the documented research CLI for catalog/report mutations; read docs/cli.md. Resolve the home with research home; never assume the checkout is the data home. Do not migrate or import historical material automatically. Carry-over is manual. Keep app installation separate from research; uninstall must preserve user research.
 
-- Every project must declare research scope (objective, included behavior, exclusions and boundaries). Never infer whole-binary scope from binary identity. Completion requires a set scope; the app report attests coverage of that scope. Scope changes reopen app synthesis; explicitly update any affected child assignments.
+- Research Scope is a short project topic label, such as Rendering or Asset platform, shown above the meters and exposed by the CLI. It tells agents what is being researched; do not turn it into a detailed charter or an additional completion gate. Editing the label does not reopen research. Detailed understanding belongs in canonical reports.

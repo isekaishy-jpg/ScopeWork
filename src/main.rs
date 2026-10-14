@@ -494,7 +494,15 @@ impl eframe::App for Dashboard {
                 let hint=p.layout("Click a meter to inspect it.".into(),egui::FontId::proportional(11.0),Color32::from_gray(150),well.width()-14.0);
                 p.galley(egui::pos2(well.left()+7.0,readout+96.0),hint,Color32::from_gray(150));
                 let bank=r(201.0,top,w-216.0,meter_h);
-                group_box(&p, bank, "Research chunks");
+                let scope=project_view.as_ref().map(|project|project.research_scope.trim()).unwrap_or("");
+                let header=if scope.is_empty(){"Research scope: Not set".to_string()}else{format!("Research scope: {scope}")};
+                let mut visible_header=header.clone();
+                while p.layout_no_wrap(visible_header.clone(),egui::FontId::proportional(11.0),ink).size().x>bank.width()-30.0 && visible_header.chars().count()>2 {
+                    if visible_header.ends_with('\u{2026}'){visible_header.pop();}
+                    visible_header.pop();visible_header.push('\u{2026}');
+                }
+                group_box(&p, bank, &visible_header);
+                ui.interact(egui::Rect::from_min_size(bank.min-Vec2::new(0.0,8.0),Vec2::new(bank.width(),18.0)),ui.id().with("scope_heading"),egui::Sense::hover()).on_hover_text(&header);
                 // Preserve meter styling; only the arrangement and configurable length change.
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(bank.shrink2(Vec2::new(8.0, 16.0))),

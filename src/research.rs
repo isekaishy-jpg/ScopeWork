@@ -26,7 +26,7 @@ impl Kind {
                 "Synthesize the completed chunk reports into an explanation of this subsystem's behavior and interfaces. Every required chunk must be complete."
             }
             Self::App => {
-                "Synthesize the completed architecture reports to fulfill the project's declared research scope, including its boundaries and relevant subsystem interactions. Every required architecture must be complete. Whole-binary understanding is required only when the declared scope calls for it."
+                "Synthesize the completed architecture reports to explain the project's research subject and relevant subsystem interactions. Every required architecture must be complete. The subject may be a selected part of the binary."
             }
         }
     }
@@ -164,25 +164,16 @@ impl Library {
             return Err("Project changed. Reload and review its scope before saving.".into());
         }
         let scope = scope.trim();
-        if scope.is_empty() || scope.contains("<!-- research-") {
-            return Err("Define a nonempty research scope without reserved report markers.".into());
+        if scope.chars().any(char::is_control) {
+            return Err(
+                "Research scope is a single-line topic label, such as Rendering or Asset platform."
+                    .into(),
+            );
         }
         if scope == self.projects[p].research_scope {
             return Ok(());
         }
-        let (body, evidence) = self.read(p, 0)?;
         self.projects[p].research_scope = scope.into();
-        self.write_report(p, 0, &body, &evidence)?;
-        let app = self.projects[p]
-            .nodes
-            .iter_mut()
-            .find(|n| n.id == 0)
-            .unwrap();
-        if app.status == Status::Complete {
-            app.status = Status::InProgress;
-        }
-        app.accepted_hash = None;
-        app.revision += 1;
         self.projects[p].revision += 1;
         self.persist(p)
     }
@@ -427,16 +418,6 @@ impl Library {
         if let Some(rva) = n.rva {
             md += &format!("\nRVA: `0x{rva:08X}`\n");
         }
-        if n.kind == Kind::App {
-            md += &format!(
-                "\n## Research scope\n\n{}\n",
-                if project.research_scope.trim().is_empty() {
-                    "Not set. Define the project objective, included behavior and boundaries before completing research."
-                } else {
-                    &project.research_scope
-                }
-            );
-        }
         md += "\n## Source reports\n";
         for child in project.nodes.iter().filter(|c| c.parent == Some(id)) {
             let rel = if n.kind == Kind::App {
@@ -483,14 +464,6 @@ impl Library {
         }
     }
     pub fn effective(&self, p: usize, id: u64) -> Status {
-        if self.projects[p].research_scope.trim().is_empty()
-            && self.projects[p]
-                .nodes
-                .iter()
-                .any(|n| n.id == id && n.status == Status::Complete)
-        {
-            return Status::InProgress;
-        }
         let Some(n) = self.projects[p].nodes.iter().find(|n| n.id == id) else {
             return Status::NotStarted;
         };
@@ -620,9 +593,6 @@ impl Library {
             return Ok(());
         }
         if complete {
-            if self.projects[p].research_scope.trim().is_empty() {
-                return Err("Set the project's research scope before completing research.".into());
-            }
             if body.trim().is_empty() {
                 return Err(
                     "Write the compiled understanding report before marking complete.".into(),
@@ -809,9 +779,8 @@ impl ResearchUi {
                 if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{nav=Some((self.library.as_ref().unwrap().projects.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
             });
             egui::CollapsingHeader::new("Research scope").default_open(true).show(ui,|ui|{
-                ui.label("Define the objective, included behavior, exclusions and boundaries. This can cover the whole binary or a selected part.");
-                if ui.add(egui::TextEdit::multiline(&mut self.scope).desired_width(f32::INFINITY).desired_rows(3)).changed(){self.scope_dirty=true;}
-                ui.label("Scope changes reopen the app report for synthesis review. Adjust affected child assignments explicitly.");
+                ui.label("A few words describing what is being researched, e.g. Rendering or Asset platform.");
+                if ui.add(egui::TextEdit::singleline(&mut self.scope).desired_width(f32::INFINITY)).changed(){self.scope_dirty=true;}
                 ui.horizontal(|ui|{
                     if ui.add_enabled(!self.dirty,egui::Button::new("Save research scope")).clicked(){
                         match self.library.as_mut().unwrap().set_scope(self.project,&self.scope,self.scope_revision){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}
@@ -901,6 +870,7 @@ pub struct ProjectView {
     pub id: String,
     pub name: String,
     pub meters: Vec<Meter>,
+    pub research_scope: String,
 }
 impl ResearchUi {
     pub fn refresh_library(&mut self) {
@@ -985,6 +955,7 @@ impl ResearchUi {
                     id: project.id.clone(),
                     name: project.name.clone(),
                     meters,
+                    research_scope: project.research_scope.clone(),
                 }
             })
             .collect()

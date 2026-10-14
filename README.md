@@ -34,11 +34,9 @@ The editor updates each canonical Markdown file in place. Parent reports link th
 
 ### Project research scope
 
-In **View > Research records > Research scope**, define the project's objective, included behavior, exclusions and boundaries. A project can cover an entire binary or a selected part. Binary identity identifies the source; research scope defines the assignment. No whole-binary scope is assumed, and no record can be marked complete until scope is set.
+Research Scope is a short topic label: for example, **Rendering** or **Asset platform**. Set it in **View > Research records > Research scope**. It appears in the header above the selected project's meters, and in CLI output so agents know what is being researched.
 
-The scope is stored in project metadata and displayed in the generated scope section of `app.md`. App completion means the declared scope has been understood and synthesized from its required architecture reports. Counts cover the registered research hierarchy, not every function in the executable. Reviewing scope coverage remains an agent/human responsibility; prose scope does not automatically select functions.
-
-Changing scope reopens the app report for synthesis review. Existing function/chunk/architecture findings remain available; adjust affected assignments explicitly. Scope edits use revision checks to reject concurrent changes. Projects created before this field was added show an unset scope until it is supplied; research is not moved or imported.
+The label can describe a selected part of a binary. Editing it does not change completion states or assignments. Detailed understanding and completion criteria remain in the research reports and hierarchy.
 
 ### Completion
 
@@ -95,7 +93,7 @@ Agents update tags with `research deps set`; see the [CLI guide](docs/cli.md). T
 
 ## Windows installation and CLI
 
-Build the installer with `powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1` (Rust and .NET SDK required). This permits the build script for that process only. The script installs a pinned local WiX build tool if needed and produces `dist/ResearchDashboard-0.2.0-x64.msi`.
+Build the installer with `powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1` (Rust and .NET SDK required). This permits the build script for that process only. The script installs a pinned local WiX build tool if needed and produces `dist/ResearchDashboard-0.2.1-x64.msi`.
 
 The per-user MSI installs into `%LOCALAPPDATA%\Programs\Research Dashboard`, adds that directory to the user PATH, and creates a Start menu shortcut. Open a new terminal after installation. Use `research --help` for the console CLI, `research gui` to open the dashboard, and `research home` to locate research. The research home is initialized on first use. Uninstall removes the program and its PATH entry while preserving research. The MSI is unsigned; no signing certificate is configured.
 
