@@ -303,22 +303,6 @@ impl Library {
             }
         }
         lib.projects.sort_by_key(|p| p.name.clone());
-        if !lib.projects.iter().any(|p| p.id == "stock") {
-            lib.create("stock","Stock","WoW 3.3.5a build 12340; SHA-256 aa63a5750d60ef16746c686b3d5e26876d98953eab08b1c026cd0faf78e88cb8; image base 0x00400000")?;
-        }
-        if !lib.projects.iter().any(|p| p.id == "forever") {
-            lib.create("forever", "Forever", "")?;
-        }
-        lib.projects.sort_by_key(|p| {
-            (
-                match p.id.as_str() {
-                    "stock" => 0,
-                    "forever" => 1,
-                    _ => 2,
-                },
-                p.name.clone(),
-            )
-        });
         for p in 0..lib.projects.len() {
             lib.validate_dependencies(p, &lib.projects[p].dependencies)?;
             for node in &lib.projects[p].nodes {
@@ -712,7 +696,10 @@ impl ResearchUi {
             scope_revision: 0,
             complete: false,
         };
-        if s.library.is_some() {
+        if s.library
+            .as_ref()
+            .is_some_and(|lib| !lib.projects.is_empty())
+        {
             s.load(0, 0);
         }
         s
@@ -721,6 +708,9 @@ impl ResearchUi {
         let Some(lib) = &self.library else {
             return;
         };
+        if p >= lib.projects.len() {
+            return;
+        }
         match lib.read(p, id) {
             Ok((body, evidence)) => {
                 self.project = p;
@@ -762,7 +752,16 @@ impl ResearchUi {
         egui::Window::new("Research records").open(&mut open).default_size([950.0,700.0]).vscroll(true).show(ctx,|ui| {
             if !self.message.is_empty(){ui.colored_label(egui::Color32::from_rgb(230,170,80),&self.message);}
             let Some(lib)=&self.library else{return;};
-            let projects=lib.projects.clone();let project=&projects[self.project];
+            let projects=lib.projects.clone();
+            egui::CollapsingHeader::new("New project").default_open(projects.is_empty()).show(ui,|ui|{
+                ui.horizontal(|ui|{ui.label("ID");ui.text_edit_singleline(&mut self.new_project_id);ui.label("Name");ui.text_edit_singleline(&mut self.new_project_name);});
+                if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{nav=Some((self.library.as_ref().unwrap().projects.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
+            });
+            let Some(project)=projects.get(self.project) else {
+                ui.label("Create a project above to start researching.");
+                return;
+            };
+            let lib=self.library.as_ref().unwrap();
             ui.horizontal_wrapped(|ui|{for (i,p) in projects.iter().enumerate(){if ui.add_enabled(!self.has_unsaved(),egui::Button::new(&p.name).selected(i==self.project)).clicked(){nav=Some((i,0));}}});
             ui.label(format!("Isolated project: {}",lib.dir(self.project).display()));
             let project_dir=lib.dir(self.project);
@@ -773,10 +772,6 @@ impl ResearchUi {
                     }
                 });
                 ui.label("Each function owns research.md and data/ in its function folder. Only shared tool workspaces, logs and scratch stay under tools/.");
-            });
-            egui::CollapsingHeader::new("New project").show(ui,|ui|{
-                ui.horizontal(|ui|{ui.label("ID");ui.text_edit_singleline(&mut self.new_project_id);ui.label("Name");ui.text_edit_singleline(&mut self.new_project_name);});
-                if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{nav=Some((self.library.as_ref().unwrap().projects.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
             });
             egui::CollapsingHeader::new("Research scope").default_open(true).show(ui,|ui|{
                 ui.label("A few words describing what is being researched, e.g. Rendering or Asset platform.");

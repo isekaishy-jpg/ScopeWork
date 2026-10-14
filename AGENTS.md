@@ -1,6 +1,6 @@
 # Project rules
 
-Build Scopework, a Rust GUI and agent CLI for managing isolated binary research projects. Initial projects are Stock and Forever; additional projects use the same structure.
+Build Scopework, a Rust GUI and agent CLI for managing isolated binary research projects. Start with an empty library. Projects are created explicitly; never seed development projects or sample dashboards.
 
 - Keep the approved dashboard design. Do not redesign it while implementing research storage or workflows.
 - Canonical hierarchy: App -> Architecture category -> Chunk -> Function. Research composes upward. Every node has exactly one canonical Markdown report in its project directory.

@@ -22,7 +22,7 @@ struct Args {
 enum Command {
     /// Print resolved home, project and complaints paths without creating anything.
     Home,
-    /// Create the home and initial empty Stock/Forever projects. Never imports old data.
+    /// Create an empty research home. Projects are created explicitly; no data is imported.
     Init,
     /// Open the desktop dashboard using this same research home.
     Gui,

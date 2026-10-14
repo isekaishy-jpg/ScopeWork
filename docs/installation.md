@@ -21,7 +21,9 @@ The MSI is currently unsigned. Installation and upgrade validation status belong
 
 ## Your research home
 
-The GUI and CLI use the same home, containing `projects/` and one shared `complaints/` folder. Run `research home` to see its location.
+The GUI and CLI use the same home, containing `projects/` and one shared `complaints/` folder. Run `research home` to see its location. New homes start without projects; choose **Create project** to begin.
+
+Version 0.4.1 removes the development defaults and sample meters. Existing project folders are preserved, including any Stock or Forever projects created by earlier versions. Their dashboards now show only canonical records.
 
 Selection precedence is:
 
@@ -35,5 +37,7 @@ Changing the selected home opens another library. Scopework never automatically 
 ## Upgrades and removal
 
 Close Scopework and install a newer-version MSI. Setup reuses saved location and option choices. The app has no automatic update checker or downloader.
+
+For local development, you can run the rebuilt `target/release/research-dashboard.exe` directly without reinstalling. It uses the same research-home selection. Installed shortcuts continue to launch the installed copy until you upgrade it.
 
 Re-running the same-version MSI offers Repair or Uninstall. Uninstall removes application files, shortcuts, and its PATH entry. Research files and the saved research-home setting are preserved.

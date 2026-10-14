@@ -10,67 +10,7 @@ const YELLOW: Color32 = Color32::from_rgb(238, 193, 55);
 
 #[derive(Clone)]
 struct Row {
-    name: String,
     groups: Vec<(String, usize, usize, usize)>,
-}
-
-fn rows() -> Vec<Row> {
-    vec![
-        Row {
-            name: "Rendering".into(),
-            groups: vec![
-                ("Frame".into(), 42, 0, 42),
-                ("Views".into(), 68, 0, 68),
-                ("Passes".into(), 95, 1, 37),
-                ("Present".into(), 24, 2, 0),
-            ],
-        },
-        Row {
-            name: "Assets".into(),
-            groups: vec![
-                ("Requests".into(), 53, 0, 53),
-                ("Dependencies".into(), 84, 1, 51),
-                ("Publication".into(), 37, 2, 0),
-                ("Lifetime".into(), 65, 2, 0),
-            ],
-        },
-        Row {
-            name: "World".into(),
-            groups: vec![
-                ("Maps".into(), 31, 0, 31),
-                ("Spatial data".into(), 102, 1, 26),
-                ("Visibility".into(), 73, 2, 0),
-                ("Lifetime".into(), 46, 2, 0),
-            ],
-        },
-        Row {
-            name: "Animation".into(),
-            groups: vec![
-                ("States".into(), 28, 0, 28),
-                ("Poses".into(), 64, 1, 41),
-                ("Blending".into(), 51, 2, 0),
-                ("Integration".into(), 39, 2, 0),
-            ],
-        },
-        Row {
-            name: "Interface".into(),
-            groups: vec![
-                ("Input".into(), 47, 0, 47),
-                ("Widgets".into(), 88, 1, 19),
-                ("Layout".into(), 56, 2, 0),
-                ("Drawing".into(), 71, 2, 0),
-            ],
-        },
-        Row {
-            name: "Unclassified".into(),
-            groups: vec![
-                ("Region A".into(), 210, 2, 0),
-                ("Region B".into(), 190, 2, 0),
-                ("Region C".into(), 160, 2, 0),
-                ("Region D".into(), 140, 2, 0),
-            ],
-        },
-    ]
 }
 
 struct Dashboard {
@@ -80,8 +20,6 @@ struct Dashboard {
     on_top: bool,
     about: bool,
     dark: bool,
-    chunk_counts: Vec<usize>,
-    stock_preview: Option<Vec<Row>>,
     research: research::ResearchUi,
     projects: Vec<research::ProjectView>,
     brand_icon: Option<egui::TextureHandle>,
@@ -96,8 +34,6 @@ impl Default for Dashboard {
             on_top: false,
             about: false,
             dark: true,
-            chunk_counts: vec![64; 48],
-            stock_preview: None,
             research: research::ResearchUi::new(),
             projects: vec![],
             brand_icon: None,
@@ -264,7 +200,6 @@ fn draw_chunk_states(p: &egui::Painter, r: egui::Rect, states: &[usize]) {
 impl eframe::App for Dashboard {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("dark_mode", self.dark.to_string());
-        eframe::set_value(storage, "chunk_counts", &self.chunk_counts);
     }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if ctx.input(|i| i.viewport().close_requested()) && self.research.has_unsaved() {
@@ -273,6 +208,7 @@ impl eframe::App for Dashboard {
         }
         if self.research.changed {
             self.projects = self.research.snapshot();
+            self.project = self.project.min(self.projects.len().saturating_sub(1));
             self.research.changed = false;
             self.selection = None;
         }
@@ -440,32 +376,24 @@ impl eframe::App for Dashboard {
                     }
                 }
                 let project_view=self.projects.get(self.project).cloned();
-                let live=project_view.as_ref().is_some_and(|p| !p.meters.is_empty() || (p.id!="stock"&&p.id!="forever"));
                 let live_meters=project_view.as_ref().map(|p|p.meters.clone()).unwrap_or_default();
-                let data = if live {
-                    let mut rows=Vec::new();
-                    for batch in live_meters.chunks(4) {
-                        rows.push(Row{name:String::new(),groups:batch.iter().map(|m|(m.name.clone(),m.functions,if m.states.iter().all(|&s|s==0)&&!m.states.is_empty(){0}else if m.states.iter().any(|&s|s!=2){1}else{2},m.completed_functions)).collect()});
-                    }
-                    if rows.is_empty(){rows.push(Row{name:String::new(),groups:vec![("No architecture records yet".into(),0,2,0)]});}rows
-                } else if self.project==0 {self.stock_preview.clone().unwrap_or_else(rows)} else {rows()};
+                let data:Vec<Row>=live_meters.chunks(4).map(|batch|Row{groups:batch.iter().map(|m|(m.name.clone(),m.functions,if m.states.iter().all(|&s|s==0)&&!m.states.is_empty(){0}else if m.states.iter().any(|&s|s!=2){1}else{2},m.completed_functions)).collect()}).collect();
                 let meter_count:usize=data.iter().map(|r|r.groups.len()).sum();
-                let scale=if live{1}else{self.project+1};
                 let mut counts = [0usize; 3];
                 for row in &data {
                     for g in &row.groups {
-                        counts[0] += g.3 * scale;
+                        counts[0] += g.3;
                         if g.2 != 0 {
-                            counts[g.2] += (g.1 - g.3) * scale;
+                            counts[g.2] += g.1 - g.3;
                         }
                     }
                 }
                 let total: usize = counts.iter().sum();
-                let project_counts:Vec<usize>=if live {live_meters.iter().map(|m|m.states.len()).chain(std::iter::repeat(0)).take(meter_count).collect()} else {self.chunk_counts[self.project*24..self.project*24+meter_count].to_vec()};
+                let project_counts:Vec<usize>=live_meters.iter().map(|m|m.states.len()).collect();
                 let total_chunks:usize=project_counts.iter().sum();
-                let done_chunks:usize=if live{live_meters.iter().flat_map(|m|m.states.iter()).filter(|&&s|s==0).count()}else{data.iter().flat_map(|r|r.groups.iter()).zip(&project_counts).map(|(g,&count)|g.3*count/g.1.max(1)).sum()};
+                let done_chunks:usize=live_meters.iter().flat_map(|m|m.states.iter()).filter(|&&s|s==0).count();
                 let selected=self.selection.filter(|&(r,g)|r<data.len()&&g<data[r].groups.len()).unwrap_or((0,0));
-                let (name,n,status,completed)=data[selected.0].groups[selected.1].clone();
+                let (name,n,status,completed)=data.get(selected.0).and_then(|row|row.groups.get(selected.1)).cloned().unwrap_or(("No meter selected".into(),0,2,0));
                 let top=82.0;
                 let meter_h=(h-270.0).max(218.0);
                 let detail=r(15.0,top,174.0,meter_h);
@@ -473,9 +401,9 @@ impl eframe::App for Dashboard {
                 let well=detail.shrink2(Vec2::new(10.0,17.0));
                 p.rect_filled(well,0.0,Color32::BLACK);bevel(&p,well,true);
                 let selected_index=selected.0*4+selected.1;
-                let selected_chunks=project_counts[selected_index];
-                let selected_done=if live {live_meters.get(selected_index).map(|m|m.states.iter().filter(|&&s|s==0).count()).unwrap_or(0)}else{completed*selected_chunks/n.max(1)};
-                let title=if live {name.clone()} else {format!("{} / {name}",data[selected.0].name)};
+                let selected_chunks=project_counts.get(selected_index).copied().unwrap_or(0);
+                let selected_done=live_meters.get(selected_index).map(|m|m.states.iter().filter(|&&s|s==0).count()).unwrap_or(0);
+                let title=name.clone();
                 let heading=p.layout(title,egui::FontId::proportional(11.0),GREEN,well.width()-14.0);
                 let heading_height=heading.size().y;
                 p.galley(well.min+Vec2::new(7.0,8.0),heading,GREEN);
@@ -484,7 +412,7 @@ impl eframe::App for Dashboard {
                 let readout=bar.bottom()+19.0;
                 text(&p,well.left()+7.0,readout,["Complete","In progress","Not done"][status],GREEN);
                 text(&p,well.left()+7.0,readout+24.0,format!("Chunks: {selected_done} / {selected_chunks}"),GREEN);
-                text(&p,well.left()+7.0,readout+45.0,format!("Funcs: {} / {}",completed*scale,n*scale),GREEN);
+                text(&p,well.left()+7.0,readout+45.0,format!("Funcs: {} / {}",completed,n),GREEN);
                 text(&p,well.left()+7.0,readout+69.0,format!("{}% chunks complete",selected_done*100/selected_chunks.max(1)),GREEN);
                 let hint=p.layout("Click a meter to inspect it.".into(),egui::FontId::proportional(11.0),Color32::from_gray(150),well.width()-14.0);
                 p.galley(egui::pos2(well.left()+7.0,readout+96.0),hint,Color32::from_gray(150));
@@ -512,13 +440,17 @@ impl eframe::App for Dashboard {
                             .id_salt(("meters", self.project))
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                if live_meters.is_empty() {
+                                    ui.label(if project_view.is_none(){"No projects yet. Create your first research project."}else{"No architecture records yet. Add one in Research records."});
+                                    if ui.button(if project_view.is_none(){"Create project"}else{"Open research records"}).clicked(){self.research.open=true;}
+                                }
                                 let padding=8.0;
                                 let gap=12.0;
                                 let row_height=104.0;
-                                let panel_widths:Vec<f32>=data.iter().flat_map(|row|row.groups.iter().map(move |g|(row,g))).enumerate().map(|(index,(row,g))|{
-                                    let title=if live{g.0.clone()}else{format!("{} / {}",row.name,g.0)};
+                                let panel_widths:Vec<f32>=data.iter().flat_map(|row|row.groups.iter()).enumerate().map(|(index,g)|{
+                                    let title=g.0.clone();
                                     let count=project_counts[index];
-                                    let footer=format!("Chunks: {} / {}    Funcs: {} / {}",count,count,g.1*scale,g.1*scale);
+                                    let footer=format!("Chunks: {} / {}    Funcs: {} / {}",count,count,g.1,g.1);
                                     let font=egui::FontId::proportional(11.0);
                                     let title_w=ui.painter().layout_no_wrap(title,font.clone(),ink).size().x;
                                     let footer_w=ui.painter().layout_no_wrap(footer,font,ink).size().x;
@@ -541,21 +473,18 @@ impl eframe::App for Dashboard {
                                         bevel(&p,panel_rect,true);
                                         let x=panel_x+padding;
                                         let y=panel_y+padding;
-                                        let count_index = self.project * 24 + index;
                                         let segment_count = project_counts[index];
                                         let meter = egui::Rect::from_min_size(
                                             egui::pos2(x, y + 15.0),
                                             Vec2::new(meter_width(segment_count), METER_HEIGHT),
                                         );
-                                        if live {
-                                            draw_chunk_states(&p,meter,live_meters.get(index).map(|m|m.states.as_slice()).unwrap_or(&[]));
-                                        } else {led(&p,meter,finished,num,[GREEN,YELLOW,RED][state],segment_count);}
+                                        draw_chunk_states(&p,meter,live_meters.get(index).map(|m|m.states.as_slice()).unwrap_or(&[]));
 
                                         text(
                                             &p,
                                             x,
                                             y + 5.0,
-                                            if live {chunk.clone()} else {format!("{} / {chunk}",data[ri].name)},
+                                            chunk.clone(),
                                             Color32::BLACK,
                                         );
                                         text(
@@ -564,10 +493,10 @@ impl eframe::App for Dashboard {
                                             meter.bottom() + 10.0,
                                             format!(
                                                 "Chunks: {} / {}    Funcs: {} / {}",
-                                                if live {live_meters.get(index).map(|m|m.states.iter().filter(|&&s|s==0).count()).unwrap_or(0)}else{finished * segment_count / num.max(1)},
+                                                live_meters.get(index).map(|m|m.states.iter().filter(|&&s|s==0).count()).unwrap_or(0),
                                                 segment_count,
-                                                finished * scale,
-                                                num * scale
+                                                finished,
+                                                num
                                             ),
                                             Color32::BLACK,
                                         );
@@ -594,30 +523,16 @@ impl eframe::App for Dashboard {
                                                 egui::StrokeKind::Outside,
                                             );
                                         }
-                                        if live && hit.double_clicked() {
+                                        if hit.double_clicked() {
                                             if let (Some(project),Some(meter))=(&project_view,live_meters.get(index)){self.research.open_record(&project.id,meter.id);}
                                         }
                                         hit.context_menu(|ui| {
-                                            if live {
-                                                if ui.button("Open architecture report").clicked(){if let (Some(project),Some(meter))=(&project_view,live_meters.get(index)){self.research.open_record(&project.id,meter.id);}}
-                                                ui.label("Segment counts come from this architecture's chunk records.");
-                                                return;
-                                            }
-                                            ui.label("Chunk segments");
-                                            ui.add(
-                                                egui::DragValue::new(
-                                                    &mut self.chunk_counts[count_index],
-                                                )
-                                                .range(0..=4096),
-                                            );
-                                            ui.label(
-                                                "One segment per chunk. Saved for this project.",
-                                            );
+                                            if ui.button("Open architecture report").clicked(){if let (Some(project),Some(meter))=(&project_view,live_meters.get(index)){self.research.open_record(&project.id,meter.id);}}
+                                            ui.label("Segment counts come from this architecture's chunk records.");
                                         });
                                         hit.on_hover_text(format!(
-                                            "{} / {chunk}: {} functions - {}",
-                                            data[ri].name,
-                                            num * scale,
+                                            "{chunk}: {} functions - {}",
+                                            num,
                                             ["Done", "In progress", "Not done"][state]
                                         ));
                                     }
@@ -632,7 +547,7 @@ impl eframe::App for Dashboard {
                 led(&p,total_meter,counts[0],total,GREEN,((total_meter.width()-6.0)/3.0).floor().max(0.0) as usize);
                 t(26.0,bottom+80.0,format!("Chunks: {done_chunks} / {total_chunks}    Funcs: {} / {total}    Done: {}%",counts[0],counts[0]*100/total.max(1)));
                 t(26.0,bottom+101.0,format!("Functions in progress: {}    Not done: {}",counts[1],counts[2]));
-                t(26.0,bottom+122.0,format!("Selected: {}{}{}    Funcs: {} / {}    {}",data[selected.0].name,if live{""}else{" / "},name,completed*scale,n*scale,["Done","In progress","Not done"][status]));
+                t(26.0,bottom+122.0,format!("Selected: {}    Funcs: {} / {}    {}",name,completed,n,["Done","In progress","Not done"][status]));
                 let mut sx = 0.0;
                 for (width, label) in [
                     (w * 0.34, format!("Funcs: {} / {total}", counts[0])),
@@ -642,11 +557,7 @@ impl eframe::App for Dashboard {
                     ),
                     (
                         w * 0.33,
-                        if live {format!("App report: {:?}",project_view.as_ref().map(|p|p.app_status).unwrap_or(research::Status::NotStarted))} else if self.project == 0 && self.stock_preview.is_some() {
-                            "Stock assumptions".to_string()
-                        } else {
-                            "Sample data".to_string()
-                        },
+                        project_view.as_ref().map(|project|format!("App report: {:?}",project.app_status)).unwrap_or_else(||"No projects".into()),
                     ),
                 ] {
                     let sr = r(sx, h - 20.0, width - 2.0, 19.0);
@@ -779,9 +690,9 @@ impl eframe::App for Dashboard {
                 .resizable(false)
                 .open(&mut self.about)
                 .show(ctx, |ui| {
-                    ui.label(format!("Scopework {}",env!("CARGO_PKG_VERSION")));
+                    ui.label(format!("Scopework {}", env!("CARGO_PKG_VERSION")));
                     ui.label("A workbench for bounded research projects.");
-                    ui.label("Research records drive progress; projects without records may show labeled previews.");
+                    ui.label("Research records drive progress. Create a project to begin.");
                 });
         }
     }
@@ -853,50 +764,6 @@ fn main() -> eframe::Result {
             ));
             if let Some(value) = cc.storage.and_then(|s| s.get_string("dark_mode")) {
                 app.dark = value != "false";
-            }
-            if let Some(saved) = cc
-                .storage
-                .and_then(|s| eframe::get_value::<Vec<usize>>(s, "chunk_counts"))
-            {
-                if saved.len() == 48 {
-                    app.chunk_counts = saved.into_iter().map(|n| n.min(4096)).collect();
-                }
-            }
-            // Local preview data stays outside Git; no historical completion states are accepted.
-            let preview_path = research_dashboard::paths::home(None)
-                .unwrap_or_default()
-                .join("stock-preview.json");
-            if let Ok(bytes) = std::fs::read(preview_path) {
-                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    if let Some(meters) = value["meters"]
-                        .as_array()
-                        .filter(|m| !m.is_empty() && m.len() <= 24)
-                    {
-                        let mut preview = Vec::new();
-                        for (i, batch) in meters.chunks(4).enumerate() {
-                            let mut groups = Vec::new();
-                            for (j, m) in batch.iter().enumerate() {
-                                let name: &'static str = Box::leak(
-                                    m["name"]
-                                        .as_str()
-                                        .unwrap_or("Unclassified")
-                                        .to_owned()
-                                        .into_boxed_str(),
-                                );
-                                let functions =
-                                    m["functions"].as_u64().unwrap_or(1).max(1) as usize;
-                                groups.push((name.to_string(), functions, 2, 0));
-                                app.chunk_counts[i * 4 + j] =
-                                    m["chunks"].as_u64().unwrap_or(1).min(4096) as usize;
-                            }
-                            preview.push(Row {
-                                name: "Stock".into(),
-                                groups,
-                            });
-                        }
-                        app.stock_preview = Some(preview);
-                    }
-                }
             }
             Ok(Box::new(app))
         }),

@@ -48,7 +48,7 @@ In the app, use **View > Research records** to create a project and its research
 
 ## Status
 
-Scopework is in early development. MSI packages are unsigned. Read each release's validation notes before using it for important work. Completion records are evidence-backed attestations, not automatic proof of research quality. Projects without records may display explicitly labeled preview data.
+Scopework is in early development. MSI packages are unsigned. Read each release's validation notes before using it for important work. Completion records are evidence-backed attestations, not automatic proof of research quality. New installations start empty. Create your own projects; dashboard progress comes only from canonical research records.
 
 ## Documentation
 

@@ -4,7 +4,7 @@ Install the MSI with PATH enabled, open a new terminal, and use `research --help
 
 ## Research home
 
-The installer-selected research home is shared by the GUI and CLI. New installations default to `%LOCALAPPDATA%\Scopework`, independent of the installation folder or current directory. The existing earlier default home is retained when present. `RESEARCH_DASHBOARD_HOME` overrides the installed home with another absolute home; CLI `--home PATH` overrides it for one invocation. It contains `projects/` and one shared `complaints/` folder. `research home` prints these paths without creating anything. `research init` creates fresh empty Stock/Forever projects; ordinary research commands and GUI startup also initialize the home when needed.
+The installer-selected research home is shared by the GUI and CLI. New installations default to `%LOCALAPPDATA%\Scopework`, independent of the installation folder or current directory. The existing earlier default home is retained when present. `RESEARCH_DASHBOARD_HOME` overrides the installed home with another absolute home; CLI `--home PATH` overrides it for one invocation. It contains `projects/` and one shared `complaints/` folder. `research home` prints these paths without creating anything. `research init` creates an empty home without any projects; ordinary research commands and GUI startup also initialize the home when needed.
 
 Nothing is imported or migrated. Carry-over is manual. Uninstall removes the installed application, shortcut and its PATH entry, and leaves the research home intact.
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 — 2026-10-13
+
+- Start new research homes empty instead of creating development projects.
+- Remove sample dashboards, preview-file loading and sample meter preferences.
+- Show an empty state with project creation; preserve existing research on upgrade.
+
 ## 0.4.0 â€” 2026-10-13
 
 - Add an optional desktop shortcut to the installer, enabled by default and remembered on upgrades.
