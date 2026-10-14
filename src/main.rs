@@ -839,6 +839,18 @@ impl eframe::App for Dashboard {
 }
 
 fn main() -> eframe::Result {
+    if std::env::args().any(|arg| arg == "--migrate-library") {
+        let root = std::env::var_os("RESEARCH_DASHBOARD_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/projects")
+            });
+        if let Err(error) = research::Library::open(root) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     eframe::run_native(
         "Research Dashboard",
         eframe::NativeOptions {

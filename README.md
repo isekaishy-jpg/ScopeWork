@@ -10,24 +10,22 @@ Each project owns a complete hierarchy:
 
 ```
 data/projects/<project-id>/
-  project.json                 # IDs, hierarchy, status, revisions; no report prose
-  app.md                       # one complete-app research report
-  architectures/000001.md      # one canonical report per category
-  chunks/000002.md              # one canonical report per chunk
-  functions/00001234.md         # one canonical file per function RVA
-  evidence/                    # this project's retained supporting artifacts
+  project.json
+  app.md
+  architectures/<id>/research.md
+  chunks/<id>/research.md
+  functions/<RVA>/
+    research.md
+    data/                       # this function's captures, exports and raw evidence
   tools/
-    README.md                  # project-local tool/provenance guide
-    profiles/                  # compiler, ABI, type and decompiler profiles
-    scripts/                   # drivers, exporters and processing utilities
-    instrumentation/           # observational hooks and capture utilities
-    bin/                       # tool executables and launchers
-  data/
-    analysis/                  # Ghidra projects and analysis databases
-    captures/                  # runtime captures and traces
-    exports/                   # disassembly, decompilation and extracted tables
-    logs/                      # run commands, input hashes, versions and logs
-    scratch/                   # temporary/reproducible intermediate files
+    README.md
+    profiles/
+    scripts/
+    instrumentation/
+    bin/
+    workspaces/                 # shared Ghidra / whole-binary analysis databases
+    logs/                       # shared tool run provenance
+    scratch/                    # shared temporary working data
 ```
 
 Select a parent and create its child: App -> Architecture -> Chunk -> Function. Architectures are categories such as Asset Loading or Models. Enter the exact binary build/hash and image base before adding functions. Function identity is an RVA within that project's binary. A function cannot be duplicated elsewhere in the same project. Different binaries require separate projects.
@@ -58,4 +56,6 @@ Options > Dark mode switches palettes and saves the choice. Other menus provide 
 
 The local ignored `data/stock-preview.json` file supplies the Stock assumptions preview. Its function counts came from the existing index; its chunk counts are hypothetical. Forever's preview uses illustrative data. Preview meters allow segment counts to be changed through their context menu. Canonical meters derive segment counts from their chunk records.
 
-Every new project receives these tool/data folders. Existing projects are upgraded on opening without moving or replacing existing files. Research records > Project tools and data folders opens the relevant locations. Tools must write into their owning project's designated data folders, with named run subfolders and input/tool/profile provenance. Canonical research stays in the hierarchy, not in extra output reports. Historical external files are not automatically migrated.
+Every function has its own folder: `research.md` plus `data/`. Use relative `data/<file>` links from that report. There is no new project-level evidence or data directory. Shared tool state lives under `tools/workspaces`, `tools/logs`, and `tools/scratch`. The research editor has an **Open this function's data folder** button.
+
+Existing flat canonical reports migrate to the folder layout when the library opens. Generated source-report links are rebuilt; ordinary relative inline Markdown links are rebased. Affected completion records reopen for review. The app refuses to overwrite a conflicting destination. Empty obsolete folders are removed; any historical unowned captures/exports are preserved under `tools/unassigned` for deliberate assignment to functions, not attributed automatically. Shared old analysis data moves to `tools/workspaces/analysis`. Use `research-dashboard.exe --migrate-library` to apply folder migration without opening the GUI.

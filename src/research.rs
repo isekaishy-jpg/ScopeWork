@@ -78,9 +78,9 @@ fn valid_id(id: &str) -> bool {
 fn relative(n: &Node) -> String {
     match n.kind {
         Kind::App => "app.md".into(),
-        Kind::Architecture => format!("architectures/{:06}.md", n.id),
-        Kind::Chunk => format!("chunks/{:06}.md", n.id),
-        Kind::Function => format!("functions/{:08X}.md", n.rva.unwrap()),
+        Kind::Architecture => format!("architectures/{:06}/research.md", n.id),
+        Kind::Chunk => format!("chunks/{:06}/research.md", n.id),
+        Kind::Function => format!("functions/{:08X}/research.md", n.rva.unwrap()),
     }
 }
 
@@ -89,16 +89,13 @@ const PROJECT_FOLDERS: &[&str] = &[
     "functions",
     "chunks",
     "architectures",
-    "evidence",
     "tools/profiles",
     "tools/scripts",
     "tools/instrumentation",
     "tools/bin",
-    "data/analysis",
-    "data/captures",
-    "data/exports",
-    "data/logs",
-    "data/scratch",
+    "tools/workspaces",
+    "tools/logs",
+    "tools/scratch",
 ];
 fn ensure_folders(dir: &Path) -> Result<()> {
     for folder in PROJECT_FOLDERS {
@@ -113,7 +110,7 @@ fn ensure_folders(dir: &Path) -> Result<()> {
     {
         Ok(mut f) => {
             use std::io::Write;
-            f.write_all(b"# Project reversing tools\n\nThis tools directory belongs exclusively to the project containing it.\n\n- profiles/: compiler, ABI, type-layout, analysis and decompiler profiles.\n- scripts/: analysis drivers, exporters and processing utilities.\n- instrumentation/: separately maintained observational hooks and capture utilities.\n- bin/: project-local tool executables or launchers, with version/provenance notes here.\n\nWrite generated material under the same project's data directory:\n\n- ../data/analysis/: Ghidra projects, analysis databases and other tool working data.\n- ../data/captures/: runtime captures and traces.\n- ../data/exports/: disassembly, decompilation, extracted tables and structured exports.\n- ../data/logs/: tool execution logs.\n- ../data/scratch/: temporary and reproducible intermediate files.\n\nKeep retained evidence in ../evidence/ and link it from canonical function reports. Keep canonical research in ../functions/, ../chunks/, ../architectures/ and ../app.md. Do not create additional research reports under tools or data. Source installations remain read-only. Give each run a named subfolder and record its exact input binary hash, tool/profile versions, command and output paths in its log. Never borrow another project's profile or evidence silently.\n").map_err(|e|e.to_string())?;
+            f.write_all(b"# Project reversing tools\n\nThis directory belongs only to its enclosing research project.\n\nprofiles/: compiler, ABI, type and analysis profiles.\nscripts/: analysis drivers and exporters.\ninstrumentation/: observational hooks and capture utilities.\nbin/: tool binaries or launchers.\nworkspaces/: shared Ghidra projects and whole-binary analysis databases.\nlogs/: shared tool run logs and provenance.\nscratch/: shared temporary working files.\n\nFunction-specific captures, exports and evidence belong in ../functions/<RVA>/data/, beside that function's research.md. Link to them from research.md using data/<filename>. Do not create project-level evidence or data dumps. Chunks and architecture reports reference the canonical reports below them. Source installations remain read-only. Record input binary hashes and tool/profile versions for tool runs.\n").map_err(|e|e.to_string())?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.to_string()),
@@ -129,6 +126,40 @@ fn open_folder(path: &Path) -> Result<()> {
     let mut command = std::process::Command::new("xdg-open");
     command.arg(path).spawn().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn rebase_links(text: &str) -> String {
+    let mut output = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("](") {
+        output.push_str(&rest[..start + 2]);
+        rest = &rest[start + 2..];
+        let Some(end) = rest.find(')') else {
+            output.push_str(rest);
+            return output;
+        };
+        let target = &rest[..end];
+        if !target.is_empty()
+            && !target.starts_with('#')
+            && !target.starts_with('/')
+            && !target.starts_with('\\')
+            && !target.contains(':')
+        {
+            if target.starts_with('<') {
+                output.push_str("<../");
+                output.push_str(&target[1..]);
+            } else {
+                output.push_str("../");
+                output.push_str(target);
+            }
+        } else {
+            output.push_str(target);
+        }
+        output.push(')');
+        rest = &rest[end + 1..];
+    }
+    output.push_str(rest);
+    output
 }
 
 pub struct Library {
@@ -213,6 +244,9 @@ impl Library {
                 p.name.clone(),
             )
         });
+        for p in 0..lib.projects.len() {
+            lib.migrate_layout(p)?;
+        }
         Ok(lib)
     }
     fn dir(&self, p: usize) -> PathBuf {
@@ -223,6 +257,135 @@ impl Library {
             &self.dir(p).join("project.json"),
             &serde_json::to_vec_pretty(&self.projects[p]).map_err(|e| e.to_string())?,
         )
+    }
+    fn migrate_layout(&mut self, p: usize) -> Result<()> {
+        let dir = self.dir(p);
+        let nodes = self.projects[p].nodes.clone();
+        let mut moved = false;
+        for n in &nodes {
+            let legacy = match n.kind {
+                Kind::App => continue,
+                Kind::Architecture => dir.join(format!("architectures/{:06}.md", n.id)),
+                Kind::Chunk => dir.join(format!("chunks/{:06}.md", n.id)),
+                Kind::Function => dir.join(format!("functions/{:08X}.md", n.rva.unwrap())),
+            };
+            let target = self.path(p, n.id)?;
+            if legacy.exists() {
+                if target.exists() {
+                    return Err(format!(
+                        "Both legacy and canonical reports exist: {}. Neither was overwritten.",
+                        target.display()
+                    ));
+                }
+                fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
+                // Both paths are constructed only from the validated project and node IDs.
+                let root = dir.canonicalize().map_err(|e| e.to_string())?;
+                if !legacy
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?
+                    .starts_with(&root)
+                    || !target
+                        .parent()
+                        .unwrap()
+                        .canonicalize()
+                        .map_err(|e| e.to_string())?
+                        .starts_with(&root)
+                {
+                    return Err("Report migration leaves project directory".into());
+                }
+                fs::rename(&legacy, &target).map_err(|e| e.to_string())?;
+                let (body, evidence) = self.read(p, n.id)?;
+                self.write_report(p, n.id, &rebase_links(&body), &rebase_links(&evidence))?;
+                let item = self.projects[p]
+                    .nodes
+                    .iter_mut()
+                    .find(|v| v.id == n.id)
+                    .unwrap();
+                if item.status == Status::Complete {
+                    item.status = Status::InProgress;
+                }
+                item.accepted_hash = None;
+                item.revision += 1;
+                moved = true;
+            }
+            if n.kind == Kind::Function {
+                fs::create_dir_all(target.parent().unwrap().join("data"))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        // Rebuild generated source-report links after changing canonical paths.
+        if moved {
+            for n in nodes.iter().filter(|n| n.kind != Kind::Function) {
+                let (body, evidence) = self.read(p, n.id)?;
+                self.write_report(p, n.id, &body, &evidence)?;
+                let item = self.projects[p]
+                    .nodes
+                    .iter_mut()
+                    .find(|v| v.id == n.id)
+                    .unwrap();
+                if item.status == Status::Complete {
+                    item.status = Status::InProgress;
+                }
+                item.accepted_hash = None;
+            }
+            self.projects[p].revision += 1;
+            self.persist(p)?;
+        }
+        // Shared tool databases have an unambiguous home. Unowned historical data
+        // is retained for assignment rather than attributed to an invented function.
+        for (from, to) in [
+            ("data/analysis", "tools/workspaces/analysis"),
+            ("data/logs", "tools/logs/legacy"),
+            ("data/scratch", "tools/scratch/legacy"),
+            ("data/captures", "tools/unassigned/captures"),
+            ("data/exports", "tools/unassigned/exports"),
+            ("evidence", "tools/unassigned/evidence"),
+        ] {
+            let source = dir.join(from);
+            let target = dir.join(to);
+            if source.is_dir() {
+                if fs::read_dir(&source)
+                    .map_err(|e| e.to_string())?
+                    .next()
+                    .is_none()
+                {
+                    fs::remove_dir(&source).map_err(|e| e.to_string())?;
+                    continue;
+                }
+                if target.exists() {
+                    return Err(format!(
+                        "Migration destination already exists: {}. Existing data was preserved.",
+                        target.display()
+                    ));
+                }
+                fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
+                let root = dir.canonicalize().map_err(|e| e.to_string())?;
+                if !source
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?
+                    .starts_with(&root)
+                    || !target
+                        .parent()
+                        .unwrap()
+                        .canonicalize()
+                        .map_err(|e| e.to_string())?
+                        .starts_with(&root)
+                {
+                    return Err("Data migration leaves project directory".into());
+                }
+                fs::rename(source, target).map_err(|e| e.to_string())?;
+            }
+        }
+        let old = dir.join("data");
+        if old.is_dir()
+            && fs::read_dir(&old)
+                .map_err(|e| e.to_string())?
+                .next()
+                .is_none()
+        {
+            fs::remove_dir(old).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
     pub fn create(&mut self, id: &str, name: &str, binary: &str) -> Result<()> {
         if !valid_id(id) || name.trim().is_empty() {
@@ -302,7 +465,7 @@ impl Library {
             let rel = if n.kind == Kind::App {
                 relative(child)
             } else {
-                format!("../{}", relative(child))
+                format!("../../{}", relative(child))
             };
             md += &format!(
                 "- [{}]({})\n",
@@ -314,7 +477,13 @@ impl Library {
         md += body;
         md += "\n<!-- research-evidence -->\n";
         md += evidence;
-        atomic(&self.path(p, id)?, md.as_bytes())
+        let path = self.path(p, id)?;
+        let folder = path.parent().ok_or("Missing report folder")?;
+        fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+        if n.kind == Kind::Function {
+            fs::create_dir_all(folder.join("data")).map_err(|e| e.to_string())?;
+        }
+        atomic(&path, md.as_bytes())
     }
     fn invalidate(&mut self, p: usize, id: u64) {
         let mut cursor = self.projects[p]
@@ -568,11 +737,11 @@ impl ResearchUi {
             let project_dir=lib.dir(self.project);
             egui::CollapsingHeader::new("Project tools and data folders").show(ui,|ui|{
                 ui.horizontal_wrapped(|ui|{
-                    for (label,folder) in [("Tools","tools"),("Profiles","tools/profiles"),("Analysis data","data/analysis"),("Captures","data/captures"),("Exports","data/exports"),("Evidence","evidence")] {
+                    for (label,folder) in [("Tools","tools"),("Profiles","tools/profiles"),("Shared analysis","tools/workspaces"),("Tool logs","tools/logs")] {
                         if ui.button(label).clicked(){if let Err(e)=open_folder(&project_dir.join(folder)){self.message=e;}}
                     }
                 });
-                ui.label("Tools and profiles stay in this project. Generated data goes to data/analysis, captures, exports, logs, or scratch. Canonical reports stay in their research folders.");
+                ui.label("Each function owns research.md and data/ in its function folder. Only shared tool workspaces, logs and scratch stay under tools/.");
             });
             egui::CollapsingHeader::new("New project").show(ui,|ui|{
                 ui.horizontal(|ui|{ui.label("ID");ui.text_edit_singleline(&mut self.new_project_id);ui.label("Name");ui.text_edit_singleline(&mut self.new_project_name);});
@@ -602,6 +771,11 @@ impl ResearchUi {
                 let n=project.nodes.iter().find(|n|n.id==self.node).unwrap();
                 let ui=&mut columns[1];ui.strong(format!("{} — {}",n.kind.label(),n.name));
                 ui.label(self.library.as_ref().unwrap().path(self.project,self.node).unwrap().display().to_string());
+                if n.kind==Kind::Function && ui.button("Open this function's data folder").clicked(){
+                    let path=self.library.as_ref().unwrap().path(self.project,self.node).unwrap().parent().unwrap().join("data");
+                    if let Err(e)=open_folder(&path){self.message=e;}
+                }
+
                 if let Some(kind)=n.kind.child() {
                     ui.label(format!("Add {} here",kind.label()));ui.text_edit_singleline(&mut self.new_name);
                     if kind==Kind::Function {ui.horizontal(|ui|{ui.label("RVA (hex)");ui.text_edit_singleline(&mut self.rva);});}
