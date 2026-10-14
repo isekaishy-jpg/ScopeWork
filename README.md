@@ -2,7 +2,7 @@
 
 A compact Rust desktop dashboard for binary research, with a separate tab for Stock and Forever.
 
-Each project fits on one page: category names, classic segmented resource bars, and accepted/total function counts. Green means accepted, red means in progress, and grey means unreviewed. Hover or click a function group to see its name and count.
+Each project has one compact page of classic Task Manager-style horizontal meters. Meters wrap into a grid as the window resizes; overflow scrolls when more research items are added. Each shows total functions, done functions, and the current in-progress chunk name and function count. Green means done, red means in progress, and grey means not done. Hover or click a chunk to inspect it. The bottom status strip shows project totals.
 
 All current categories, counts, and statuses are labeled sample data. The research inventory, deliverables, and acceptance rules will be defined later. Existing research claims have not been imported.
 
