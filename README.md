@@ -1,8 +1,20 @@
 # Research Dashboard
 
-A planned Rust desktop GUI for binary research projects. Initial projects: Stock and Forever.
+A Rust desktop GUI for binary research projects. Initial projects: Stock and Forever.
 
-This repository currently records the proposed product structure. It does not yet contain a GUI or import existing research claims. Deliverables and acceptance criteria will be agreed with the project owner before implementation.
+The first desktop UI is implemented with eframe/egui. It includes project switching, category and text filters, segmented function-group bars, group inspection, expandable deliverables, and project notes saved locally between sessions. Sample preview is enabled initially and clearly marks all counts, categories, and completion states as illustrative. Disable it to see the empty project state.
+
+No existing research claims are imported. Deliverables, acceptance criteria, and the underlying research data model remain to be agreed with the project owner.
+
+## Run
+
+With a Rust toolchain and the Windows MSVC build tools installed:
+
+```powershell
+cargo run --release
+```
+
+The standalone Windows application is produced at `target/release/research-dashboard.exe`. Project notes and UI preferences use eframe's local application storage; they are not committed or uploaded. Exit normally to save them. The UI currently reads only built-in illustrative data, never a research binary or installation.
 
 ## Proposed structure
 
@@ -20,6 +32,6 @@ Project → pinned binary/build → category → understanding/architecture item
 
 ## Decisions pending discussion
 
-The initial deliverables and their acceptance criteria; category and group review workflow; inventory denominator and external/thunk treatment; precise completion rules; GUI framework; storage and import format; and who may accept or reopen research.
+The initial deliverables and their acceptance criteria; category and group review workflow; inventory denominator and external/thunk treatment; precise completion rules; research storage and import format; and who may accept or reopen research.
 
 Existing reports and completion states require review before migration. No old completion state is automatically trusted.

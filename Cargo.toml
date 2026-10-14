@@ -1,0 +1,11 @@
+[package]
+name = "research-dashboard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "glow", "persistence", "x11", "wayland"] }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 2
