@@ -130,10 +130,10 @@ impl Browser {
                         continue;
                     }
                     self.visible.push((id, depth));
-                    if self.expanded.contains(&id) {
-                        if let Some(kids) = self.children.get(&id) {
-                            stack.extend(kids.iter().rev().map(|id| (*id, depth + 1)));
-                        }
+                    if self.expanded.contains(&id)
+                        && let Some(kids) = self.children.get(&id)
+                    {
+                        stack.extend(kids.iter().rev().map(|id| (*id, depth + 1)));
                     }
                 }
             } else {
@@ -161,20 +161,20 @@ impl Browser {
                     let row = &self.rows[self.positions[&id]];
                     ui.horizontal(|ui| {
                         ui.add_space(depth as f32 * 12.0);
-                        if row.kind != Kind::Function && self.query.trim().is_empty() {
-                            if ui
+                        if row.kind != Kind::Function
+                            && self.query.trim().is_empty()
+                            && ui
                                 .small_button(if self.expanded.contains(&id) {
                                     "−"
                                 } else {
                                     "+"
                                 })
                                 .clicked()
-                            {
-                                if !self.expanded.remove(&id) {
-                                    self.expanded.insert(id);
-                                }
-                                self.needs_layout = true;
+                        {
+                            if !self.expanded.remove(&id) {
+                                self.expanded.insert(id);
                             }
+                            self.needs_layout = true;
                         }
                         if ui
                             .add_enabled(

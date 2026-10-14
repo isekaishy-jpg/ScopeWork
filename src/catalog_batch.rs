@@ -40,6 +40,22 @@ pub struct Order {
     pub parent: u64,
     pub children: Vec<u64>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportBatch {
+    pub schema: u32,
+    pub binary: String,
+    pub expect_revision: u64,
+    pub reports: Vec<ReportSave>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportSave {
+    pub id: u64,
+    pub expect: String,
+    pub body: String,
+    pub evidence: String,
+}
 #[derive(Serialize, Deserialize)]
 struct Edit {
     id: u64,
@@ -77,6 +93,7 @@ fn parts(text: &str) -> Result<(&str, &str)> {
         .split_once("\n<!-- research-evidence -->\n")
         .ok_or_else(|| "Missing evidence marker".into())
 }
+
 fn same(a: &Project, b: &Project) -> bool {
     serde_json::to_value(a).unwrap() == serde_json::to_value(b).unwrap()
 }
@@ -196,9 +213,12 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
     let temporary = Library {
         root: root.parent().ok_or("Missing library directory")?.into(),
         projects: vec![j.after.clone()],
+        busy_projects: vec![],
         _lock: None,
     };
-    temporary.sync_dependency_subset(0, Some(&j.dependencies.iter().copied().collect()))?;
+    if !j.dependencies.is_empty() {
+        temporary.sync_dependency_subset(0, Some(&j.dependencies.iter().copied().collect()))?;
+    }
     atomic(
         &root.join("project.json"),
         &serde_json::to_vec_pretty(&j.after).map_err(|e| e.to_string())?,
@@ -213,6 +233,150 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
 }
 
 impl Library {
+    pub fn read_reports(&self, p: usize, ids: &[u64]) -> Result<serde_json::Value> {
+        let project = &self.projects[p];
+        let index = catalog_index::Index::new(project);
+        let mut reports = Vec::with_capacity(ids.len());
+        let mut seen = HashSet::new();
+        for id in ids {
+            let node = index.nodes.get(id).ok_or("Unknown report")?;
+            if !seen.insert(id) {
+                return Err("Duplicate report ID".into());
+            }
+            let path = self.dir(p).join(&index.paths[id]);
+            let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let (body, evidence) = parts(&text)?;
+            reports.push(serde_json::json!({"id":id,"report":path,"body":body,"evidence":evidence,
+                "token":hash(&format!("{}\n{text}",project.revision)),"criteria":node.kind.completion_criteria()}));
+        }
+        Ok(
+            serde_json::json!({"project":project.id,"binary":project.binary,"revision":project.revision,"reports":reports}),
+        )
+    }
+
+    /// Independently validate all reports against one snapshot before any writes.
+    /// Reuse the catalog transaction journal; saving can never attest completion.
+    pub fn save_reports(&mut self, p: usize, batch: &ReportBatch) -> Result<Vec<u64>> {
+        if self._lock.is_none() {
+            return self.write_project(p, |l, p| l.save_reports(p, batch));
+        }
+        let before = self.projects[p].clone();
+        if batch.schema != 1
+            || batch.binary != before.binary
+            || batch.expect_revision != before.revision
+        {
+            return Err("Report batch schema, binary identity or revision does not match. Reload and review.".into());
+        }
+        if batch.reports.is_empty() {
+            return Err("Report batch is empty".into());
+        }
+        let root = self.dir(p);
+        let index = catalog_index::Index::new(&before);
+        let mut seen = HashSet::new();
+        let mut edits = vec![];
+        let mut statuses = HashMap::new();
+        for input in &batch.reports {
+            let node = index.nodes.get(&input.id).ok_or("Unknown report")?;
+            if !seen.insert(input.id) {
+                return Err("Duplicate report ID".into());
+            }
+            if input.body.contains("<!-- research-") || input.evidence.contains("<!-- research-") {
+                return Err("Reserved report markers cannot appear in report content.".into());
+            }
+            let path = &index.paths[&input.id];
+            contained(&root, &root.join(path))?;
+            let original = fs::read_to_string(root.join(path)).map_err(|e| e.to_string())?;
+            if hash(&format!("{}\n{original}", before.revision)) != input.expect {
+                return Err(format!(
+                    "Report {} changed. Reload and review the batch; no reports were saved.",
+                    input.id
+                ));
+            }
+            parts(&original)?;
+            let output = index.render(&before, input.id, &input.body, &input.evidence);
+            if original == output && node.status != Status::Complete {
+                continue;
+            }
+            statuses.insert(
+                input.id,
+                if input.body.trim().is_empty() && input.evidence.trim().is_empty() {
+                    Status::NotStarted
+                } else {
+                    Status::InProgress
+                },
+            );
+            edits.push(Edit {
+                id: input.id,
+                old: Some(path.clone()),
+                new: path.clone(),
+                before: Some(original),
+                after: output,
+            });
+        }
+        let changed: Vec<_> = edits.iter().map(|e| e.id).collect();
+        if changed.is_empty() {
+            return Ok(changed);
+        }
+        let mut dependents: HashMap<u64, Vec<u64>> = HashMap::new();
+        for edge in &before.dependencies {
+            dependents
+                .entry(edge.prerequisite)
+                .or_default()
+                .push(edge.dependent);
+        }
+        let mut invalid = HashSet::new();
+        let mut queue = changed.clone();
+        while let Some(id) = queue.pop() {
+            if !invalid.insert(id) {
+                continue;
+            }
+            if let Some(parent) = index.nodes[&id].parent {
+                queue.push(parent);
+            }
+            if let Some(consumers) = dependents.get(&id) {
+                queue.extend(consumers);
+            }
+        }
+        let mut after = before.clone();
+        for node in &mut after.nodes {
+            if invalid.contains(&node.id) {
+                node.revision += 1;
+                node.accepted_hash = None;
+                node.accepted_prerequisites.clear();
+                node.status =
+                    statuses
+                        .get(&node.id)
+                        .copied()
+                        .unwrap_or(if node.status == Status::Complete {
+                            Status::InProgress
+                        } else {
+                            node.status
+                        });
+            }
+        }
+        after.revision += 1;
+        let journal = Journal {
+            before,
+            after,
+            edits,
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![],
+        };
+        let folder = pending(&root);
+        contained(&root, &folder)?;
+        if folder.exists() {
+            return Err("Pending transaction exists; reopen to resume it".into());
+        }
+        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        atomic(
+            &folder.join("journal.json"),
+            &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
+        )?;
+        resume(&root, &mut self.projects[p])?;
+        Ok(changed)
+    }
+
     pub fn batch(&mut self, p: usize, batch: &Batch) -> Result<Vec<u64>> {
         if self._lock.is_none() {
             return self.write_project(p, |l, p| l.batch(p, batch));
@@ -245,10 +409,10 @@ impl Library {
             if c.name.trim().is_empty() || (kind == Kind::Function) != c.rva.is_some() {
                 return Err("Batch node requires a name and an RVA only for functions".into());
             }
-            if let Some(rva) = c.rva {
-                if before.binary.trim().is_empty() || !rvas.insert(rva) {
-                    return Err("Empty binary identity or duplicate function RVA in batch".into());
-                }
+            if let Some(rva) = c.rva
+                && (before.binary.trim().is_empty() || !rvas.insert(rva))
+            {
+                return Err("Empty binary identity or duplicate function RVA in batch".into());
             }
             let id = after.next_id;
             after.next_id = id.checked_add(1).ok_or("Node ID exhausted")?;
@@ -490,18 +654,18 @@ impl Library {
                 .filter_map(|e| e.old.as_ref().map(|old| (old.as_str(), e.new.as_str())))
                 .collect();
             let mut modified = false;
-            if ledger["schema"] == 1 {
-                if let Some(rows) = ledger["annotations"].as_array_mut() {
-                    for row in rows {
-                        if let Some(path) = row["report"]
-                            .as_str()
-                            .and_then(|path| paths.get(path))
-                            .copied()
-                        {
-                            row["report"] = path.into();
-                            row["catalog_move"] = "Canonical report path updated; original review hash retained. Re-review any changed report before applying annotations.".into();
-                            modified = true;
-                        }
+            if ledger["schema"] == 1
+                && let Some(rows) = ledger["annotations"].as_array_mut()
+            {
+                for row in rows {
+                    if let Some(path) = row["report"]
+                        .as_str()
+                        .and_then(|path| paths.get(path))
+                        .copied()
+                    {
+                        row["report"] = path.into();
+                        row["catalog_move"] = "Canonical report path updated; original review hash retained. Re-review any changed report before applying annotations.".into();
+                        modified = true;
                     }
                 }
             }
@@ -533,5 +697,228 @@ impl Library {
         )?;
         resume(&root, &mut self.projects[p])?;
         Ok(created)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Workspace(PathBuf);
+    impl Workspace {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target/test-workspaces")
+                .join(format!(
+                    "{}-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+            fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+        fn populate(&self, id: &str) -> Library {
+            let mut lib = Library::open_project(self.0.clone(), Some(id)).unwrap();
+            lib.create(id, id, "synthetic binary, image base 0x400000")
+                .unwrap();
+            let a = lib.add(0, 0, "Architecture", "").unwrap();
+            let c = lib.add(0, a, "Chunk", "").unwrap();
+            lib.add(0, c, "Producer", "1000").unwrap();
+            lib.add(0, c, "Consumer", "2000").unwrap();
+            lib
+        }
+    }
+    impl Drop for Workspace {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    fn inputs(lib: &Library, ids: &[u64]) -> ReportBatch {
+        let view = lib.read_reports(0, ids).unwrap();
+        ReportBatch {
+            schema: 1,
+            binary: lib.projects[0].binary.clone(),
+            expect_revision: lib.projects[0].revision,
+            reports: view["reports"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| ReportSave {
+                    id: r["id"].as_u64().unwrap(),
+                    expect: r["token"].as_str().unwrap().into(),
+                    body: format!("Research for {}", r["id"]),
+                    evidence: "Synthetic fixture evidence".into(),
+                })
+                .collect(),
+        }
+    }
+    #[test]
+    fn project_locks_isolate_writes_and_preserve_gui_snapshots() {
+        let workspace = Workspace::new();
+        drop(workspace.populate("alpha"));
+        drop(workspace.populate("beta"));
+        let mut gui = Library::open(workspace.0.clone()).unwrap();
+        let mut alpha = Library::open_project(workspace.0.clone(), Some("alpha")).unwrap();
+        assert!(Library::open_project(workspace.0.clone(), Some("alpha")).is_err());
+        let mut beta = Library::open_project(workspace.0.clone(), Some("beta")).unwrap();
+        beta.save_reports(0, &inputs(&beta, &[3, 4])).unwrap();
+        drop(beta);
+        gui.refresh().unwrap();
+        assert_eq!(gui.projects.len(), 2);
+        assert_eq!(gui.busy_projects, vec!["alpha"]);
+        let b = gui.projects.iter().position(|p| p.id == "beta").unwrap();
+        gui.set_scope(b, "Assets", gui.projects[b].revision)
+            .unwrap();
+        assert_eq!(gui.projects.len(), 2);
+        alpha
+            .set_scope(0, "Rendering", alpha.projects[0].revision)
+            .unwrap();
+        drop(alpha);
+        gui.refresh().unwrap();
+        assert!(gui.busy_projects.is_empty());
+        assert_eq!(
+            gui.projects
+                .iter()
+                .find(|p| p.id == "alpha")
+                .unwrap()
+                .research_scope,
+            "Rendering"
+        );
+    }
+    #[test]
+    fn legacy_exclusive_gate_and_new_shared_gate_exclude_each_other() {
+        let workspace = Workspace::new();
+        drop(workspace.populate("alpha"));
+        let gate = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(workspace.0.join(".library.lock"))
+            .unwrap();
+        gate.try_lock().unwrap();
+        assert!(Library::open_project(workspace.0.clone(), Some("alpha")).is_err());
+        gate.unlock().unwrap();
+        let alpha = Library::open_project(workspace.0.clone(), Some("alpha")).unwrap();
+        assert!(gate.try_lock().is_err());
+        drop(alpha);
+        gate.try_lock().unwrap();
+    }
+    #[test]
+    fn stale_later_token_prevents_every_write() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        let mut batch = inputs(&lib, &[3, 4]);
+        let original = fs::read(lib.path(0, 3).unwrap()).unwrap();
+        let revision = lib.projects[0].revision;
+        batch.reports[1].expect = "stale".into();
+        assert!(lib.save_reports(0, &batch).is_err());
+        assert_eq!(fs::read(lib.path(0, 3).unwrap()).unwrap(), original);
+        assert_eq!(lib.projects[0].revision, revision);
+        assert!(!pending(&lib.dir(0)).exists());
+        let mut external = inputs(&lib, &[3, 4]);
+        fs::write(lib.path(0, 4).unwrap(), "external edit").unwrap();
+        assert!(lib.save_reports(0, &external).is_err());
+        external.expect_revision += 1;
+        assert!(lib.save_reports(0, &external).is_err());
+        assert_eq!(fs::read(lib.path(0, 3).unwrap()).unwrap(), original);
+    }
+    #[test]
+    fn malformed_batches_are_rejected_before_publication() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        let mut batch = inputs(&lib, &[3, 4]);
+        batch.reports[1].id = 3;
+        assert!(lib.save_reports(0, &batch).is_err());
+        batch = inputs(&lib, &[3, 4]);
+        batch.reports[1].body = "<!-- research-content -->".into();
+        assert!(lib.save_reports(0, &batch).is_err());
+        batch = inputs(&lib, &[3, 4]);
+        batch.binary = "wrong build".into();
+        assert!(lib.save_reports(0, &batch).is_err());
+        batch = inputs(&lib, &[3, 4]);
+        batch.reports[1].id = 9999;
+        assert!(lib.save_reports(0, &batch).is_err());
+        assert!(serde_json::from_value::<ReportBatch>(serde_json::json!({"schema":1,"binary":"b","expect_revision":1,"reports":[],"complete":true})).is_err());
+        assert!(!pending(&lib.dir(0)).exists());
+    }
+    #[test]
+    fn batch_reopens_consumers_and_ancestors_preserving_evidence_files() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        lib.set_dependencies(0, 4, "1000").unwrap();
+        for id in [3, 4, 2, 1, 0] {
+            let token = lib.report_token(0, id).unwrap();
+            lib.save_report(0, id, "Reviewed fixture", "Fixture evidence", true, &token)
+                .unwrap();
+        }
+        assert_eq!(lib.effective(0, 0), Status::Complete);
+        let data = lib
+            .path(0, 3)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("data/capture.bin");
+        fs::write(&data, [1, 2, 3, 4]).unwrap();
+        let batch = inputs(&lib, &[3]);
+        let revision = lib.projects[0].revision;
+        assert_eq!(lib.save_reports(0, &batch).unwrap(), vec![3]);
+        assert_eq!(lib.projects[0].revision, revision + 1);
+        assert!(
+            lib.projects[0]
+                .nodes
+                .iter()
+                .all(|n| n.status == Status::InProgress && n.accepted_hash.is_none())
+        );
+        assert_eq!(fs::read(data).unwrap(), vec![1, 2, 3, 4]);
+        assert!(
+            lib.dir(0)
+                .join(format!(
+                    "tools/workspaces/catalog-transactions/revision-{}",
+                    revision + 1
+                ))
+                .is_dir()
+        );
+    }
+    #[test]
+    fn interrupted_report_transaction_resumes_from_partial_publication() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        let batch = inputs(&lib, &[3, 4]);
+        lib.save_reports(0, &batch).unwrap();
+        let root = lib.dir(0);
+        let receipt = root.join(format!(
+            "tools/workspaces/catalog-transactions/revision-{}",
+            lib.projects[0].revision
+        ));
+        let journal: Journal =
+            serde_json::from_slice(&fs::read(receipt.join("journal.json")).unwrap()).unwrap();
+        // Simulate interruption after the first report, before catalog commit.
+        atomic(
+            &root.join("project.json"),
+            &serde_json::to_vec(&journal.before).unwrap(),
+        )
+        .unwrap();
+        atomic(
+            &root.join(&journal.edits[1].new),
+            journal.edits[1].before.as_ref().unwrap().as_bytes(),
+        )
+        .unwrap();
+        fs::rename(&receipt, pending(&root)).unwrap();
+        drop(lib);
+        let recovered = Library::open_project(workspace.0.clone(), Some("alpha")).unwrap();
+        assert_eq!(recovered.projects[0].revision, journal.after.revision);
+        for edit in &journal.edits {
+            assert_eq!(
+                fs::read_to_string(root.join(&edit.new)).unwrap(),
+                edit.after
+            );
+        }
+        assert!(!pending(&root).exists());
+        assert!(receipt.exists());
     }
 }

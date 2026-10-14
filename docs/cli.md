@@ -69,7 +69,7 @@ research deps set example 3 --expect $record.token 000ABCDE 00012345
 
 Prerequisite RVAs must already have canonical function records in the same project. Omit the RVAs to clear the list. The app maintains `dep.toml` and `prereq.toml` together; never edit these generated views directly. Only necessary understanding prerequisites belong here, not every call edge.
 
-The dashboard can stay open during CLI work. Writes reload the latest catalog under a short exclusive lock. Concurrent operations receive a busy error and may retry; conflicting report edits require review. Use **View > Refresh research progress** to display CLI changes. Unsaved editor text is retained and stale saves are rejected.
+The dashboard can stay open during CLI work. Writes reload the latest catalog under a project-specific exclusive lock. Concurrent operations on the same project receive a busy error and may retry; different projects proceed independently. Conflicting report edits require review. Use **View > Refresh research progress** to display CLI changes. Unsaved editor text is retained and stale saves are rejected.
 
 ## Complaints
 
@@ -101,7 +101,7 @@ These IDs are illustrative; referenced nodes must exist. JSON RVAs are unsigned 
 
 `update` moves or renames nodes without changing their IDs or RVAs. Omitted fields are preserved. `reorder` must contain every direct child exactly once; it controls browser, meter and generated source-link order. Arrays may be omitted. Existing research bodies, evidence and data stay with their nodes. New records start unresearched; the batch cannot import completion claims or fabricate report content.
 
-The operation holds the library write lock, records the original catalog and affected reports under `tools/workspaces/catalog-transactions/pending`, stages moved folders, updates reports and affected dependency views, and commits the catalog last. The next CLI/GUI open resumes interrupted work after checking recorded inputs. Completed journals remain under `revision-N`; preserve them if recovery reports a conflict. Do not manually edit files during a pending transaction. The journal does not back up arbitrary supporting data; maintain ordinary backups separately.
+The operation holds the project write lock, records the original catalog and affected reports under `tools/workspaces/catalog-transactions/pending`, stages moved folders, updates reports and affected dependency views, and commits the catalog last. The next CLI/GUI open resumes interrupted work after checking recorded inputs. Completed journals remain under `revision-N`; preserve them if recovery reports a conflict. Do not manually edit files during a pending transaction. The journal does not back up arbitrary supporting data; maintain ordinary backups separately.
 
 Ownership, membership, name, order and report changes reopen affected accepted reports and their consumers/ancestors for review. Recognized internal Markdown and prose paths are rebased; external URLs and paths outside the project are retained. Schema-1 annotation-ledger report paths follow moves while original review hashes remain pinned, requiring review of changed evidence.
 
@@ -130,4 +130,33 @@ This repairs recognized internal references through the same journaled operation
 
 ## Large-library reads
 
-From 0.4.4, commands naming a project load that project only. Unstarted report files are read on demand; accepted reports remain hash-checked when evaluating progress. A missing report produces an error when opened or saved, and cannot retain accepted completion. Ordinary CLI reads are not an implicit audit of every unstarted file in every project. The library write lock is still shared, so a large active batch can temporarily make other commands return a busy error.
+From 0.4.4, commands naming a project load that project only. Unstarted report files are read on demand; accepted reports remain hash-checked when evaluating progress. A missing report produces an error when opened or saved, and cannot retain accepted completion. Ordinary CLI reads are not an implicit audit of every unstarted file in every project. From 0.4.5, operations on different projects use separate locks. The GUI retains its last catalog snapshot for a busy project, refreshes available projects, and retries busy projects on its next refresh. `project list` reports busy project names rather than returning an incomplete list. Upgrade all GUI and CLI workers to 0.4.5 for cross-project concurrency: a shared compatibility gate deliberately still excludes older executables that require the legacy global lock. Mixed versions remain safe, but an active older worker can still block the library.
+
+
+## Batch report editing
+
+Read multiple reports from one catalog snapshot:
+
+```powershell
+research node read-batch example 0 1 2
+```
+
+The JSON contains `project`, exact `binary`, `revision`, and `reports` with each report's `id`, canonical path, body, evidence, criteria, and edit `token`. Prepare a UTF-8 JSON input with edited body/evidence text:
+
+```json
+{
+  "schema": 1,
+  "binary": "EXACT binary identity from read-batch",
+  "expect_revision": 42,
+  "reports": [
+    {"id": 1, "expect": "TOKEN from read-batch", "body": "Updated understanding", "evidence": "Source references"},
+    {"id": 2, "expect": "TOKEN from read-batch", "body": "Updated synthesis", "evidence": "Source references"}
+  ]
+}
+```
+
+Save with `research node save-batch example --file C:\work\reports.json`. IDs and tokens above are illustrative. Each `expect` is validated independently against the same starting revision, before any report is written. Duplicate/unknown IDs, reserved report markers, unknown JSON fields, wrong binary identity, and stale tokens or revision reject the batch. Read again and review conflicts before retrying.
+
+The catalog is loaded/indexed once, changed reports are journaled together, and the catalog revision advances once. Exact unchanged open reports are skipped. Saving an accepted report reopens it even when its text is unchanged. Changed reports and affected consumers/ancestors lose acceptance; no batch field can attest completion. Supporting data is retained. Successful JSON returns `saved` node IDs and the resulting `revision`.
+
+The durable `catalog-transactions` journal used for catalog edits makes interrupted report publication resumable on the next open. Preserve journals and do not edit canonical files during pending publication. Completion remains a separate, individually reviewed operation.

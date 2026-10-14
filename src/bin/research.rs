@@ -91,6 +91,18 @@ enum ProjectCommand {
 }
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Read multiple canonical reports and edit tokens from one project snapshot.
+    ReadBatch {
+        project: String,
+        #[arg(required = true)]
+        nodes: Vec<u64>,
+    },
+    /// Save independently token-checked report bodies in one recoverable transaction.
+    SaveBatch {
+        project: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Repair recognized old flat-layout links using the current canonical catalog.
     RepairLinks {
         project: String,
@@ -245,6 +257,8 @@ fn run(args: Args) -> Result<Value, String> {
         ) => Some(project.as_str()),
         Command::Node(
             NodeCommand::List { project }
+            | NodeCommand::ReadBatch { project, .. }
+            | NodeCommand::SaveBatch { project, .. }
             | NodeCommand::Batch { project, .. }
             | NodeCommand::RepairLinks { project, .. }
             | NodeCommand::Create { project, .. }
@@ -261,18 +275,37 @@ fn run(args: Args) -> Result<Value, String> {
     match args.command {
         Command::Init => Ok(locations),
         Command::Project(command) => match command {
-            ProjectCommand::List => Ok(json!(
+            ProjectCommand::List => {
+                if !lib.busy_projects.is_empty() {
+                    return Err(format!(
+                        "Projects busy: {}. Retry or address a project directly.",
+                        lib.busy_projects.join(", ")
+                    ));
+                }
+                Ok(json!(
                 lib.projects
                     .iter()
                     .map(|p| json!({"id":p.id,"name":p.name,"binary":p.binary,"research_scope":p.research_scope}))
                     .collect::<Vec<_>>()
-            )),
-            ProjectCommand::Create { id, name, binary, scope } => {
-                if scope.as_ref().is_some_and(|s| s.trim().chars().any(char::is_control)) {
+            ))
+            }
+            ProjectCommand::Create {
+                id,
+                name,
+                binary,
+                scope,
+            } => {
+                if scope
+                    .as_ref()
+                    .is_some_and(|s| s.trim().chars().any(char::is_control))
+                {
                     return Err("Scope must be a single-line topic label.".into());
                 }
                 lib.create(&id, &name, &binary)?;
-                if let Some(scope) = scope { let p=project(&lib,&id)?; lib.set_scope(p,&scope,0)?; }
+                if let Some(scope) = scope {
+                    let p = project(&lib, &id)?;
+                    lib.set_scope(p, &scope, 0)?;
+                }
                 Ok(json!({"created":id,"app_node":0}))
             }
             ProjectCommand::Show { project: id } => {
@@ -287,28 +320,50 @@ fn run(args: Args) -> Result<Value, String> {
                 lib.set_binary(p, &binary)?;
                 Ok(json!({"project":id,"binary":binary}))
             }
-            ProjectCommand::SetScope { project:id, scope, expect_revision } => {
-                let p=project(&lib,&id)?;
-                lib.set_scope(p,&scope,expect_revision)?;
-                Ok(json!({"project":id,"research_scope":lib.projects[p].research_scope,"revision":lib.projects[p].revision}))
+            ProjectCommand::SetScope {
+                project: id,
+                scope,
+                expect_revision,
+            } => {
+                let p = project(&lib, &id)?;
+                lib.set_scope(p, &scope, expect_revision)?;
+                Ok(
+                    json!({"project":id,"research_scope":lib.projects[p].research_scope,"revision":lib.projects[p].revision}),
+                )
             }
         },
         Command::Node(command) => match command {
-            NodeCommand::RepairLinks { project: id, expect_revision } => {
+            NodeCommand::ReadBatch { project: id, nodes } => {
+                lib.read_reports(project(&lib, &id)?, &nodes)
+            }
+            NodeCommand::SaveBatch { project: id, file } => {
+                let p = project(&lib, &id)?;
+                let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                let saved = lib.save_reports(p, &batch)?;
+                Ok(json!({"project":id,"revision":lib.projects[p].revision,"saved":saved}))
+            }
+            NodeCommand::RepairLinks {
+                project: id,
+                expect_revision,
+            } => {
                 let p = project(&lib, &id)?;
                 let batch = serde_json::from_value(json!({"schema":1,"binary":lib.projects[p].binary,"expect_revision":expect_revision,"repair_legacy_links":true})).map_err(|e|e.to_string())?;
                 lib.batch(p, &batch)?;
                 Ok(json!({"project":id,"revision":lib.projects[p].revision}))
-            },
+            }
             NodeCommand::Batch { project: id, file } => {
                 let p = project(&lib, &id)?;
-                let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
                 let created = lib.batch(p, &batch)?;
                 Ok(json!({"project": id, "revision":lib.projects[p].revision, "created":created}))
-            },
+            }
             NodeCommand::List { project: id } => {
                 let p = project(&lib, &id)?;
-                let states = lib.effective_all(p); let paths = lib.report_paths(p); let required = lib.required_nodes(p);
+                let states = lib.effective_all(p);
+                let paths = lib.report_paths(p);
+                let required = lib.required_nodes(p);
                 Ok(json!(lib.projects[p].nodes.iter().map(|n| json!({"node":n,"effective_status":states[&n.id],"required_research":required.contains(&n.id),"report":paths[&n.id]})).collect::<Vec<_>>()))
             }
             NodeCommand::Create {
@@ -388,11 +443,20 @@ fn run(args: Args) -> Result<Value, String> {
         },
         Command::Status { project: id } => {
             let p = project(&lib, &id)?;
-            let states = lib.effective_all(p); let required = lib.required_nodes(p);
+            let states = lib.effective_all(p);
+            let required = lib.required_nodes(p);
             let mut kids: std::collections::HashMap<u64, Vec<u64>> = Default::default();
             let mut deps: std::collections::HashMap<u64, Vec<u64>> = Default::default();
-            for n in &lib.projects[p].nodes { if !n.context_only { if let Some(parent) = n.parent { kids.entry(parent).or_default().push(n.id); } } }
-            for e in &lib.projects[p].dependencies { deps.entry(e.dependent).or_default().push(e.prerequisite); }
+            for n in &lib.projects[p].nodes {
+                if !n.context_only
+                    && let Some(parent) = n.parent
+                {
+                    kids.entry(parent).or_default().push(n.id);
+                }
+            }
+            for e in &lib.projects[p].dependencies {
+                deps.entry(e.dependent).or_default().push(e.prerequisite);
+            }
             let records:Vec<_>=lib.projects[p].nodes.iter().map(|n|{
                 let children = kids.get(&n.id).cloned().unwrap_or_default();
                 let blocked_children:Vec<_>=children.iter().copied().filter(|id|states[id]!=Status::Complete).collect();
@@ -400,9 +464,19 @@ fn run(args: Args) -> Result<Value, String> {
                 json!({"id":n.id,"name":n.name,"kind":n.kind,"status":states[&n.id],"required_research":required.contains(&n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
                     "ready_for_review":states[&n.id]!=Status::Complete&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty())})
             }).collect();
-            let inventory = lib.projects[p].nodes.iter().filter(|n|n.kind==Kind::Function).count();
-            let required_functions = lib.projects[p].nodes.iter().filter(|n|n.kind==Kind::Function && required.contains(&n.id)).count();
-            Ok(json!({"project":id,"app_status":states[&0],"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions,"records":records}))
+            let inventory = lib.projects[p]
+                .nodes
+                .iter()
+                .filter(|n| n.kind == Kind::Function)
+                .count();
+            let required_functions = lib.projects[p]
+                .nodes
+                .iter()
+                .filter(|n| n.kind == Kind::Function && required.contains(&n.id))
+                .count();
+            Ok(
+                json!({"project":id,"app_status":states[&0],"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions,"records":records}),
+            )
         }
         Command::Home | Command::Gui | Command::Criteria { .. } => unreachable!(),
     }

@@ -129,6 +129,36 @@ fn meter_width(segments: usize) -> f32 {
     6.0 + segments as f32 * 3.0
 }
 
+fn meter_rows(widths: &[f32], viewport: f32, gap: f32) -> (Vec<(f32, usize)>, f32, usize) {
+    let mut positions = Vec::with_capacity(widths.len());
+    let mut content_width = 0.0_f32;
+    let (mut row, mut on_row, mut row_width) = (0, 0, 0.0);
+    for width in widths {
+        let next = if on_row == 0 {
+            *width
+        } else {
+            row_width + gap + width
+        };
+        // Keep the baseline pair even when oversized. Extra meters must fit
+        // the viewport, never the wider content created by another row.
+        if on_row >= 2 && next > viewport {
+            row += 1;
+            on_row = 0;
+            row_width = 0.0;
+        }
+        let x = if on_row == 0 { 0.0 } else { row_width + gap };
+        positions.push((x, row));
+        row_width = x + width;
+        content_width = content_width.max(row_width);
+        on_row += 1;
+    }
+    (
+        positions,
+        content_width,
+        if widths.is_empty() { 0 } else { row + 1 },
+    )
+}
+
 // CPU Usage meter from the reference, rotated clockwise: thin vertical
 // segments fill left-to-right, with the unlit lattice remaining visible.
 fn led(
@@ -382,7 +412,6 @@ impl eframe::App for Dashboard {
                 let project_view=self.projects.get(self.project).cloned();
                 let live_meters=project_view.as_ref().map(|p|p.meters.clone()).unwrap_or_default();
                 let data:Vec<Row>=live_meters.chunks(4).map(|batch|Row{groups:batch.iter().map(|m|(m.name.clone(),m.functions,if m.states.iter().all(|&s|s==0)&&!m.states.is_empty(){0}else if m.states.iter().any(|&s|s!=2){1}else{2},m.completed_functions)).collect()}).collect();
-                let meter_count:usize=data.iter().map(|r|r.groups.len()).sum();
                 let mut counts = [0usize; 3];
                 for row in &data {
                     for g in &row.groups {
@@ -443,7 +472,7 @@ impl eframe::App for Dashboard {
                             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                             .id_salt(("meters", self.project))
                             .auto_shrink([false, false])
-                            .show(ui, |ui| {
+                            .show_viewport(ui, |ui, viewport| {
                                 if live_meters.is_empty() {
                                     ui.label(if project_view.is_none(){"No projects yet. Create your first research project."}else{"No architecture records yet. Add one in Research records."});
                                     if ui.button(if project_view.is_none(){"Create project"}else{"Open research records"}).clicked(){self.research.open=true;}
@@ -460,17 +489,16 @@ impl eframe::App for Dashboard {
                                     let footer_w=ui.painter().layout_no_wrap(footer,font,ink).size().x;
                                     meter_width(count).max(title_w).max(footer_w)+padding*2.0
                                 }).collect();
-                                let content_width=panel_widths.chunks(2).map(|pair|pair.iter().sum::<f32>()+if pair.len()==2{gap}else{0.0}).fold(0.0_f32,f32::max);
-                                let (area,_)=ui.allocate_exact_size(Vec2::new(content_width,(row_height*meter_count.div_ceil(2) as f32-gap).max(0.0)),egui::Sense::hover());
+                                let (positions,content_width,rows)=meter_rows(&panel_widths,viewport.width(),gap);
+                                let (area,_)=ui.allocate_exact_size(Vec2::new(content_width,(row_height*rows as f32-gap).max(0.0)),egui::Sense::hover());
                                 let base = area.min;
                                 let p = ui.painter().clone();
-                                for ri in 0..data.len() {
-                                    for gi in 0..data[ri].groups.len() {
+                                for (ri,row) in data.iter().enumerate() {
+                                    for (gi,group) in row.groups.iter().enumerate() {
                                         let index = ri * 4 + gi;
-                                        let col = index % 2;
-                                        let slot = index / 2;
-                                        let (chunk, num, state, finished) = data[ri].groups[gi].clone();
-                                        let panel_x=base.x+if col==0{0.0}else{panel_widths[index-1]+gap};
+                                        let (offset,slot) = positions[index];
+                                        let (chunk, num, state, finished) = group.clone();
+                                        let panel_x=base.x+offset;
                                         let panel_y=base.y+slot as f32*row_height;
                                         let panel_rect=egui::Rect::from_min_size(egui::pos2(panel_x,panel_y),Vec2::new(panel_widths[index],row_height-gap));
                                         p.rect_filled(panel_rect,0.0,bg);
@@ -527,11 +555,10 @@ impl eframe::App for Dashboard {
                                                 egui::StrokeKind::Outside,
                                             );
                                         }
-                                        if hit.double_clicked() {
-                                            if let (Some(project),Some(meter))=(&project_view,live_meters.get(index)){self.research.open_record(&project.id,meter.id);}
-                                        }
+                                        if hit.double_clicked()
+                                            && let (Some(project),Some(meter))=(&project_view,live_meters.get(index)){self.research.open_record(&project.id,meter.id);}
                                         hit.context_menu(|ui| {
-                                            if ui.button("Open architecture report").clicked(){if let (Some(project),Some(meter))=(&project_view,live_meters.get(index)){self.research.open_record(&project.id,meter.id);}}
+                                            if ui.button("Open architecture report").clicked()&& let (Some(project),Some(meter))=(&project_view,live_meters.get(index)){self.research.open_record(&project.id,meter.id);}
                                             ui.label("Segment counts come from this architecture's chunk records.");
                                         });
                                         hit.on_hover_text(format!(
@@ -772,4 +799,37 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+#[cfg(test)]
+mod meter_tests {
+    use super::meter_rows;
+    #[test]
+    fn packs_to_exact_viewport_then_wraps() {
+        let (positions, width, rows) = meter_rows(&[100.0; 5], 436.0, 12.0);
+        assert_eq!(
+            positions,
+            vec![(0.0, 0), (112.0, 0), (224.0, 0), (336.0, 0), (0.0, 1)]
+        );
+        assert_eq!((width, rows), (436.0, 2));
+        assert_eq!(meter_rows(&[100.0; 5], 435.0, 12.0).0[3], (0.0, 1));
+    }
+    #[test]
+    fn oversized_pair_does_not_expand_other_rows() {
+        let (positions, width, rows) =
+            meter_rows(&[400.0, 400.0, 100.0, 100.0, 100.0, 100.0], 350.0, 12.0);
+        assert_eq!((width, rows), (812.0, 3));
+        assert_eq!(positions[2], (0.0, 1));
+        assert_eq!(positions[5], (0.0, 2));
+    }
+    #[test]
+    fn empty_single_and_resize() {
+        assert_eq!(meter_rows(&[], 300.0, 12.0), (vec![], 0.0, 0));
+        assert_eq!(
+            meter_rows(&[500.0], 300.0, 12.0),
+            (vec![(0.0, 0)], 500.0, 1)
+        );
+        assert_eq!(meter_rows(&[100.0; 6], 212.0, 12.0).2, 3);
+        assert_eq!(meter_rows(&[100.0; 6], 660.0, 12.0).2, 1);
+    }
 }

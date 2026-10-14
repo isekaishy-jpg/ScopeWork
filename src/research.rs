@@ -181,7 +181,30 @@ fn open_folder(path: &Path) -> Result<()> {
 pub struct Library {
     pub root: PathBuf,
     pub projects: Vec<Project>,
-    _lock: Option<std::fs::File>,
+    pub busy_projects: Vec<String>,
+    _lock: Option<OperationLocks>,
+}
+// Keep the legacy gate shared for the lifetime of every project operation. Older
+// executables take it exclusively, so mixed-version processes cannot race writes.
+struct OperationLocks {
+    project: Option<String>,
+    _project: Option<fs::File>,
+    _gate: fs::File,
+}
+fn project_lock(root: &Path, id: &str) -> Result<fs::File> {
+    let folder = root.join(".project-locks");
+    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(folder.join(format!("{id}.lock")))
+        .map_err(|e| e.to_string())?;
+    file.try_lock().map_err(|_| {
+        format!("Research project '{id}' is busy with another operation. Retry shortly.")
+    })?;
+    Ok(file)
 }
 impl Library {
     pub fn set_scope(&mut self, p: usize, scope: &str, expected_revision: u64) -> Result<()> {
@@ -214,6 +237,11 @@ impl Library {
     }
     fn fresh(&self) -> Result<Self> {
         let mut fresh = Self::open(self.root.clone())?;
+        for old in &self.projects {
+            if fresh.busy_projects.contains(&old.id) {
+                fresh.projects.push(old.clone());
+            }
+        }
         fresh.projects.sort_by_key(|p| {
             self.projects
                 .iter()
@@ -221,13 +249,6 @@ impl Library {
                 .unwrap_or(usize::MAX)
         });
         Ok(fresh)
-    }
-    fn write_current<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        let mut fresh = self.fresh()?;
-        let result = operation(&mut fresh);
-        fresh.release();
-        *self = fresh;
-        result
     }
     fn write_project<T>(
         &mut self,
@@ -240,7 +261,7 @@ impl Library {
             .ok_or("Project no longer exists")?
             .id
             .clone();
-        let mut fresh = self.fresh()?;
+        let mut fresh = Self::open_project(self.root.clone(), Some(&id))?;
         let current = fresh
             .projects
             .iter()
@@ -248,7 +269,8 @@ impl Library {
             .ok_or("Project was removed. Refresh before continuing.")?;
         let result = operation(&mut fresh, current);
         fresh.release();
-        *self = fresh;
+        self.projects[p] = fresh.projects.remove(current);
+        self.busy_projects.retain(|busy| busy != &id);
         result
     }
     pub fn refresh(&mut self) -> Result<()> {
@@ -292,6 +314,9 @@ impl Library {
         Self::open_project(root, None)
     }
     pub fn open_project(root: PathBuf, selected: Option<&str>) -> Result<Self> {
+        if selected.is_some_and(|id| !valid_id(id)) {
+            return Err("Invalid project identity".into());
+        }
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         let lock = std::fs::OpenOptions::new()
             .read(true)
@@ -300,13 +325,19 @@ impl Library {
             .truncate(false)
             .open(root.join(".library.lock"))
             .map_err(|e| e.to_string())?;
-        lock.try_lock().map_err(|_| {
+        lock.try_lock_shared().map_err(|_| {
             "Research library is busy with another operation. Retry shortly.".to_string()
         })?;
+        let selected_lock = selected.map(|id| project_lock(&root, id)).transpose()?;
         let mut lib = Self {
             root,
             projects: vec![],
-            _lock: Some(lock),
+            busy_projects: vec![],
+            _lock: Some(OperationLocks {
+                project: selected.map(str::to_owned),
+                _project: selected_lock,
+                _gate: lock,
+            }),
         };
         for e in fs::read_dir(&lib.root).map_err(|e| e.to_string())? {
             let e = e.map_err(|e| e.to_string())?;
@@ -318,6 +349,22 @@ impl Library {
             }
             let path = e.path().join("project.json");
             if path.exists() {
+                let id = e.file_name().to_string_lossy().into_owned();
+                if !valid_id(&id) {
+                    return Err("Invalid project identity".into());
+                }
+                let _snapshot_lock = if selected.is_none() {
+                    match project_lock(&lib.root, &id) {
+                        Ok(lock) => Some(lock),
+                        Err(error) if error.contains("is busy") => {
+                            lib.busy_projects.push(id);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    None
+                };
                 let mut p: Project =
                     serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
                         .map_err(|e| e.to_string())?;
@@ -360,11 +407,17 @@ impl Library {
                 let validation = Self {
                     root: lib.root.clone(),
                     projects: vec![p.clone()],
+                    busy_projects: vec![],
                     _lock: None,
                 };
                 validation.validate_dependencies(0, &p.dependencies)?;
                 layout::migrate(&lib.root.join(&p.id), &mut p)?;
                 ensure_folders(&lib.root.join(&p.id))?;
+                if !lib.root.join(&p.id).join("app.md").is_file() {
+                    return Err(
+                        "Canonical app report missing. Restore it before continuing.".into(),
+                    );
+                }
                 lib.projects.push(p);
             }
         }
@@ -372,10 +425,8 @@ impl Library {
         // Read canonical reports on demand. Scanning every unstarted function's file on each
         // command would make a whole-binary catalog dominate unrelated operations.
         // Accepted reports are still read/hash-checked by effective-state evaluation.
-        for p in 0..lib.projects.len() {
-            if !lib.dir(p).join("app.md").is_file() {
-                return Err("Canonical app report missing. Restore it before continuing.".into());
-            }
+        if selected.is_none() {
+            lib.release();
         }
         Ok(lib)
     }
@@ -389,8 +440,16 @@ impl Library {
         )
     }
     pub fn create(&mut self, id: &str, name: &str, binary: &str) -> Result<()> {
-        if self._lock.is_none() {
-            return self.write_current(|l| l.create(id, name, binary));
+        if self
+            ._lock
+            .as_ref()
+            .is_none_or(|locks| locks.project.as_deref() != Some(id))
+        {
+            let mut fresh = Self::open_project(self.root.clone(), Some(id))?;
+            fresh.create(id, name, binary)?;
+            fresh.release();
+            self.projects.extend(fresh.projects);
+            return Ok(());
         }
         if !valid_id(id) || name.trim().is_empty() {
             return Err("Use a project ID with lowercase letters, digits, and hyphens, and a nonempty name.".into());
@@ -689,6 +748,12 @@ pub struct ResearchUi {
     scope_revision: u64,
     complete: bool,
 }
+impl Default for ResearchUi {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResearchUi {
     pub fn new() -> Self {
         let (library, message) = match crate::paths::home(None)
@@ -821,7 +886,7 @@ impl ResearchUi {
             egui::CollapsingHeader::new("Project tools and data folders").show(ui,|ui|{
                 ui.horizontal_wrapped(|ui|{
                     for (label,folder) in [("Tools","tools"),("Profiles","tools/profiles"),("Shared analysis","tools/workspaces"),("Tool logs","tools/logs")] {
-                        if ui.button(label).clicked(){if let Err(e)=open_folder(&project_dir.join(folder)){self.message=e;}}
+                        if ui.button(label).clicked()&& let Err(e)=open_folder(&project_dir.join(folder)){self.message=e;}
                     }
                 });
                 ui.label("Each function owns research.md and data/ in its function folder. Only shared tool workspaces, logs and scratch stay under tools/.");
@@ -897,16 +962,16 @@ impl ResearchUi {
                 if self.has_unsaved(){ui.label("Unsaved edits");}
             });
         });
-        if let Some((p, id)) = nav {
-            if let Some(current) = navigation_ids.get(p).and_then(|id| {
+        if let Some((p, id)) = nav
+            && let Some(current) = navigation_ids.get(p).and_then(|id| {
                 self.library
                     .as_ref()?
                     .projects
                     .iter()
                     .position(|v| &v.id == id)
-            }) {
-                self.load(current, id);
-            }
+            })
+        {
+            self.load(current, id);
         }
         self.open = open;
     }
@@ -961,14 +1026,20 @@ impl ResearchUi {
                         let path = &paths[&n.id];
                         signature.push_str(&format!(
                             "{:?};",
-                            fs::metadata(&path).map(|m| (m.len(), m.modified().ok()))
+                            fs::metadata(path).map(|m| (m.len(), m.modified().ok()))
                         ));
                     }
                 }
             }
         }
         let fingerprint = hash(&signature);
-        if self.library.is_none() || fingerprint != self.fingerprint {
+        if self.library.is_none()
+            || fingerprint != self.fingerprint
+            || self
+                .library
+                .as_ref()
+                .is_some_and(|l| !l.busy_projects.is_empty())
+        {
             match self.refresh_library_inner() {
                 Ok(()) => self.fingerprint = fingerprint,
                 Err(e) if e.contains("library is busy") => {}
@@ -986,16 +1057,22 @@ impl ResearchUi {
         }
     }
     fn refresh_library_inner(&mut self) -> Result<()> {
-        if self.library.is_none() {
+        if let Some(lib) = &mut self.library {
+            lib.refresh()?;
+        } else {
             let mut lib =
                 crate::paths::home(None).and_then(|h| Library::open(h.join("projects")))?;
             lib.release();
             self.library = Some(lib);
-        } else {
-            self.library.as_mut().unwrap().refresh()?;
         }
         self.changed = true;
         let lib = self.library.as_ref().unwrap();
+        if !lib.busy_projects.is_empty() {
+            self.message = format!(
+                "Busy projects retain their last snapshot: {}. Other projects remain available.",
+                lib.busy_projects.join(", ")
+            );
+        }
         let selected = lib.projects.iter().position(|p| p.id == self.project_id);
         if let Some(p) = selected {
             self.project = p;
@@ -1014,7 +1091,9 @@ impl ResearchUi {
                 self.project_id.clear();
                 self.node = 0;
             } else {
-                self.load(p, id);
+                if !lib.busy_projects.contains(&lib.projects[p].id) {
+                    self.load(p, id);
+                }
             }
         }
         Ok(())

@@ -13,7 +13,7 @@ Build Scopework, a Rust GUI and agent CLI for managing isolated binary research 
 - This repository is a research management tool, not a client or rendering implementation.
 - Keep source installations and binaries read-only. Do not commit binaries, private captures, credentials, or research datasets.
 - Preserve provenance and distinguish observed, specification-defined, and inferred claims.
-- Do not add tests or run test commands unless the user asks for testing or verification.
+- The restriction on testing research text does not apply to this software. Add focused regression tests for meaningful behavior changes and run appropriate build, test and lint checks. Keep the dashboard free of known errors and warnings; avoid repeating verification without a new change, failure or unresolved concern.
 - File narrow complaints about the app as individual Markdown reports in the single complaints/ folder in the active research home (`research home` prints it). Follow that folder's README.md; filing the report is the entire process.
 
 - Every research project owns tools/profiles, tools/scripts, tools/instrumentation and tools/bin. Shared tool databases and working data belong in tools/workspaces, tools/logs or tools/scratch. Function-specific captures, exports, logs and evidence belong in that function's data/ folder. Do not create project-level data/evidence dumps or parallel research reports. Canonical architecture reports are architectures/<category>/research.md and chunk reports are architectures/<category>/<chunk>/research.md; the app report is app.md.

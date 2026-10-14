@@ -323,6 +323,7 @@ pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
     }
     // Refresh generated dependency views before committing the new catalog.
     let temporary = Library {
+        busy_projects: vec![],
         root: root.parent().ok_or("Missing library directory")?.into(),
         projects: vec![project.clone()],
         _lock: None,

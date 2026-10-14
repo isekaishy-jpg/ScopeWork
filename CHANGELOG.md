@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.5 - 2026-10-14
+
+- Fit extra meters per row within the viewport; wrap before overflow, retaining horizontal scrolling for oversized baseline pairs.
+- Isolate operations with project locks. GUI refresh retains busy project snapshots while loading other projects. A shared compatibility gate prevents unsafe overlap with older executables.
+- Add `node read-batch` and token-checked, journaled `node save-batch` to amortize large-catalog report editing. Saves remain unaccepted and invalidate affected consumers and ancestors.
+- Add regression coverage for lock isolation, legacy compatibility, stale/malformed batches, interrupted publication, completion invalidation, evidence preservation and meter wrapping.
+
 ## 0.4.4 - 2026-10-14
 
 - Load only the targeted project for project/node/dependency CLI commands.

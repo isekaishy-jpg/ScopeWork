@@ -21,11 +21,15 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
       - name: Select Rust toolchain
         run: rustup override set 1.95.0
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
+      - name: Regression tests
+        run: cargo test --locked --all-targets
+      - name: Lint without warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build Windows installer
         run: powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1
       - name: Upload installer and checksum

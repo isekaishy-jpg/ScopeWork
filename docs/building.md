@@ -37,7 +37,7 @@ Close the app if rebuilding the executable it is currently running from. Researc
 | `assets/` | Application icon sources and exports |
 | `docs/` | User and contributor guides |
 
-The Windows workflow builds the executables and MSI and retains build artifacts. It does not run tests. Keep installer binaries and research data out of Git.
+The Windows workflow builds the executables and MSI and retains build artifacts. It runs focused regression tests and warning-denying Clippy checks. Keep installer binaries and research data out of Git.
 
 ## Release preparation
 
