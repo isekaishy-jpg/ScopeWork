@@ -38,7 +38,7 @@ The editor updates each canonical Markdown file in place. Parent reports link th
 
 Research Scope is a short topic label: for example, **Rendering** or **Asset platform**. Set it in **View > Research records > Research scope**. It appears in the header above the selected project's meters, and in CLI output so agents know what is being researched.
 
-The label can describe a selected part of a binary. Editing it does not change completion states or assignments. Detailed understanding and completion criteria remain in the research reports and hierarchy.
+The inventory covers the whole binary even when the label describes a selected research subject. Explicit context-only membership controls required children; the label does not. Editing the label does not change completion or assignments. Detailed understanding and completion criteria remain in the research reports and hierarchy.
 
 ### Completion
 
@@ -57,7 +57,7 @@ Use the completion checkbox only after reviewing the report. Completion requires
 
 Save or discard edits before navigating. Unsaved report edits prevent closing the app. GUI and CLI share short exclusive write operations. The GUI can stay open while agents work; use View > Refresh research progress to display their changes. Stale report or project revisions require reloading and review before saving.
 
-When a project has architecture records, its dashboard uses them: one meter per architecture, one existing-size segment per chunk (green complete, yellow in progress, dim red not started), and separate function counts. Double-click a meter to open its architecture report. The App report's completion status is separate from function coverage. Projects without architecture records show an empty state; no sample progress or historical completion claims are imported.
+When a project has architecture records, its dashboard uses them: one meter per architecture, one existing-size segment per required chunk (green complete, yellow in progress, dim red not started), and separate function counts. Double-click a meter to open its architecture report. The App report's completion status is separate from function coverage. Projects without architecture records show an empty state; no sample progress or historical completion claims are imported.
 
 Research lives outside the installation and checkout. The installer lets you choose a research home; new installations default to `%LOCALAPPDATA%\Scopework`. It contains `projects/` and one shared `complaints/` folder. The saved home is shared by the GUI and CLI. Earlier default homes continue to be used when present; no research is moved. Set `RESEARCH_DASHBOARD_HOME` to another absolute home before launching, or use CLI `--home PATH`. Projects have separate IDs, trees, metadata, evidence directories, and document membership. Do not copy research between projects without an explicit evidence reference and scope review.
 
@@ -73,7 +73,7 @@ Windows executable: `target/release/research-dashboard.exe`.
 
 Options > Dark mode switches palettes and saves the choice. Other menus provide Exit, Always on top, research records, progress refresh, Clear chunk selection, and About. The custom title bar supports dragging, minimizing, maximizing, and closing; the bottom-right grip resizes the window.
 
-## Preview mode
+## Supporting data
 
 
 Every function has its own folder: `research.md` plus `data/`. Use relative `data/<file>` links from that report. There is no new project-level evidence or data directory. Shared tool state lives under `tools/workspaces`, `tools/logs`, and `tools/scratch`. The research editor has an **Open this function's data folder** button.
@@ -92,3 +92,9 @@ A dependent function cannot be marked complete until its prerequisites are compl
 
 Agents update tags with `research deps set`; see the [CLI guide](cli.md). The dashboard may remain open. Both TOML files are maintained by the app; do not edit them directly.
 
+
+## Whole-binary catalog and membership
+
+The browser supports collapsed branches, name/RVA search, virtualized rows and a required-research filter. Inventory and required function totals remain visible separately. Context-only records retain canonical reports and evidence without becoming required parent synthesis; explicit function prerequisites still gate completion. All nodes are required by default. Context membership is an explicit, review-invalidating operation, never inferred from the topic label.
+
+For large catalogs, use the [batch CLI](cli.md#whole-binary-inventory-and-batch-catalog-changes) to create, move, rename and reorder nodes transactionally. New records start unresearched. Batch/membership changes use catalog format 3 and require app/CLI 0.4.3 or later. Report/data ownership is preserved, and interrupted operations resume from a retained journal.

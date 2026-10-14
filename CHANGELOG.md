@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3 - 2026-10-14
+
+- Add revision-checked batch creation, move, rename, membership and sibling ordering with resumable journals.
+- Index catalog paths and progress; update only affected generated dependency files.
+- Add collapsed, virtualized record browsing with name/RVA lookup and required-research filtering.
+- Keep whole-binary context inventory separate from required research; explicit prerequisites remain required.
+- Repair recognized absolute and relative internal links during moves, and expose repair for older migrated reports.
+- Use catalog format 3 for batch and membership changes; older app versions reject it instead of losing membership.
+
 ## 0.4.2 - 2026-10-14
 
 - Fix project/tab selection after external project deletion; target writes by stable project ID.

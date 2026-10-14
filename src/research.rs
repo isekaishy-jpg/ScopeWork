@@ -55,6 +55,8 @@ pub enum Status {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Node {
+    #[serde(default)]
+    pub context_only: bool,
     pub id: u64,
     pub parent: Option<u64>,
     pub kind: Kind,
@@ -84,8 +86,15 @@ pub struct Project {
 fn legacy_layout() -> u32 {
     1
 }
+#[path = "catalog_batch.rs"]
+mod catalog_batch;
+#[path = "catalog_browser.rs"]
+mod catalog_browser;
+#[path = "catalog_index.rs"]
+mod catalog_index;
 #[path = "layout.rs"]
 mod layout;
+pub use catalog_batch::Batch;
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 fn hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -309,6 +318,9 @@ impl Library {
                 if !valid_id(&p.id) || e.file_name().to_string_lossy() != p.id {
                     return Err("Invalid project identity".into());
                 }
+                catalog_batch::resume(&lib.root.join(&p.id), &mut p)?;
+                let lookup: std::collections::HashMap<_, _> =
+                    p.nodes.iter().map(|n| (n.id, n)).collect();
                 let mut ids = std::collections::HashSet::new();
                 let mut rvas = std::collections::HashSet::new();
                 for n in &p.nodes {
@@ -319,10 +331,9 @@ impl Library {
                         return Err("Invalid or duplicate function RVA".into());
                     }
                     if n.kind != Kind::App {
-                        let parent = p
-                            .nodes
-                            .iter()
-                            .find(|v| Some(v.id) == n.parent)
+                        let parent = n
+                            .parent
+                            .and_then(|id| lookup.get(&id).copied())
                             .ok_or("Missing report parent")?;
                         if parent.kind.child() != Some(n.kind) {
                             return Err("Invalid research hierarchy".into());
@@ -354,8 +365,8 @@ impl Library {
         lib.projects.sort_by_key(|p| p.name.clone());
         for p in 0..lib.projects.len() {
             lib.validate_dependencies(p, &lib.projects[p].dependencies)?;
-            for node in &lib.projects[p].nodes {
-                if !lib.path(p, node.id)?.is_file() {
+            for path in lib.report_paths(p).values() {
+                if !path.is_file() {
                     return Err(
                         "Canonical report missing. Restore the missing report before continuing."
                             .into(),
@@ -372,8 +383,7 @@ impl Library {
         atomic(
             &self.dir(p).join("project.json"),
             &serde_json::to_vec_pretty(&self.projects[p]).map_err(|e| e.to_string())?,
-        )?;
-        self.sync_dependency_files(p)
+        )
     }
     pub fn create(&mut self, id: &str, name: &str, binary: &str) -> Result<()> {
         if self._lock.is_none() {
@@ -389,7 +399,7 @@ impl Library {
         fs::create_dir(&dir).map_err(|e| e.to_string())?;
         ensure_folders(&dir)?;
         self.projects.push(Project {
-            layout_version: 2,
+            layout_version: 3,
             id: id.into(),
             name: name.into(),
             binary: binary.into(),
@@ -398,6 +408,7 @@ impl Library {
             next_id: 1,
             revision: 0,
             nodes: vec![Node {
+                context_only: false,
                 id: 0,
                 parent: None,
                 kind: Kind::App,
@@ -443,31 +454,7 @@ impl Library {
             .iter()
             .find(|n| n.id == id)
             .ok_or("Unknown report")?;
-        let mut md = format!(
-            "# {}\n\nProject: {} (`{}`)\n\nBinary: {}\n\nKind: {} | ID: {}\n",
-            n.name,
-            project.name,
-            project.id,
-            project.binary,
-            n.kind.label(),
-            id
-        );
-        if let Some(rva) = n.rva {
-            md += &format!("\nRVA: `0x{rva:08X}`\n");
-        }
-        md += "\n## Source reports\n";
-        for child in project.nodes.iter().filter(|c| c.parent == Some(id)) {
-            let rel = layout::link(&relative(project, n), &relative(project, child));
-            md += &format!(
-                "- [{}]({})\n",
-                child.name.replace('[', "(").replace(']', ")"),
-                rel
-            );
-        }
-        md += "\n## Research and understanding\n<!-- research-content -->\n";
-        md += body;
-        md += "\n<!-- research-evidence -->\n";
-        md += evidence;
+        let md = catalog_index::Index::new(project).render(project, id, body, evidence);
         let path = self.path(p, id)?;
         let folder = path.parent().ok_or("Missing report folder")?;
         fs::create_dir_all(folder).map_err(|e| e.to_string())?;
@@ -496,52 +483,30 @@ impl Library {
             cursor = n.parent;
         }
     }
+    pub fn effective_all(&self, p: usize) -> std::collections::HashMap<u64, Status> {
+        catalog_index::Index::new(&self.projects[p]).states(&self.dir(p))
+    }
+    pub fn required_nodes(&self, p: usize) -> std::collections::HashSet<u64> {
+        catalog_index::Index::new(&self.projects[p]).required
+    }
+    pub fn report_paths(&self, p: usize) -> std::collections::HashMap<u64, PathBuf> {
+        catalog_index::Index::new(&self.projects[p])
+            .paths
+            .into_iter()
+            .map(|(id, path)| (id, self.dir(p).join(path)))
+            .collect()
+    }
     pub fn effective(&self, p: usize, id: u64) -> Status {
         let Some(n) = self.projects[p].nodes.iter().find(|n| n.id == id) else {
             return Status::NotStarted;
         };
-        if n.status != Status::Complete {
-            if n.status == Status::NotStarted
-                && self.projects[p]
-                    .nodes
-                    .iter()
-                    .filter(|c| c.parent == Some(id))
-                    .any(|c| self.effective(p, c.id) != Status::NotStarted)
-            {
-                return Status::InProgress;
-            }
+        if n.kind == Kind::Function && n.status != Status::Complete {
             return n.status;
         }
-        let valid = fs::read_to_string(self.path(p, id).unwrap())
-            .ok()
-            .map(|s| Some(hash(&s)) == n.accepted_hash)
-            .unwrap_or(false);
-        if !valid {
-            return Status::InProgress;
-        }
-        if self.projects[p]
-            .dependencies
-            .iter()
-            .filter(|e| e.dependent == id)
-            .any(|e| self.effective(p, e.prerequisite) != Status::Complete)
-            || n.accepted_prerequisites != self.dependency_stamps(p, id)
-        {
-            return Status::InProgress;
-        }
-        let kids: Vec<_> = self.projects[p]
-            .nodes
-            .iter()
-            .filter(|k| k.parent == Some(id))
-            .collect();
-        if n.kind != Kind::Function
-            && (kids.is_empty()
-                || kids
-                    .iter()
-                    .any(|k| self.effective(p, k.id) != Status::Complete))
-        {
-            return Status::InProgress;
-        }
-        Status::Complete
+        self.effective_all(p)
+            .get(&id)
+            .copied()
+            .unwrap_or(Status::NotStarted)
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
         if self._lock.is_none() {
@@ -577,6 +542,7 @@ impl Library {
         let id = self.projects[p].next_id;
         self.projects[p].next_id += 1;
         let relnode = Node {
+            context_only: false,
             id,
             parent: Some(parent),
             kind,
@@ -597,6 +563,7 @@ impl Library {
         self.invalidate(p, id);
         self.write_report(p, parent, &body, &evidence)?;
         self.projects[p].revision += 1;
+        self.sync_dependency_subset(p, Some(&[id].into_iter().collect()))?;
         self.persist(p)?;
         Ok(id)
     }
@@ -638,7 +605,7 @@ impl Library {
             let kids: Vec<_> = self.projects[p]
                 .nodes
                 .iter()
-                .filter(|k| k.parent == Some(id))
+                .filter(|k| k.parent == Some(id) && !k.context_only)
                 .collect();
             if n.kind != Kind::Function
                 && (kids.is_empty()
@@ -691,6 +658,8 @@ impl Library {
 }
 
 pub struct ResearchUi {
+    browser: catalog_browser::Browser,
+    ui_projects: Vec<std::sync::Arc<Project>>,
     pub open: bool,
     pub library: Option<Library>,
     pub changed: bool,
@@ -728,6 +697,8 @@ impl ResearchUi {
             Err(e) => (None, e),
         };
         let mut s = Self {
+            browser: Default::default(),
+            ui_projects: vec![],
             open: false,
             library,
             changed: true,
@@ -814,7 +785,10 @@ impl ResearchUi {
         egui::Window::new("Research records").open(&mut open).default_size([950.0,700.0]).vscroll(true).show(ctx,|ui| {
             if !self.message.is_empty(){ui.colored_label(egui::Color32::from_rgb(230,170,80),&self.message);}
             let Some(lib)=&self.library else{return;};
-            let projects=lib.projects.clone();
+            if self.ui_projects.len() != lib.projects.len() || self.ui_projects.iter().zip(&lib.projects).any(|(a,b)| a.id != b.id || a.revision != b.revision) {
+                self.ui_projects = lib.projects.iter().cloned().map(std::sync::Arc::new).collect();
+            }
+            let projects=self.ui_projects.clone();
             egui::CollapsingHeader::new("New project").default_open(projects.is_empty()).show(ui,|ui|{
                 ui.horizontal(|ui|{ui.label("ID");ui.text_edit_singleline(&mut self.new_project_id);ui.label("Name");ui.text_edit_singleline(&mut self.new_project_name);});
                 if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{navigation_ids.push(self.new_project_id.clone());nav=Some((navigation_ids.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
@@ -868,17 +842,17 @@ impl ResearchUi {
             });
             ui.separator();
             ui.columns(2,|columns| {
-                egui::ScrollArea::vertical().id_salt("recordtree").max_height(240.0).show(&mut columns[0],|ui|{
-                    fn tree(ui:&mut egui::Ui,lib:&Library,p:usize,id:u64,selected:u64,dirty:bool,nav:&mut Option<(usize,u64)>) {
-                        let n=lib.projects[p].nodes.iter().find(|n|n.id==id).unwrap();
-                        if ui.add_enabled(!dirty,egui::Button::new(format!("{}: {} [{:?}]",n.kind.label(),n.name,lib.effective(p,id))).selected(id==selected)).clicked(){*nav=Some((p,id));}
-                        ui.indent(id,|ui|{for child in lib.projects[p].nodes.iter().filter(|n|n.parent==Some(id)){tree(ui,lib,p,child.id,selected,dirty,nav);}});
-                    }
-                    tree(ui,self.library.as_ref().unwrap(),self.project,0,self.node,self.has_unsaved(),&mut nav);
-                });
+                let dirty = self.has_unsaved();
+                if let Some(id) = self.browser.show(&mut columns[0], project, self.node, dirty) { nav = Some((self.project, id)); }
                 let n=project.nodes.iter().find(|n|n.id==self.node).unwrap();
                 let ui=&mut columns[1];ui.strong(format!("{} — {}",n.kind.label(),n.name));
                 ui.label(self.library.as_ref().unwrap().path(self.project,self.node).unwrap().display().to_string());
+                ui.label(if self.browser.required(n.id) { "Required research (including explicit prerequisites)" } else { "Context inventory; preserved outside required progress" });
+                let mut context_only = n.context_only;
+                if n.kind != Kind::App && ui.add_enabled(!self.has_unsaved(), egui::Checkbox::new(&mut context_only, "Context-only child membership")).changed() {
+                    let batch = Batch { schema: 1, repair_legacy_links: false, binary: project.binary.clone(), expect_revision: project.revision, create: vec![], update: vec![catalog_batch::Update { id: n.id, parent: None, name: None, context_only: Some(context_only) }], reorder: vec![] };
+                    match self.library.as_mut().unwrap().batch(self.project, &batch) { Ok(_) => { self.changed=true; nav=Some((self.project,self.node)); }, Err(e) => self.message=e }
+                }
                 if n.kind==Kind::Function && ui.button("Open this function's data folder").clicked(){
                     let path=self.library.as_ref().unwrap().path(self.project,self.node).unwrap().parent().unwrap().join("data");
                     if let Err(e)=open_folder(&path){self.message=e;}
@@ -943,6 +917,8 @@ pub struct Meter {
 }
 #[derive(Clone)]
 pub struct ProjectView {
+    pub inventory_functions: usize,
+    pub required_functions: usize,
     pub app_status: Status,
     pub id: String,
     pub name: String,
@@ -974,8 +950,10 @@ impl ResearchUi {
                 }
             }
             for (p, project) in lib.projects.iter().enumerate() {
+                let paths = lib.report_paths(p);
                 for n in &project.nodes {
-                    if let Ok(path) = lib.path(p, n.id) {
+                    if n.status == Status::Complete || (p == self.project && n.id == self.node) {
+                        let path = &paths[&n.id];
                         signature.push_str(&format!(
                             "{:?};",
                             fs::metadata(&path).map(|m| (m.len(), m.modified().ok()))
@@ -1044,6 +1022,8 @@ impl ResearchUi {
             .iter()
             .enumerate()
             .map(|(p, project)| {
+                let index = catalog_index::Index::new(project);
+                let states_all = index.states(&lib.dir(p));
                 let meters = project
                     .nodes
                     .iter()
@@ -1052,11 +1032,11 @@ impl ResearchUi {
                         let chunks: Vec<_> = project
                             .nodes
                             .iter()
-                            .filter(|c| c.parent == Some(a.id))
+                            .filter(|c| c.parent == Some(a.id) && index.required.contains(&c.id))
                             .collect();
                         let states = chunks
                             .iter()
-                            .map(|c| match lib.effective(p, c.id) {
+                            .map(|c| match states_all[&c.id] {
                                 Status::Complete => 0,
                                 Status::InProgress => 1,
                                 Status::NotStarted => 2,
@@ -1067,23 +1047,38 @@ impl ResearchUi {
                             .iter()
                             .filter(|f| {
                                 f.kind == Kind::Function
-                                    && chunks.iter().any(|c| f.parent == Some(c.id))
+                                    && index.required.contains(&f.id)
+                                    && f.parent.and_then(|id| index.nodes[&id].parent) == Some(a.id)
                             })
                             .collect();
                         Meter {
                             id: a.id,
-                            name: a.name.clone(),
+                            name: if index.required.contains(&a.id) {
+                                a.name.clone()
+                            } else {
+                                format!("{} [context]", a.name)
+                            },
                             functions: functions.len(),
                             completed_functions: functions
                                 .iter()
-                                .filter(|f| lib.effective(p, f.id) == Status::Complete)
+                                .filter(|f| states_all[&f.id] == Status::Complete)
                                 .count(),
                             states,
                         }
                     })
                     .collect();
                 ProjectView {
-                    app_status: lib.effective(p, 0),
+                    inventory_functions: project
+                        .nodes
+                        .iter()
+                        .filter(|n| n.kind == Kind::Function)
+                        .count(),
+                    required_functions: project
+                        .nodes
+                        .iter()
+                        .filter(|n| n.kind == Kind::Function && index.required.contains(&n.id))
+                        .count(),
+                    app_status: states_all[&0],
                     id: project.id.clone(),
                     name: project.name.clone(),
                     meters,
@@ -1197,14 +1192,33 @@ impl Library {
         Ok(())
     }
     fn sync_dependency_files(&self, p: usize) -> Result<()> {
+        self.sync_dependency_subset(p, None)
+    }
+    fn sync_dependency_subset(
+        &self,
+        p: usize,
+        only: Option<&std::collections::HashSet<u64>>,
+    ) -> Result<()> {
         let project = &self.projects[p];
-        for node in project.nodes.iter().filter(|n| n.kind == Kind::Function) {
+        let index = catalog_index::Index::new(project);
+        let mut incoming: std::collections::HashMap<u64, Vec<u64>> = Default::default();
+        for e in &project.dependencies {
+            incoming
+                .entry(e.prerequisite)
+                .or_default()
+                .push(e.dependent);
+        }
+        for node in project
+            .nodes
+            .iter()
+            .filter(|n| n.kind == Kind::Function && only.is_none_or(|ids| ids.contains(&n.id)))
+        {
             let tag = |id| {
-                let n = project.nodes.iter().find(|n| n.id == id).unwrap();
+                let n = index.nodes[&id];
                 FunctionTag {
                     node_id: id,
                     rva: format!("0x{:08X}", n.rva.unwrap()),
-                    report: layout::link(&relative(project, node), &relative(project, n)),
+                    report: layout::link(&index.paths[&node.id], &index.paths[&n.id]),
                 }
             };
             let deps = DependencyFile {
@@ -1212,11 +1226,12 @@ impl Library {
                 project: project.id.clone(),
                 binary: project.binary.clone(),
                 function_rva: format!("0x{:08X}", node.rva.unwrap()),
-                requires: project
-                    .dependencies
-                    .iter()
-                    .filter(|e| e.dependent == node.id)
-                    .map(|e| tag(e.prerequisite))
+                requires: index
+                    .requires
+                    .get(&node.id)
+                    .into_iter()
+                    .flatten()
+                    .map(|id| tag(*id))
                     .collect(),
             };
             let prereq = PrerequisiteFile {
@@ -1224,14 +1239,19 @@ impl Library {
                 project: project.id.clone(),
                 binary: project.binary.clone(),
                 function_rva: format!("0x{:08X}", node.rva.unwrap()),
-                required_by: project
-                    .dependencies
-                    .iter()
-                    .filter(|e| e.prerequisite == node.id)
-                    .map(|e| tag(e.dependent))
+                required_by: incoming
+                    .get(&node.id)
+                    .into_iter()
+                    .flatten()
+                    .map(|id| tag(*id))
                     .collect(),
             };
-            let folder = self.path(p, node.id)?.parent().unwrap().to_owned();
+            let folder = self
+                .dir(p)
+                .join(&index.paths[&node.id])
+                .parent()
+                .unwrap()
+                .to_owned();
             fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
             for (name, body) in [
                 ("dep.toml", toml::to_string_pretty(&deps)),
@@ -1339,6 +1359,13 @@ impl Library {
         if edges == previous {
             return Ok(());
         }
+        let affected: std::collections::HashSet<_> = previous
+            .iter()
+            .chain(&edges)
+            .filter(|e| e.dependent == id)
+            .flat_map(|e| [e.dependent, e.prerequisite])
+            .chain([id])
+            .collect();
         self.projects[p].dependencies = edges;
         let n = self.projects[p]
             .nodes
@@ -1354,6 +1381,7 @@ impl Library {
         self.invalidate(p, id);
         self.invalidate_dependents(p, id);
         self.projects[p].revision += 1;
+        self.sync_dependency_subset(p, Some(&affected))?;
         self.persist(p)
     }
     pub fn set_dependencies_by_rva(

@@ -25,3 +25,6 @@ Build Scopework, a Rust GUI and agent CLI for managing isolated binary research 
 - Research Scope is a short project topic label, such as Rendering or Asset platform, shown above the meters and exposed by the CLI. It tells agents what is being researched; do not turn it into a detailed charter or an additional completion gate. Editing the label does not reopen research. Detailed understanding belongs in canonical reports.
 
 - Preserve installer UpgradeCode and executable/CLI names across branding changes. Research-home selection is shared by GUI and CLI; explicit --home and environment overrides take precedence. Installer choices must be visible before Install, and uninstall must preserve user research.
+
+- Keep a whole-binary function inventory even for bounded research topics. Context-only branches remain inventoried without becoming required synthesis. Explicit prerequisites still gate completion. Default membership is required; never infer exclusion from the Research Scope label. Whole-client projects keep their full required inventory.
+- Use `research node batch` for large enrollment and organization with exact binary identity and project revision. Moves retain canonical node/RVA identity and data. Reorder with complete sibling lists. Preserve transaction journals; do not edit project.json or manually relocate canonical folders.

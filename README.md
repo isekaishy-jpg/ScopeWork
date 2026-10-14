@@ -28,7 +28,8 @@ Each task has a fixed scope. Functions establish their own behavior and connecti
 - **Isolated projects:** separate binary identities, reports and supporting data.
 - **One canonical report per item:** supporting captures stay beside the function they explain.
 - **Explicit prerequisites:** shared understanding is referenced, with dependent work reopened when it changes.
-- **Visible progress:** project tabs, chunk meters, function counts and a short research-topic header.
+- **Whole-binary inventory:** batch enrollment and reorganization, searchable collapsed records, and explicit context membership.
+- **Visible progress:** project tabs, chunk meters, required and inventory function counts, and a short research-topic header.
 - **GUI and CLI together:** agents can work while the dashboard is open; stale edits are rejected.
 - **Local files:** your research home stays under your control and survives uninstall.
 

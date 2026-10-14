@@ -561,7 +561,7 @@ impl eframe::App for Dashboard {
                     ),
                     (
                         w * 0.33,
-                        project_view.as_ref().map(|project|format!("App report: {:?}",project.app_status)).unwrap_or_else(||"No projects".into()),
+                        project_view.as_ref().map(|project|format!("App: {:?} | Inventory: {} funcs | Required: {} | Context: {}",project.app_status,project.inventory_functions,project.required_functions,project.inventory_functions-project.required_functions)).unwrap_or_else(||"No projects".into()),
                     ),
                 ] {
                     let sr = r(sx, h - 20.0, width - 2.0, 19.0);

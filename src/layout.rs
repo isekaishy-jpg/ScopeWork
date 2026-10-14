@@ -37,91 +37,121 @@ fn legacy(n: &Node) -> String {
         Kind::Function => format!("functions/{:08X}/research.md", n.rva.unwrap()),
     }
 }
-fn remap(path: &str, moves: &[(String, String)]) -> String {
-    for (old, new) in moves {
-        if path == old {
-            return new.clone();
-        }
-        if let Some(tail) = path.strip_prefix(&format!("{old}/")) {
-            return format!("{new}/{tail}");
-        }
-    }
-    path.into()
+/// Indexed path rewriting: cost follows the number of path components, not catalog size.
+pub(super) struct Rewriter {
+    moves: std::collections::HashMap<String, String>,
+    root: String,
+    destinations: regex::Regex,
+    paths: regex::Regex,
 }
-fn rebase(target: &str, old: &str, new: &str, moves: &[(String, String)]) -> String {
-    if target.starts_with('#') || target.starts_with('/') || target.contains(':') {
-        return target.into();
+impl Rewriter {
+    pub fn new(moves: &[(String, String)], root: &Path) -> Self {
+        Self {
+            moves: moves.iter().cloned().collect(),
+            root: format!("{}/", root.to_string_lossy().replace('\\', "/").trim_end_matches('/')),
+            destinations: regex::Regex::new(r"\]\((<[^>]+>|[^\s)]+)\)").unwrap(),
+            paths: regex::Regex::new(r#"(?:[A-Za-z][A-Za-z0-9+.-]*://|[A-Za-z]:[\\/]|/|\.{1,2}[\\/]|architectures/|functions/|chunks/|tools/)[^\s`<>\"'()\[\]]+"#).unwrap(),
+        }
     }
-    let end = target.find(['#', '?']).unwrap_or(target.len());
-    let (path, suffix) = target.split_at(end);
-    let mut parts: Vec<_> = old.split('/').collect();
-    parts.pop();
-    for part in path.split('/') {
-        match part {
-            ".." => {
-                if parts.pop().is_none() {
-                    return target.into();
-                }
+    fn remap(&self, path: &str) -> String {
+        let mut prefix = path;
+        loop {
+            if let Some(to) = self.moves.get(prefix) {
+                return format!("{to}{}", &path[prefix.len()..]);
             }
-            "." | "" => {}
-            _ => parts.push(part),
+            let Some((parent, _)) = prefix.rsplit_once('/') else {
+                return path.into();
+            };
+            prefix = parent;
         }
     }
-    format!("{}{suffix}", link(new, &remap(&parts.join("/"), moves)))
-}
-fn rewrite(text: &str, old: &str, new: &str, moves: &[(String, String)], root: &Path) -> String {
-    // Protect Markdown destinations while rebasing prose paths, then restore them once.
-    let re = regex::Regex::new(r"\]\(([^\s)]+)\)").unwrap();
-    let mut targets = vec![];
-    let mut body = re
-        .replace_all(text, |c: &regex::Captures<'_>| {
-            let index = targets.len();
-            targets.push(rebase(&c[1], old, new, moves));
-            format!("](\u{1f}scopework-link-{index}\u{1f})")
-        })
-        .into_owned();
-    // Explicit project-root paths and relative paths in inline code/prose.
-    let mut replacements = vec![];
-    for (a, b) in moves {
-        if a == b {
-            continue;
-        }
-        replacements.push((
-            root.join(a).to_string_lossy().into_owned(),
-            root.join(b).to_string_lossy().into_owned(),
-        ));
-        replacements.push((a.clone(), b.clone()));
-        replacements.push((link(old, a), link(new, b)));
-    }
-    for folder in ["tools", "app.md", "architectures"] {
-        replacements.push((link(old, folder), link(new, folder)));
-    }
-    replacements.retain(|(a, b)| a != b && !a.is_empty());
-    replacements.sort_by_key(|(a, _)| std::cmp::Reverse(a.len()));
-    if !replacements.is_empty() {
-        let pattern = replacements
-            .iter()
-            .map(|(a, _)| regex::escape(a))
-            .collect::<Vec<_>>()
-            .join("|");
-        body = regex::Regex::new(&pattern)
-            .unwrap()
-            .replace_all(&body, |c: &regex::Captures<'_>| {
-                replacements
+    fn target(&self, target: &str, old: &str, new: &str, prose: bool) -> String {
+        let angle = target.starts_with('<') && target.ends_with('>');
+        let bare = if angle {
+            &target[1..target.len() - 1]
+        } else {
+            target
+        };
+        let normalized = bare.replace('\\', "/").replace("%20", " ");
+        let uri_prefix = if normalized.starts_with("file:///") {
+            "file:///"
+        } else {
+            ""
+        };
+        let local = normalized.strip_prefix(uri_prefix).unwrap();
+        let absolute = local.to_lowercase().starts_with(&self.root.to_lowercase());
+        let rewritten = if absolute {
+            let local = &local[self.root.len()..];
+            let end = local.find(['#', '?']).unwrap_or(local.len());
+            format!(
+                "{uri_prefix}{}{}{}",
+                self.root,
+                self.remap(&local[..end]),
+                &local[end..]
+            )
+        } else {
+            if local.starts_with(['#', '/']) || local.contains(':') {
+                return target.into();
+            }
+            let end = local.find(['#', '?']).unwrap_or(local.len());
+            let (path, suffix) = local.split_at(end);
+            if prose
+                && ["architectures/", "functions/", "chunks/", "tools/"]
                     .iter()
-                    .find(|(a, _)| a == &c[0])
-                    .unwrap()
-                    .1
-                    .clone()
-            })
-            .into_owned();
+                    .any(|p| path.starts_with(p))
+            {
+                format!("{}{suffix}", self.remap(path))
+            } else {
+                let mut parts: Vec<_> = old.split('/').collect();
+                parts.pop();
+                for component in path.split('/') {
+                    match component {
+                        ".." => {
+                            if parts.pop().is_none() {
+                                return target.into();
+                            }
+                        }
+                        "." | "" => {}
+                        _ => parts.push(component),
+                    }
+                }
+                format!("{}{suffix}", link(new, &self.remap(&parts.join("/"))))
+            }
+        };
+        let rewritten = if bare.contains("%20") {
+            rewritten.replace(' ', "%20")
+        } else {
+            rewritten
+        };
+        if angle {
+            format!("<{rewritten}>")
+        } else {
+            rewritten
+        }
     }
-    for (i, target) in targets.iter().enumerate() {
-        body = body.replace(&format!("\u{1f}scopework-link-{i}\u{1f}"), target);
+    pub fn rewrite(&self, text: &str, old: &str, new: &str) -> String {
+        // Process plain text and Markdown destinations separately; never rewrite an external URL substring.
+        let mut output = String::new();
+        let mut last = 0;
+        for captures in self.destinations.captures_iter(text) {
+            let matched = captures.get(0).unwrap();
+            output += &self
+                .paths
+                .replace_all(&text[last..matched.start()], |c: &regex::Captures<'_>| {
+                    self.target(&c[0], old, new, true)
+                });
+            output += &format!("]({})", self.target(&captures[1], old, new, false));
+            last = matched.end();
+        }
+        output += &self
+            .paths
+            .replace_all(&text[last..], |c: &regex::Captures<'_>| {
+                self.target(&c[0], old, new, true)
+            });
+        output
     }
-    body
 }
-fn inside(root: &Path, path: &Path) -> Result<()> {
+pub(super) fn inside(root: &Path, path: &Path) -> Result<()> {
     let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
     let mut ancestor = path;
     while !ancestor.exists() {
@@ -137,7 +167,7 @@ fn inside(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
-    if project.layout_version == 2 {
+    if matches!(project.layout_version, 2 | 3) {
         return Ok(());
     }
     if project.layout_version != 1 {
@@ -162,6 +192,7 @@ pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
                 )
             })
             .collect();
+        let rewriter = Rewriter::new(&moves, root);
         let mut reports = vec![];
         for n in &project.nodes {
             let old = legacy(n);
@@ -169,7 +200,7 @@ pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
             inside(root, &root.join(&old))?;
             let original = fs::read_to_string(root.join(&old))
                 .map_err(|e| format!("Cannot migrate {old}: {e}"))?;
-            let rewritten = rewrite(&original, &old, &new, &moves, root);
+            let rewritten = rewriter.rewrite(&original, &old, &new);
             if old != new && root.join(&new).exists() {
                 return Err(format!("Migration destination already exists: {new}"));
             }
