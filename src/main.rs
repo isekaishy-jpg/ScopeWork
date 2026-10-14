@@ -369,28 +369,42 @@ impl eframe::App for Dashboard {
                 );
                 let bank = r(149.0, top, w - 164.0, meter_h);
                 group_box(&p, bank, "Function groups");
-                // The reference's narrow upright meter bank, rotated into thin horizontal strips.
-                let row_height = (bank.height() - 28.0) / 12.0;
-                let col_width = (bank.width() - 26.0) / 2.0;
+                // Four named chunks per architecture row, with readable meters and counts.
+                let row_height = (bank.height() - 28.0) / 6.0;
+                let col_width = (bank.width() - 46.0) / 4.0;
                 for ri in 0..6 {
                     for gi in 0..4 {
                         let index = ri * 4 + gi;
-                        let col = index / 12;
-                        let slot = index % 12;
+                        let col = index % 4;
+                        let slot = index / 4;
                         let (chunk, num, state, finished) = data[ri].groups[gi];
                         let x = bank.left() + 8.0 + col as f32 * (col_width + 10.0);
                         let y = bank.top() + 16.0 + slot as f32 * row_height;
                         let meter = egui::Rect::from_min_size(
-                            egui::pos2(x, y),
-                            Vec2::new(col_width - 32.0, (row_height - 3.0).min(18.0)),
+                            egui::pos2(x, y + 15.0),
+                            Vec2::new(col_width, 32.0),
                         );
                         led(&p, meter, finished, num, [GREEN, RED, GREY][state]);
                         text(
                             &p,
-                            meter.right() + 5.0,
-                            meter.center().y,
-                            (num * scale).to_string(),
+                            x,
+                            y + 5.0,
+                            format!("{} / {chunk}", data[ri].name),
                             Color32::BLACK,
+                        );
+                        text(
+                            &p,
+                            x,
+                            meter.bottom() + 10.0,
+                            format!("{} / {} funcs done", finished * scale, num * scale),
+                            Color32::BLACK,
+                        );
+                        text(
+                            &p,
+                            x,
+                            meter.bottom() + 24.0,
+                            ["Done", "In progress", "Not done"][state],
+                            Color32::from_gray(65),
                         );
                         let hit = ui.interact(
                             meter,
@@ -559,8 +573,8 @@ fn main() -> eframe::Result {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_decorations(false)
-                .with_inner_size([740.0, 520.0])
-                .with_min_inner_size([640.0, 520.0]),
+                .with_inner_size([1100.0, 820.0])
+                .with_min_inner_size([1060.0, 820.0]),
             persist_window: false,
             ..Default::default()
         },
