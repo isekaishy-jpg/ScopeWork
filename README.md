@@ -1,4 +1,4 @@
-# Research Task Manager
+# Scopework
 
 Rust desktop research dashboard with the approved classic Task Manager layout, a modern dark palette, two meters per row, and separate chunk/function counts.
 
@@ -9,7 +9,7 @@ Open **View > Research records...**. Stock and Forever start with separate app r
 Each project owns a complete hierarchy:
 
 ```
-%LOCALAPPDATA%/ResearchDashboard/projects/<project-id>/
+<research-home>/projects/<project-id>/
   project.json
   app.md
   architectures/<id>/research.md
@@ -57,7 +57,7 @@ Save or discard edits before navigating. Unsaved report edits prevent closing th
 
 When a project has architecture records, its dashboard uses them: one meter per architecture, one existing-size segment per chunk (green complete, yellow in progress, dim red not started), and separate function counts. Double-click a meter to open its architecture report. The App report's completion status is separate from function coverage. The existing previews remain explicitly labeled for projects without architecture records; no historical completion claims are imported.
 
-Research lives outside the installation and checkout. The default home is `%LOCALAPPDATA%\ResearchDashboard`, containing `projects/` and a shared `complaints/` folder. Set `RESEARCH_DASHBOARD_HOME` to another absolute home before launching, or use CLI `--home PATH`. Projects have separate IDs, trees, metadata, evidence directories, and document membership. Do not copy research between projects without an explicit evidence reference and scope review.
+Research lives outside the installation and checkout. The installer lets you choose a research home; new installations default to `%LOCALAPPDATA%\Scopework`. It contains `projects/` and one shared `complaints/` folder. The saved home is shared by the GUI and CLI. Earlier default homes continue to be used when present; no research is moved. Set `RESEARCH_DASHBOARD_HOME` to another absolute home before launching, or use CLI `--home PATH`. Projects have separate IDs, trees, metadata, evidence directories, and document membership. Do not copy research between projects without an explicit evidence reference and scope review.
 
 ## Run
 
@@ -93,9 +93,16 @@ Agents update tags with `research deps set`; see the [CLI guide](docs/cli.md). T
 
 ## Windows installation and CLI
 
-Build the installer with `powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1` (Rust and .NET SDK required). This permits the build script for that process only. The script installs a pinned local WiX build tool if needed and produces `dist/ResearchDashboard-0.2.1-x64.msi`.
+Build the installer with `powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1` (Rust and .NET SDK required). This permits the build script for that process only. The script installs a pinned local WiX build tool if needed and produces `dist/Scopework-0.3.0-x64.msi`.
 
-The per-user MSI installs into `%LOCALAPPDATA%\Programs\Research Dashboard`, adds that directory to the user PATH, and creates a Start menu shortcut. Open a new terminal after installation. Use `research --help` for the console CLI, `research gui` to open the dashboard, and `research home` to locate research. The research home is initialized on first use. Uninstall removes the program and its PATH entry while preserving research. The MSI is unsigned; no signing certificate is configured.
+The per-user setup wizard has Welcome, Options, Summary, Progress and Finish pages. Options let you choose the application folder, research home and whether to add the agent CLI to your user PATH. Fresh defaults are `%LOCALAPPDATA%\Programs\Scopework` and `%LOCALAPPDATA%\Scopework`. Upgrades reuse saved choices. A Start menu shortcut and a Windows installed-app entry use the Scopework name and icon.
+
+Open a new terminal after installing with PATH enabled. Use `research --help` for the console CLI, `research gui` to open Scopework, and `research home` to locate research. Without PATH, invoke `research.exe` from the chosen application folder. Command names and executable filenames remain compatible with previous versions.
+
+Home precedence is CLI `--home`, then `RESEARCH_DASHBOARD_HOME`, then the installer-selected home, then the default. The home is initialized on first app/CLI use. Uninstall removes the program and its PATH entry while preserving research and its saved home setting. Choosing another home selects that library; it never imports or moves existing research.
+
+The MSI is unsigned; no signing certificate is configured. The [icon assets and generation prompt](assets/README.md) document the new visual identity. Re-running the same-version MSI offers Repair or Uninstall. Newer-version MSIs perform an upgrade.
+
 
 The [CLI guide](docs/cli.md) covers project/tab creation, hierarchy creation, report reading/writing, reviewed completion/reopening, prerequisite tags and progress. Successful commands emit JSON. CLI and GUI enforce the same hierarchy, dependency and completion rules.
 

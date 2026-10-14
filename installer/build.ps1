@@ -14,7 +14,12 @@ try {
         & dotnet tool install wix --tool-path (Join-Path $repository '.tools') --version 6.0.2
         if ($LASTEXITCODE -ne 0) { throw 'WiX setup failed.' }
     }
+    $uiExtension = Join-Path $repository '.wix\extensions\WixToolset.UI.wixext\6.0.2\wixext6\WixToolset.UI.wixext.dll'
+    if (-not (Test-Path -LiteralPath $uiExtension)) {
+        & $wixTool extension add WixToolset.UI.wixext/6.0.2
+        if ($LASTEXITCODE -ne 0) { throw 'WiX dialog library setup failed.' }
+    }
     New-Item -ItemType Directory -Force -Path (Join-Path $repository 'dist') | Out-Null
-    & $wixTool build (Join-Path $PSScriptRoot 'Package.wxs') -arch x64 -d "Version=$Version" -d "BuildDir=$repository\target\release" -d "SourceDir=$repository" -o "$repository\dist\ResearchDashboard-$Version-x64.msi"
+    & $wixTool build (Join-Path $PSScriptRoot 'Package.wxs') (Join-Path $PSScriptRoot 'Wizard.wxs') -ext $uiExtension -culture en-US -arch x64 -d "Version=$Version" -d "BuildDir=$repository\target\release" -d "SourceDir=$repository" -o "$repository\dist\Scopework-$Version-x64.msi"
     if ($LASTEXITCODE -ne 0) { throw 'MSI build failed.' }
 } finally { Pop-Location }

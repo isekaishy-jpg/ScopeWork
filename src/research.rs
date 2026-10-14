@@ -1106,7 +1106,7 @@ impl Library {
                 ("prereq.toml", toml::to_string_pretty(&prereq)),
             ] {
                 let content = format!(
-                    "# Managed by Research Task Manager. Edit through the app or research deps set.\n{}",
+                    "# Managed by Scopework. Edit through the app or research deps set.\n{}",
                     body.map_err(|e| e.to_string())?
                 );
                 let path = folder.join(name);

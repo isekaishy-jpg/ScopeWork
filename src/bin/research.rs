@@ -9,7 +9,7 @@ use std::{fs, path::PathBuf};
 #[derive(Parser)]
 #[command(
     version,
-    about = "Manage bounded research projects. Successful commands emit JSON; errors use stderr and exit 1 (usage errors: 2)."
+    about = "Scopework: manage bounded research projects. Successful commands emit JSON; errors use stderr and exit 1 (usage errors: 2)."
 )]
 struct Args {
     /// Absolute research home. Overrides RESEARCH_DASHBOARD_HOME and LocalAppData.

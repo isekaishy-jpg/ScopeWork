@@ -84,6 +84,7 @@ struct Dashboard {
     stock_preview: Option<Vec<Row>>,
     research: research::ResearchUi,
     projects: Vec<research::ProjectView>,
+    brand_icon: Option<egui::TextureHandle>,
 }
 
 impl Default for Dashboard {
@@ -99,6 +100,7 @@ impl Default for Dashboard {
             stock_preview: None,
             research: research::ResearchUi::new(),
             projects: vec![],
+            brand_icon: None,
         }
     }
 }
@@ -319,21 +321,14 @@ impl eframe::App for Dashboard {
                     },
                 );
                 let icon = r(3.0, 3.0, 14.0, 14.0);
-                p.rect_filled(icon, 0.0, bg);
-                bevel(&p, icon, false);
-                p.rect_filled(icon.shrink(3.0), 0.0, Color32::BLACK);
-                p.line_segment(
-                    [
-                        icon.min + Vec2::new(3.0, 9.0),
-                        icon.min + Vec2::new(6.0, 5.0),
-                    ],
-                    egui::Stroke::new(1.0, GREEN),
-                );
+                if let Some(texture) = &self.brand_icon {
+                    p.image(texture.id(), icon, egui::Rect::from_min_max(egui::pos2(0.0,0.0),egui::pos2(1.0,1.0)),Color32::WHITE);
+                }
                 text(
                     &p,
                     o.x + 22.0,
                     o.y + 10.0,
-                    "Research Task Manager",
+                    "Scopework",
                     Color32::WHITE,
                 );
                 let drag = ui.interact(
@@ -742,7 +737,7 @@ impl eframe::App for Dashboard {
                                     }
                                 }
                                 2 => "Clear chunk selection",
-                                _ => "About Research Task Manager",
+                                _ => "About Scopework",
                             };
                             if ui
                                 .add_sized([185.0, 23.0], egui::Button::new(label).frame(false))
@@ -779,31 +774,42 @@ impl eframe::App for Dashboard {
         }
         self.research.show(ctx);
         if self.about {
-            egui::Window::new("About Research Task Manager")
+            egui::Window::new("About Scopework")
                 .collapsible(false)
                 .resizable(false)
                 .open(&mut self.about)
                 .show(ctx, |ui| {
-                    ui.label("Research Task Manager 0.1");
-                    ui.label("Stock and Forever research dashboard.");
-                    ui.label("Displayed counts and states are illustrative sample data.");
+                    ui.label(format!("Scopework {}",env!("CARGO_PKG_VERSION")));
+                    ui.label("A workbench for bounded research projects.");
+                    ui.label("Research records drive progress; projects without records may show labeled previews.");
                 });
         }
     }
 }
 
 fn main() -> eframe::Result {
+    let icon_image = image::load_from_memory(include_bytes!("../assets/scopework.png"))
+        .expect("bundled icon")
+        .into_rgba8();
+    let window_icon = egui::IconData {
+        rgba: icon_image.as_raw().clone(),
+        width: icon_image.width(),
+        height: icon_image.height(),
+    };
+
     eframe::run_native(
         "Research Dashboard",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_title("Scopework")
+                .with_icon(window_icon)
                 .with_decorations(false)
                 .with_inner_size([1100.0, 820.0])
                 .with_min_inner_size([1060.0, 820.0]),
             persist_window: false,
             ..Default::default()
         },
-        Box::new(|cc| {
+        Box::new(move |cc| {
             let mut fonts = egui::FontDefinitions::default();
             if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/tahoma.ttf") {
                 fonts
@@ -834,6 +840,14 @@ fn main() -> eframe::Result {
                 s.spacing.item_spacing = Vec2::new(8.0, 4.0);
             });
             let mut app = Dashboard::default();
+            app.brand_icon = Some(cc.egui_ctx.load_texture(
+                "scopework",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [icon_image.width() as usize, icon_image.height() as usize],
+                    icon_image.as_raw(),
+                ),
+                egui::TextureOptions::LINEAR,
+            ));
             if let Some(value) = cc.storage.and_then(|s| s.get_string("dark_mode")) {
                 app.dark = value != "false";
             }

@@ -1,10 +1,10 @@
-# Agent CLI
+# Scopework agent CLI
 
-Install the MSI, open a new terminal, and use `research --help`. The GUI executable is `research-dashboard.exe`; the console executable is `research.exe`. Both use the same backend and completion rules. All successful CLI commands print JSON. Operation errors print JSON to stderr and exit 1; argument errors exit 2.
+Install the MSI with PATH enabled, open a new terminal, and use `research --help`. If PATH is disabled, invoke `research.exe` from the application folder. The GUI executable is `research-dashboard.exe`; the console executable is `research.exe`. Both use the same backend and completion rules. All successful CLI commands print JSON. Operation errors print JSON to stderr and exit 1; argument errors exit 2.
 
 ## Research home
 
-The default is `%LOCALAPPDATA%\ResearchDashboard`, independent of the installation folder or current directory. `RESEARCH_DASHBOARD_HOME` selects another absolute home; CLI `--home PATH` overrides it for one invocation. It contains `projects/` and one shared `complaints/` folder. `research home` prints these paths without creating anything. `research init` creates fresh empty Stock/Forever projects; ordinary research commands and GUI startup also initialize the home when needed.
+The installer-selected research home is shared by the GUI and CLI. New installations default to `%LOCALAPPDATA%\Scopework`, independent of the installation folder or current directory. The existing earlier default home is retained when present. `RESEARCH_DASHBOARD_HOME` overrides the installed home with another absolute home; CLI `--home PATH` overrides it for one invocation. It contains `projects/` and one shared `complaints/` folder. `research home` prints these paths without creating anything. `research init` creates fresh empty Stock/Forever projects; ordinary research commands and GUI startup also initialize the home when needed.
 
 Nothing is imported or migrated. Carry-over is manual. Uninstall removes the installed application, shortcut and its PATH entry, and leaves the research home intact.
 

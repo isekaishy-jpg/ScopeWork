@@ -1,0 +1,132 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <Binary Id="ScopeworkArtwork" SourceFile="$(SourceDir)\assets\scopework.ico" />
+    <UI Id="ScopeworkUI">
+      <TextStyle Id="ScopeNormal" FaceName="Segoe UI" Size="9" />
+      <TextStyle Id="ScopeTitle" FaceName="Segoe UI" Size="16" Bold="yes" />
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Segoe UI" Size="9" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Segoe UI" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Segoe UI" Size="12" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="ScopeNormal" />
+      <Property Id="WixUI_InstallMode" Value="Install" />
+      <DialogRef Id="BrowseDlg" />
+      <DialogRef Id="CancelDlg" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <Publish Dialog="BrowseDlg" Control="OK" Event="SetTargetPath" Value="[_BrowseProperty]" Order="1" />
+      <Publish Dialog="BrowseDlg" Control="OK" Event="EndDialog" Value="Return" Order="2" />
+
+      <Dialog Id="ScopeWelcome" Width="430" Height="330" Title="Scopework Setup" NoMinimize="yes">
+        <Control Id="Icon" Type="Icon" X="25" Y="24" Width="48" Height="48" FixedSize="yes" IconSize="48" Text="ScopeworkArtwork" />
+        <Control Id="Title" Type="Text" X="88" Y="26" Width="315" Height="26" Text="{\ScopeTitle}Welcome to Scopework" />
+        <Control Id="Version" Type="Text" X="88" Y="58" Width="300" Height="20" Text="Research workbench  [ProductVersion]" />
+        <Control Id="Intro" Type="Text" X="25" Y="102" Width="380" Height="45" Text="Organize research into functions, chunks and systems. Keep evidence and understanding together in a local research home." />
+        <Control Id="Details" Type="Text" X="25" Y="157" Width="380" Height="56" Text="Setup installs the desktop app, agent CLI and a Start menu shortcut for your Windows account. Next, choose the application folder, research home and optional PATH access." />
+        <Control Id="Upgrade" Type="Text" X="25" Y="228" Width="380" Height="40" Text="A newer version upgrades the existing app. Research is kept separately and is preserved when the app is uninstalled." />
+        <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
+        <Control Id="Next" Type="PushButton" X="270" Y="302" Width="68" Height="18" Default="yes" Text="Next &gt;">
+          <Publish Event="NewDialog" Value="ScopeOptions" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="347" Y="302" Width="68" Height="18" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="ScopeOptions" Width="430" Height="330" Title="Scopework Setup" NoMinimize="yes">
+        <Control Id="Title" Type="Text" X="22" Y="18" Width="385" Height="26" Text="{\ScopeTitle}Choose your setup" />
+        <Control Id="AppLabel" Type="Text" X="22" Y="62" Width="360" Height="18" Text="Application folder" />
+        <Control Id="AppPath" Type="PathEdit" X="22" Y="82" Width="303" Height="20" Property="INSTALLFOLDER" />
+        <Control Id="AppBrowse" Type="PushButton" X="336" Y="82" Width="70" Height="20" Text="Browse...">
+          <Publish Property="_BrowseProperty" Value="INSTALLFOLDER" Order="1" />
+          <Publish Event="SpawnDialog" Value="BrowseDlg" Order="2" />
+        </Control>
+        <Control Id="HomeLabel" Type="Text" X="22" Y="118" Width="360" Height="18" Text="Research home (projects and agent complaints)" />
+        <Control Id="HomePath" Type="PathEdit" X="22" Y="138" Width="303" Height="20" Property="RESEARCHHOME" />
+        <Control Id="HomeBrowse" Type="PushButton" X="336" Y="138" Width="70" Height="20" Text="Browse...">
+          <Publish Property="_BrowseProperty" Value="RESEARCHHOME" Order="1" />
+          <Publish Event="SpawnDialog" Value="BrowseDlg" Order="2" />
+        </Control>
+        <Control Id="HomeNote" Type="Text" X="22" Y="166" Width="384" Height="34" Text="Use a writable folder. Existing research is never moved or imported. Uninstalling Scopework preserves this home." />
+        <Control Id="PathOption" Type="CheckBox" X="22" Y="212" Width="384" Height="20" Property="ADDTOPATH" CheckBoxValue="1" Text="Add the agent CLI to my PATH (use research from any folder)" />
+        <Control Id="PathNote" Type="Text" X="22" Y="240" Width="384" Height="30" Text="PATH changes apply to new terminals. Environment or --home overrides still take precedence over the selected research home." />
+        <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
+        <Control Id="Back" Type="PushButton" X="195" Y="302" Width="68" Height="18" Text="&lt; Back"><Publish Event="NewDialog" Value="ScopeWelcome" /></Control>
+        <Control Id="Next" Type="PushButton" X="270" Y="302" Width="68" Height="18" Default="yes" Text="Next &gt;">
+          <Publish Event="SetTargetPath" Value="INSTALLFOLDER" Order="1" />
+          <Publish Event="SetTargetPath" Value="RESEARCHHOME" Order="2" />
+          <Publish Event="NewDialog" Value="ScopeSummary" Order="3" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="347" Y="302" Width="68" Height="18" Cancel="yes" Text="Cancel"><Publish Event="SpawnDialog" Value="CancelDlg" /></Control>
+      </Dialog>
+
+      <Dialog Id="ScopeSummary" Width="430" Height="330" Title="Scopework Setup" NoMinimize="yes">
+        <Control Id="Title" Type="Text" X="22" Y="18" Width="385" Height="26" Text="{\ScopeTitle}Ready to install" />
+        <Control Id="App" Type="Text" X="22" Y="64" Width="384" Height="40" Text="Application folder:&#13;&#10;[INSTALLFOLDER]" />
+        <Control Id="Home" Type="Text" X="22" Y="112" Width="384" Height="40" Text="Research home:&#13;&#10;[RESEARCHHOME]" />
+        <Control Id="PathYes" Type="Text" X="22" Y="164" Width="384" Height="18" Hidden="yes" ShowCondition="ADDTOPATH = &quot;1&quot;" Text="Agent CLI on PATH: Yes" />
+        <Control Id="PathNo" Type="Text" X="22" Y="164" Width="384" Height="18" Hidden="yes" ShowCondition="ADDTOPATH &lt;&gt; &quot;1&quot;" Text="Agent CLI on PATH: No" />
+        <Control Id="Summary" Type="Text" X="22" Y="200" Width="384" Height="60" Text="The desktop app, agent CLI, guides and Start menu shortcut will be installed for this account. Your selected research home is preserved on uninstall. Click Install to apply these choices." />
+        <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
+        <Control Id="Back" Type="PushButton" X="195" Y="302" Width="68" Height="18" Text="&lt; Back"><Publish Event="NewDialog" Value="ScopeOptions" /></Control>
+        <Control Id="Install" Type="PushButton" X="270" Y="302" Width="68" Height="18" Default="yes" Text="Install"><Publish Event="EndDialog" Value="Return" /></Control>
+        <Control Id="Cancel" Type="PushButton" X="347" Y="302" Width="68" Height="18" Cancel="yes" Text="Cancel"><Publish Event="SpawnDialog" Value="CancelDlg" /></Control>
+      </Dialog>
+
+      <Dialog Id="ScopeMaintenance" Width="430" Height="330" Title="Scopework Setup" NoMinimize="yes">
+        <Control Id="Title" Type="Text" X="22" Y="18" Width="385" Height="26" Text="{\ScopeTitle}Maintain Scopework" />
+        <Control Id="Info" Type="Text" X="22" Y="74" Width="384" Height="48" Text="This version is already installed. Repair its application files or remove it. Your research home and research files are preserved." />
+        <Control Id="Repair" Type="PushButton" X="22" Y="150" Width="130" Height="24" Text="Repair application">
+          <Publish Property="WixUI_InstallMode" Value="Repair" Order="1" />
+          <Publish Property="REINSTALLMODE" Value="amus" Order="2" />
+          <Publish Property="REINSTALL" Value="ALL" Order="3" />
+          <Publish Event="EndDialog" Value="Return" Order="4" />
+        </Control>
+        <Control Id="Remove" Type="PushButton" X="22" Y="192" Width="130" Height="24" Text="Uninstall application"><Publish Event="NewDialog" Value="ScopeRemove" /></Control>
+        <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
+        <Control Id="Cancel" Type="PushButton" X="347" Y="302" Width="68" Height="18" Default="yes" Cancel="yes" Text="Cancel"><Publish Event="EndDialog" Value="Exit" /></Control>
+      </Dialog>
+      <Dialog Id="ScopeRemove" Width="430" Height="330" Title="Scopework Setup" NoMinimize="yes">
+        <Control Id="Title" Type="Text" X="22" Y="18" Width="385" Height="26" Text="{\ScopeTitle}Uninstall Scopework?" />
+        <Control Id="Info" Type="Text" X="22" Y="80" Width="384" Height="68" Text="The application, Start menu shortcut and its PATH entry will be removed. Research files and the saved research-home setting remain on this computer." />
+        <Control Id="Home" Type="Text" X="22" Y="162" Width="384" Height="60" Text="Preserved research home:&#13;&#10;[RESEARCHHOME]" />
+        <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
+        <Control Id="Back" Type="PushButton" X="195" Y="302" Width="68" Height="18" Text="&lt; Back"><Publish Event="NewDialog" Value="ScopeMaintenance" /></Control>
+        <Control Id="Remove" Type="PushButton" X="270" Y="302" Width="68" Height="18" Text="Uninstall">
+          <Publish Property="WixUI_InstallMode" Value="Remove" Order="1" />
+          <Publish Property="REMOVE" Value="ALL" Order="2" />
+          <Publish Event="EndDialog" Value="Return" Order="3" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="347" Y="302" Width="68" Height="18" Default="yes" Cancel="yes" Text="Cancel"><Publish Event="EndDialog" Value="Exit" /></Control>
+      </Dialog>
+
+      <Dialog Id="ScopeProgress" Width="430" Height="330" Title="Scopework Setup" Modeless="yes">
+        <Control Id="Title" Type="Text" X="22" Y="24" Width="384" Height="28" Text="{\ScopeTitle}Applying your selection" />
+        <Control Id="Info" Type="Text" X="22" Y="90" Width="384" Height="34" Text="Please wait while Windows updates Scopework. Your research files are preserved." />
+        <Control Id="Action" Type="Text" X="22" Y="146" Width="384" Height="24"><Subscribe Event="ActionText" Attribute="Text" /></Control>
+        <Control Id="Progress" Type="ProgressBar" X="22" Y="183" Width="384" Height="14" ProgressBlocks="yes"><Subscribe Event="SetProgress" Attribute="Progress" /></Control>
+        <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
+        <Control Id="Cancel" Type="PushButton" X="347" Y="302" Width="68" Height="18" Default="yes" Cancel="yes" Text="Cancel"><Publish Event="SpawnDialog" Value="CancelDlg" /></Control>
+      </Dialog>
+      <Dialog Id="ScopeFinish" Width="430" Height="330" Title="Scopework Setup" NoMinimize="yes">
+        <Control Id="Icon" Type="Icon" X="25" Y="24" Width="48" Height="48" FixedSize="yes" IconSize="48" Text="ScopeworkArtwork" />
+        <Control Id="Title" Type="Text" X="88" Y="32" Width="315" Height="28" Text="{\ScopeTitle}Setup complete" />
+        <Control Id="Installed" Type="Text" X="25" Y="105" Width="380" Height="52" Hidden="yes" ShowCondition="REMOVE &lt;&gt; &quot;ALL&quot;" Text="Open Scopework from the Start menu. If you enabled PATH access, open a new terminal and run research --help to use the agent CLI." />
+        <Control Id="Removed" Type="Text" X="25" Y="105" Width="380" Height="52" Hidden="yes" ShowCondition="REMOVE = &quot;ALL&quot;" Text="Scopework has been removed. Your research files and research-home setting have been preserved." />
+        <Control Id="Home" Type="Text" X="25" Y="184" Width="380" Height="60" Text="Research home:&#13;&#10;[RESEARCHHOME]" />
+        <Control Id="Line" Type="Line" X="0" Y="286" Width="430" Height="0" />
+        <Control Id="Finish" Type="PushButton" X="347" Y="302" Width="68" Height="18" Default="yes" Cancel="yes" Text="Finish"><Publish Event="EndDialog" Value="Return" /></Control>
+      </Dialog>
+      <InstallUISequence>
+        <Show Dialog="ScopeWelcome" After="CostFinalize" Condition="NOT Installed" />
+        <Show Dialog="ScopeMaintenance" After="CostFinalize" Condition="Installed" />
+        <Show Dialog="ScopeProgress" Before="ExecuteAction" />
+        <Show Dialog="ScopeFinish" OnExit="success" />
+      </InstallUISequence>
+      <UIRef Id="WixUI_Common" />
+      <UIRef Id="WixUI_ErrorProgressText" />
+    </UI>
+  </Fragment>
+</Wix>
