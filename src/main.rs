@@ -8,7 +8,7 @@ const GREY: Color32 = Color32::from_rgb(82, 82, 82);
 
 struct Row {
     name: &'static str,
-    groups: [(&'static str, usize, usize); 4],
+    groups: [(&'static str, usize, usize, usize); 4],
 }
 
 fn rows() -> [Row; 6] {
@@ -16,55 +16,55 @@ fn rows() -> [Row; 6] {
         Row {
             name: "Rendering",
             groups: [
-                ("Frame", 42, 0),
-                ("Views", 68, 0),
-                ("Passes", 95, 1),
-                ("Present", 24, 2),
+                ("Frame", 42, 0, 42),
+                ("Views", 68, 0, 68),
+                ("Passes", 95, 1, 37),
+                ("Present", 24, 2, 0),
             ],
         },
         Row {
             name: "Assets",
             groups: [
-                ("Requests", 53, 0),
-                ("Dependencies", 84, 1),
-                ("Publication", 37, 2),
-                ("Lifetime", 65, 2),
+                ("Requests", 53, 0, 53),
+                ("Dependencies", 84, 1, 51),
+                ("Publication", 37, 2, 0),
+                ("Lifetime", 65, 2, 0),
             ],
         },
         Row {
             name: "World",
             groups: [
-                ("Maps", 31, 0),
-                ("Spatial data", 102, 1),
-                ("Visibility", 73, 2),
-                ("Lifetime", 46, 2),
+                ("Maps", 31, 0, 31),
+                ("Spatial data", 102, 1, 26),
+                ("Visibility", 73, 2, 0),
+                ("Lifetime", 46, 2, 0),
             ],
         },
         Row {
             name: "Animation",
             groups: [
-                ("States", 28, 0),
-                ("Poses", 64, 1),
-                ("Blending", 51, 2),
-                ("Integration", 39, 2),
+                ("States", 28, 0, 28),
+                ("Poses", 64, 1, 41),
+                ("Blending", 51, 2, 0),
+                ("Integration", 39, 2, 0),
             ],
         },
         Row {
             name: "Interface",
             groups: [
-                ("Input", 47, 0),
-                ("Widgets", 88, 1),
-                ("Layout", 56, 2),
-                ("Drawing", 71, 2),
+                ("Input", 47, 0, 47),
+                ("Widgets", 88, 1, 19),
+                ("Layout", 56, 2, 0),
+                ("Drawing", 71, 2, 0),
             ],
         },
         Row {
             name: "Unclassified",
             groups: [
-                ("Region A", 210, 2),
-                ("Region B", 190, 2),
-                ("Region C", 160, 2),
-                ("Region D", 140, 2),
+                ("Region A", 210, 2, 0),
+                ("Region B", 190, 2, 0),
+                ("Region C", 160, 2, 0),
+                ("Region D", 140, 2, 0),
             ],
         },
     ]
@@ -175,33 +175,35 @@ fn group_box(p: &egui::Painter, r: egui::Rect, title: &str) {
         foreground(p.ctx().style().visuals.dark_mode),
     );
 }
-// Each visible pip is one chunk. Function counts never determine pip size or number.
-fn led(p: &egui::Painter, r: egui::Rect, states: &[usize]) -> Vec<egui::Rect> {
+// CPU Usage meter from the reference, rotated clockwise: thin vertical
+// segments fill left-to-right, with the unlit lattice remaining visible.
+fn led(p: &egui::Painter, r: egui::Rect, complete: usize, total: usize, color: Color32) {
     p.rect_filled(r, 0.0, Color32::BLACK);
     bevel(p, r, true);
     let inner = r.shrink(3.0);
-    let step = (inner.width() / states.len().max(1) as f32).min(16.0);
-    let mut hits = Vec::new();
-    for (i, &state) in states.iter().enumerate() {
-        let pip = egui::Rect::from_min_size(
-            inner.min + Vec2::new(i as f32 * step, 0.0),
-            Vec2::new((step - 2.0).max(1.0), inner.height()),
-        );
-        let color = [GREEN, RED, GREY][state];
-        let half = (pip.height() - 1.0) / 2.0;
+    let cells = (inner.width() / 3.0).floor().max(1.0) as usize;
+    let fraction = if total == 0 {
+        0.0
+    } else {
+        complete.min(total) as f32 / total as f32
+    };
+    let lit = (fraction * cells as f32).floor() as usize;
+    let dark = Color32::from_rgb(color.r() / 6, color.g() / 6, color.b() / 6);
+    for i in 0..cells {
+        // A black horizontal seam separates the two banks of the classic meter.
+        let cell_color = if i < lit { color } else { dark };
+        let half = (inner.height() - 1.0) / 2.0;
         for bank in 0..2 {
             p.rect_filled(
                 egui::Rect::from_min_size(
-                    pip.min + Vec2::new(0.0, bank as f32 * (half + 1.0)),
-                    Vec2::new(pip.width(), half),
+                    inner.min + Vec2::new(i as f32 * 3.0, bank as f32 * (half + 1.0)),
+                    Vec2::new(2.0, half.max(1.0)),
                 ),
                 0.0,
-                color,
+                cell_color,
             );
         }
-        hits.push(pip);
     }
-    hits
 }
 
 impl eframe::App for Dashboard {
@@ -383,16 +385,19 @@ impl eframe::App for Dashboard {
                 let mut counts = [0usize; 3];
                 for row in &data {
                     for g in row.groups {
-                        counts[g.2] += g.1 * scale;
+                        counts[0] += g.3 * scale;
+                        if g.2 != 0 {
+                            counts[g.2] += (g.1 - g.3) * scale;
+                        }
                     }
                 }
                 let total: usize = counts.iter().sum();
                 let selected = self.selection.unwrap_or((0, 2));
-                let (name, n, status) = data[selected.0].groups[selected.1];
+                let (name, n, status, completed) = data[selected.0].groups[selected.1];
                 let top = 82.0;
                 let meter_h = (h - 282.0).max(218.0);
                 let left = r(15.0, top, 122.0, meter_h);
-                group_box(&p, left, "Research chunks");
+                group_box(&p, left, "Function coverage");
                 let well = left.shrink2(Vec2::new(10.0, 17.0));
                 p.rect_filled(well, 0.0, Color32::BLACK);
                 bevel(&p, well, true);
@@ -400,7 +405,7 @@ impl eframe::App for Dashboard {
                     &p,
                     well.left() + 7.0,
                     well.top() + 15.0,
-                    "All chunks",
+                    "All functions",
                     GREEN,
                 );
                 led(
@@ -409,22 +414,15 @@ impl eframe::App for Dashboard {
                         well.min + Vec2::new(5.0, 29.0),
                         Vec2::new(well.width() - 10.0, 22.0),
                     ),
-                    &data
-                        .iter()
-                        .flat_map(|row| row.groups.iter().map(|g| g.2))
-                        .collect::<Vec<_>>(),
+                    counts[0],
+                    total,
+                    GREEN,
                 );
                 text(
                     &p,
                     well.left() + 7.0,
                     well.top() + 67.0,
-                    format!(
-                        "{} / 24 done",
-                        data.iter()
-                            .flat_map(|r| r.groups.iter())
-                            .filter(|g| g.2 == 0)
-                            .count()
-                    ),
+                    format!("{}% done", counts[0] * 100 / total),
                     GREEN,
                 );
                 text(
@@ -447,78 +445,72 @@ impl eframe::App for Dashboard {
                         well.min + Vec2::new(5.0, 125.0),
                         Vec2::new(well.width() - 10.0, 22.0),
                     ),
-                    &[status],
+                    completed,
+                    n,
+                    [GREEN, RED, GREY][status],
                 );
                 text(
                     &p,
                     well.left() + 7.0,
                     well.top() + 164.0,
-                    format!("{} funcs", n * scale),
+                    format!("{} / {} funcs", completed * scale, n * scale),
                     GREEN,
                 );
                 let bank = r(149.0, top, w - 164.0, meter_h);
                 group_box(&p, bank, "Function groups");
-                // One research item per bar; its pips are the independently selectable chunks.
-                let col_width = (bank.width() - 26.0) / 2.0;
-                let row_height = (bank.height() - 28.0) / 3.0;
-                for (ri, row) in data.iter().enumerate() {
-                    let x = bank.left() + 8.0 + (ri % 2) as f32 * (col_width + 10.0);
-                    let y = bank.top() + 17.0 + (ri / 2) as f32 * row_height;
-                    let meter = egui::Rect::from_min_size(
-                        egui::pos2(x, y + 17.0),
-                        Vec2::new(col_width, 32.0),
-                    );
-                    text(&p, x, y + 5.0, row.name, Color32::BLACK);
-                    let states: Vec<usize> = row.groups.iter().map(|g| g.2).collect();
-                    let pips = led(&p, meter, &states);
-                    let funcs: usize = row.groups.iter().map(|g| g.1 * scale).sum();
-                    let done = states.iter().filter(|&&s| s == 0).count();
-                    let current = if selected.0 == ri {
-                        selected.1
-                    } else {
-                        row.groups.iter().position(|g| g.2 == 1).unwrap_or(0)
-                    };
-                    let (chunk, n, _) = row.groups[current];
-                    text(
-                        &p,
-                        x,
-                        meter.bottom() + 13.0,
-                        format!(
-                            "Chunks: {done} / {} done    Functions: {funcs}",
-                            row.groups.len()
-                        ),
-                        Color32::BLACK,
-                    );
-                    text(
-                        &p,
-                        x,
-                        meter.bottom() + 30.0,
-                        format!(
-                            "{}: {chunk} - {} funcs",
-                            if selected.0 == ri && self.selection.is_some() {
-                                "Selected"
-                            } else {
-                                "Current"
-                            },
-                            n * scale
-                        ),
-                        Color32::BLACK,
-                    );
-                    for (gi, pip) in pips.iter().enumerate() {
-                        let (name, count, state) = row.groups[gi];
-                        let hit =
-                            ui.interact(*pip, ui.id().with((ri, gi, "pip")), egui::Sense::click());
+                // Four named chunks per architecture row, with readable meters and counts.
+                let row_height = (bank.height() - 28.0) / 6.0;
+                let col_width = (bank.width() - 46.0) / 4.0;
+                for ri in 0..6 {
+                    for gi in 0..4 {
+                        let index = ri * 4 + gi;
+                        let col = index % 4;
+                        let slot = index / 4;
+                        let (chunk, num, state, finished) = data[ri].groups[gi];
+                        let x = bank.left() + 8.0 + col as f32 * (col_width + 10.0);
+                        let y = bank.top() + 16.0 + slot as f32 * row_height;
+                        let meter = egui::Rect::from_min_size(
+                            egui::pos2(x, y + 15.0),
+                            Vec2::new(col_width, 32.0),
+                        );
+                        led(&p, meter, finished, num, [GREEN, RED, GREY][state]);
+                        text(
+                            &p,
+                            x,
+                            y + 5.0,
+                            format!("{} / {chunk}", data[ri].name),
+                            Color32::BLACK,
+                        );
+                        text(
+                            &p,
+                            x,
+                            meter.bottom() + 10.0,
+                            format!("{} / {} funcs done", finished * scale, num * scale),
+                            Color32::BLACK,
+                        );
+                        text(
+                            &p,
+                            x,
+                            meter.bottom() + 24.0,
+                            ["Done", "In progress", "Not done"][state],
+                            Color32::from_gray(65),
+                        );
+                        let hit = ui.interact(
+                            meter,
+                            ui.id().with((ri, gi, "chunk")),
+                            egui::Sense::click(),
+                        );
                         if hit.clicked() {
                             self.selection = Some((ri, gi));
                         }
                         if selected == (ri, gi) {
                             p.rect_stroke(
-                                pip.expand(1.0),
+                                meter.expand(1.0),
                                 0.0,
                                 egui::Stroke::new(
                                     1.0,
                                     if self.dark {
-                                        Color32::WHITE
+                                        Color32::from_rgb(125, 170, 239)
                                     } else {
                                         Color32::from_rgb(0, 0, 128)
                                     },
@@ -527,8 +519,10 @@ impl eframe::App for Dashboard {
                             );
                         }
                         hit.on_hover_text(format!(
-                            "{name}: {} functions - {}",
-                            count * scale,
+                            "{} / {chunk}: {} / {} functions done - {}",
+                            data[ri].name,
+                            finished * scale,
+                            num * scale,
                             ["Done", "In progress", "Not done"][state]
                         ));
                     }
@@ -553,7 +547,10 @@ impl eframe::App for Dashboard {
                 for (i, (label, value)) in [
                     ("Architecture", data[selected.0].name.to_string()),
                     ("Chunk", name.to_string()),
-                    ("Functions", format!("{}", n * scale)),
+                    (
+                        "Done / total",
+                        format!("{} / {}", completed * scale, n * scale),
+                    ),
                     (
                         "Status",
                         ["Done", "In progress", "Not done"][status].to_string(),
@@ -568,16 +565,7 @@ impl eframe::App for Dashboard {
                 let mut sx = 0.0;
                 for (width, label) in [
                     (w * 0.34, format!("Functions: {total}")),
-                    (
-                        w * 0.33,
-                        format!(
-                            "Chunks done: {} / 24",
-                            data.iter()
-                                .flat_map(|r| r.groups.iter())
-                                .filter(|g| g.2 == 0)
-                                .count()
-                        ),
-                    ),
+                    (w * 0.33, format!("Done: {}%", counts[0] * 100 / total)),
                     (w * 0.33, "Sample data".to_string()),
                 ] {
                     let sr = r(sx, h - 20.0, width - 2.0, 19.0);
