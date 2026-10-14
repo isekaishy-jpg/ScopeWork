@@ -6,16 +6,17 @@ const GREEN: Color32 = Color32::from_rgb(0, 210, 48);
 const RED: Color32 = Color32::from_rgb(228, 48, 40);
 const YELLOW: Color32 = Color32::from_rgb(238, 193, 55);
 
+#[derive(Clone)]
 struct Row {
     name: &'static str,
-    groups: [(&'static str, usize, usize, usize); 4],
+    groups: Vec<(&'static str, usize, usize, usize)>,
 }
 
-fn rows() -> [Row; 6] {
-    [
+fn rows() -> Vec<Row> {
+    vec![
         Row {
             name: "Rendering",
-            groups: [
+            groups: vec![
                 ("Frame", 42, 0, 42),
                 ("Views", 68, 0, 68),
                 ("Passes", 95, 1, 37),
@@ -24,7 +25,7 @@ fn rows() -> [Row; 6] {
         },
         Row {
             name: "Assets",
-            groups: [
+            groups: vec![
                 ("Requests", 53, 0, 53),
                 ("Dependencies", 84, 1, 51),
                 ("Publication", 37, 2, 0),
@@ -33,7 +34,7 @@ fn rows() -> [Row; 6] {
         },
         Row {
             name: "World",
-            groups: [
+            groups: vec![
                 ("Maps", 31, 0, 31),
                 ("Spatial data", 102, 1, 26),
                 ("Visibility", 73, 2, 0),
@@ -42,7 +43,7 @@ fn rows() -> [Row; 6] {
         },
         Row {
             name: "Animation",
-            groups: [
+            groups: vec![
                 ("States", 28, 0, 28),
                 ("Poses", 64, 1, 41),
                 ("Blending", 51, 2, 0),
@@ -51,7 +52,7 @@ fn rows() -> [Row; 6] {
         },
         Row {
             name: "Interface",
-            groups: [
+            groups: vec![
                 ("Input", 47, 0, 47),
                 ("Widgets", 88, 1, 19),
                 ("Layout", 56, 2, 0),
@@ -60,7 +61,7 @@ fn rows() -> [Row; 6] {
         },
         Row {
             name: "Unclassified",
-            groups: [
+            groups: vec![
                 ("Region A", 210, 2, 0),
                 ("Region B", 190, 2, 0),
                 ("Region C", 160, 2, 0),
@@ -78,6 +79,7 @@ struct Dashboard {
     about: bool,
     dark: bool,
     chunk_counts: Vec<usize>,
+    stock_preview: Option<Vec<Row>>,
 }
 
 impl Default for Dashboard {
@@ -90,6 +92,7 @@ impl Default for Dashboard {
             about: false,
             dark: true,
             chunk_counts: vec![64; 48],
+            stock_preview: None,
         }
     }
 }
@@ -404,11 +407,16 @@ impl eframe::App for Dashboard {
                         self.selection = None;
                     }
                 }
-                let data = rows();
+                let data = if self.project == 0 {
+                    self.stock_preview.clone().unwrap_or_else(rows)
+                } else {
+                    rows()
+                };
+                let meter_count: usize = data.iter().map(|r| r.groups.len()).sum();
                 let scale = self.project + 1;
                 let mut counts = [0usize; 3];
                 for row in &data {
-                    for g in row.groups {
+                    for g in &row.groups {
                         counts[0] += g.3 * scale;
                         if g.2 != 0 {
                             counts[g.2] += (g.1 - g.3) * scale;
@@ -416,7 +424,8 @@ impl eframe::App for Dashboard {
                     }
                 }
                 let total: usize = counts.iter().sum();
-                let project_counts = &self.chunk_counts[self.project * 24..self.project * 24 + 24];
+                let project_counts =
+                    &self.chunk_counts[self.project * 24..self.project * 24 + meter_count];
                 let total_chunks: usize = project_counts.iter().sum();
                 let done_chunks: usize = data
                     .iter()
@@ -501,7 +510,7 @@ impl eframe::App for Dashboard {
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 let longest = self.chunk_counts
-                                    [self.project * 24..self.project * 24 + 24]
+                                    [self.project * 24..self.project * 24 + meter_count]
                                     .iter()
                                     .copied()
                                     .max()
@@ -509,13 +518,16 @@ impl eframe::App for Dashboard {
                                 let col_width = meter_column_width(bank.width(), longest);
                                 let row_height = METER_ROW_HEIGHT;
                                 let (area, _) = ui.allocate_exact_size(
-                                    Vec2::new(col_width * 2.0 + 10.0, row_height * 12.0),
+                                    Vec2::new(
+                                        col_width * 2.0 + 10.0,
+                                        row_height * meter_count.div_ceil(2) as f32,
+                                    ),
                                     egui::Sense::hover(),
                                 );
                                 let base = area.min;
                                 let p = ui.painter().clone();
-                                for ri in 0..6 {
-                                    for gi in 0..4 {
+                                for ri in 0..data.len() {
+                                    for gi in 0..data[ri].groups.len() {
                                         let index = ri * 4 + gi;
                                         let col = index % 2;
                                         let slot = index / 2;
@@ -641,7 +653,14 @@ impl eframe::App for Dashboard {
                         w * 0.33,
                         format!("Chunks done: {done_chunks} / {total_chunks}"),
                     ),
-                    (w * 0.33, "Sample data".to_string()),
+                    (
+                        w * 0.33,
+                        if self.project == 0 && self.stock_preview.is_some() {
+                            "Stock assumptions".to_string()
+                        } else {
+                            "Sample data".to_string()
+                        },
+                    ),
                 ] {
                     let sr = r(sx, h - 20.0, width - 2.0, 19.0);
                     bevel(&p, sr, true);
@@ -809,6 +828,41 @@ fn main() -> eframe::Result {
             {
                 if saved.len() == 48 {
                     app.chunk_counts = saved.into_iter().map(|n| n.min(4096)).collect();
+                }
+            }
+            // Local preview data stays outside Git; no historical completion states are accepted.
+            let preview_path =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/stock-preview.json");
+            if let Ok(bytes) = std::fs::read(preview_path) {
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    if let Some(meters) = value["meters"]
+                        .as_array()
+                        .filter(|m| !m.is_empty() && m.len() <= 24)
+                    {
+                        let mut preview = Vec::new();
+                        for (i, batch) in meters.chunks(4).enumerate() {
+                            let mut groups = Vec::new();
+                            for (j, m) in batch.iter().enumerate() {
+                                let name: &'static str = Box::leak(
+                                    m["name"]
+                                        .as_str()
+                                        .unwrap_or("Unclassified")
+                                        .to_owned()
+                                        .into_boxed_str(),
+                                );
+                                let functions =
+                                    m["functions"].as_u64().unwrap_or(1).max(1) as usize;
+                                groups.push((name, functions, 2, 0));
+                                app.chunk_counts[i * 4 + j] =
+                                    m["chunks"].as_u64().unwrap_or(1).min(4096) as usize;
+                            }
+                            preview.push(Row {
+                                name: "Stock",
+                                groups,
+                            });
+                        }
+                        app.stock_preview = Some(preview);
+                    }
                 }
             }
             Ok(Box::new(app))
