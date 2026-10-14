@@ -14,6 +14,22 @@ pub enum Kind {
     Function,
 }
 impl Kind {
+    fn completion_criteria(self) -> &'static str {
+        match self {
+            Self::Function => {
+                "Explain this function's behavior, inputs, outputs, side effects, boundaries and connections, supported by evidence. Complete only the prerequisites necessary to establish this function's behavior."
+            }
+            Self::Chunk => {
+                "Synthesize the completed function reports into an explanation of this chunk's behavior, control flow, data flow and external interactions. Every required function must be complete."
+            }
+            Self::Architecture => {
+                "Synthesize the completed chunk reports into an explanation of this subsystem's behavior and interfaces. Every required chunk must be complete."
+            }
+            Self::App => {
+                "Synthesize the completed architecture reports into an explanation of the complete application and how its subsystems work together. Every required architecture must be complete."
+            }
+        }
+    }
     fn child(self) -> Option<Self> {
         match self {
             Self::App => Some(Self::Architecture),
@@ -859,7 +875,13 @@ impl ResearchUi {
             if ui.add(egui::TextEdit::multiline(&mut self.body).desired_width(f32::INFINITY).desired_rows(12).code_editor()).changed(){self.dirty=true;}
             ui.label("Evidence — cite source/build, VA/RVA, artifact or capture; label observed / specification-defined / inferred");
             if ui.add(egui::TextEdit::multiline(&mut self.evidence).desired_width(f32::INFINITY).desired_rows(4).code_editor()).changed(){self.dirty=true;}
-            if ui.checkbox(&mut self.complete,"Mark this report complete (I have reviewed its understanding and evidence)").changed(){self.dirty=true;}
+            let kind=project.nodes.iter().find(|n|n.id==self.node).unwrap().kind;
+            egui::CollapsingHeader::new("Completion criteria for this scope").show(ui,|ui|{
+                ui.label(kind.completion_criteria());
+                ui.label("Completed children make a parent ready for synthesis; the parent's own understanding must be reviewed separately.");
+                ui.label("Keep this assignment's scope fixed. Record missing knowledge outside it as a separate task; tag it as a prerequisite only when needed to establish this scope's behavior. A connection alone does not expand the assignment.");
+            });
+            if ui.checkbox(&mut self.complete,"Mark complete (I reviewed the scope criteria, understanding and evidence)").changed(){self.dirty=true;}
             ui.horizontal(|ui|{
                 if ui.button("Save canonical report").clicked(){match self.library.as_mut().unwrap().save_report(self.project,self.node,&self.body,&self.evidence,self.complete,&self.loaded_hash){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}}
                 if ui.button("Discard / reload").clicked(){nav=Some((self.project,self.node));}

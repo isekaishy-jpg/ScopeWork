@@ -34,6 +34,17 @@ The editor updates each canonical Markdown file in place. Parent reports link th
 
 ### Completion
 
+Research uses fixed assignments within expanding levels of understanding:
+
+- **Function:** Establish its behavior, inputs, outputs, side effects, boundaries and connections with evidence.
+- **Chunk:** Synthesize completed function reports to explain the chunk's behavior, control flow, data flow and external interactions.
+- **Architecture/category:** Synthesize completed chunk reports to explain subsystem behavior and interfaces.
+- **App:** Synthesize completed architecture reports to explain the complete application and how its subsystems work together.
+
+Completed children make a parent ready for synthesis; they do not automatically complete it. Each parent needs a separate review of its own understanding. The research editor shows completion criteria for the selected scope beside the completion control.
+
+Keep each assignment's scope fixed. Record missing knowledge outside it as a separate research task, and make it a prerequisite only when necessary to establish the current scope's behavior. A connection or call edge alone does not expand the assignment into the entire reachable graph. Known shared behavior is referenced through its canonical function report.
+
 Use the completion checkbox only after reviewing the report. Completion requires a written report, function evidence where applicable, and every required child complete. Empty parent reports and parents without children cannot be completed. Changing a child or adding a child reopens completed ancestors. SHA-256 checks detect externally changed completed files, and the editor rejects saves over a concurrently changed file. Use View > Refresh research progress after external edits. Completion is a human attestation supported by these structural checks, not automated judgment of research quality.
 
 Save or discard edits before navigating. Unsaved report edits prevent closing the app. One application instance can write the research library at a time.
