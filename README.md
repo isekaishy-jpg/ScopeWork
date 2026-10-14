@@ -61,3 +61,19 @@ Every function has its own folder: `research.md` plus `data/`. Use relative `dat
 Existing flat canonical reports migrate to the folder layout when the library opens. Generated source-report links are rebuilt; ordinary relative inline Markdown links are rebased. Affected completion records reopen for review. The app refuses to overwrite a conflicting destination. Empty obsolete folders are removed; any historical unowned captures/exports are preserved under `tools/unassigned` for deliberate assignment to functions, not attributed automatically. Shared old analysis data moves to `tools/workspaces/analysis`. Use `research-dashboard.exe --migrate-library` to apply folder migration without opening the GUI.
 
 Meter pairs use padded inset panels sized to their own meter and text widths. The second panel follows the first with a small gap rather than a fixed half-window offset. Large meters grow their own row and remain scrollable. The total-progress meter occupies a separate full-width panel below the meter bank.
+
+## Function prerequisite tags
+
+Each function folder also contains `dep.toml` (functions this report requires) and `prereq.toml` (functions that require this one). Both include project/binary identity, function RVAs, and relative canonical-report links. Tags stay within one project, do not duplicate research files, and do not add functions to coverage totals.
+
+The app maintains both directions from the project's dependency graph in `project.json`; these two TOML files are generated views. In a function's research editor, enter prerequisite RVAs separated by commas and use **Save prerequisite tags**. The reverse list is generated automatically. Self-dependencies, missing functions, duplicates and prerequisite cycles are rejected. These are understanding prerequisites, not a complete machine-code call graph.
+
+A dependent function cannot be marked complete until its prerequisites are complete. Its completion records which prerequisite revisions it used. Changes to a shared function reopen transitive dependents and their owning chunk/architecture/app reports. External changes are detected by the report hash checks. Merely referencing an already understood function does not reopen that shared function. Re-saving unchanged research does not invalidate dependents.
+
+Agents can update tags without hand-editing two files. Close the GUI first to release the library write lock:
+
+```powershell
+research-dashboard.exe --set-prerequisites stock 0x00123456 0x000ABCDE 0x00012345
+```
+
+The first RVA is the dependent function; subsequent RVAs replace its prerequisite list. Omit subsequent RVAs to clear the list. All function records must already exist in that project. Use `RESEARCH_DASHBOARD_HOME` for a non-default library. Do not edit the generated TOML files directly; use this command or the app so both directions remain consistent.

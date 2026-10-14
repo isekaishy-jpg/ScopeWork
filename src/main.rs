@@ -785,6 +785,27 @@ impl eframe::App for Dashboard {
 }
 
 fn main() -> eframe::Result {
+    let arguments: Vec<String> = std::env::args().collect();
+    if arguments.get(1).is_some_and(|a| a == "--set-prerequisites") {
+        if arguments.len() < 4 {
+            eprintln!("Usage: --set-prerequisites PROJECT FUNCTION_RVA [PREREQUISITE_RVA ...]");
+            std::process::exit(2);
+        }
+        let root = std::env::var_os("RESEARCH_DASHBOARD_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/projects")
+            });
+        let result = research::Library::open(root).and_then(|mut lib| {
+            lib.set_dependencies_by_rva(&arguments[2], &arguments[3], &arguments[4..].join(","))
+        });
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     if std::env::args().any(|arg| arg == "--migrate-library") {
         let root = std::env::var_os("RESEARCH_DASHBOARD_HOME")
             .map(std::path::PathBuf::from)

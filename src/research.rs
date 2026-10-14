@@ -47,6 +47,8 @@ pub struct Node {
     pub rva: Option<u32>,
     pub revision: u64,
     pub accepted_hash: Option<String>,
+    #[serde(default)]
+    pub accepted_prerequisites: std::collections::BTreeMap<u64, String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -56,6 +58,8 @@ pub struct Project {
     pub next_id: u64,
     pub revision: u64,
     pub nodes: Vec<Node>,
+    #[serde(default)]
+    pub dependencies: Vec<Dependency>,
 }
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 fn hash(text: &str) -> String {
@@ -245,7 +249,9 @@ impl Library {
             )
         });
         for p in 0..lib.projects.len() {
+            lib.validate_dependencies(p, &lib.projects[p].dependencies)?;
             lib.migrate_layout(p)?;
+            lib.sync_dependency_files(p)?;
         }
         Ok(lib)
     }
@@ -256,7 +262,8 @@ impl Library {
         atomic(
             &self.dir(p).join("project.json"),
             &serde_json::to_vec_pretty(&self.projects[p]).map_err(|e| e.to_string())?,
-        )
+        )?;
+        self.sync_dependency_files(p)
     }
     fn migrate_layout(&mut self, p: usize) -> Result<()> {
         let dir = self.dir(p);
@@ -401,6 +408,7 @@ impl Library {
             id: id.into(),
             name: name.into(),
             binary: binary.into(),
+            dependencies: vec![],
             next_id: 1,
             revision: 0,
             nodes: vec![Node {
@@ -412,6 +420,7 @@ impl Library {
                 rva: None,
                 revision: 0,
                 accepted_hash: None,
+                accepted_prerequisites: Default::default(),
             }],
         });
         let p = self.projects.len() - 1;
@@ -528,6 +537,15 @@ impl Library {
         if !valid {
             return Status::InProgress;
         }
+        if self.projects[p]
+            .dependencies
+            .iter()
+            .filter(|e| e.dependent == id)
+            .any(|e| self.effective(p, e.prerequisite) != Status::Complete)
+            || n.accepted_prerequisites != self.dependency_stamps(p, id)
+        {
+            return Status::InProgress;
+        }
         let kids: Vec<_> = self.projects[p]
             .nodes
             .iter()
@@ -579,6 +597,7 @@ impl Library {
             status: Status::NotStarted,
             revision: 0,
             accepted_hash: None,
+            accepted_prerequisites: Default::default(),
         };
         let path = self.dir(p).join(relative(&relnode));
         if path.exists() {
@@ -607,6 +626,14 @@ impl Library {
             return Err("This report changed outside the editor. Reload it before saving; your text has not been overwritten.".into());
         }
         let n = self.projects[p].nodes.iter().find(|n| n.id == id).unwrap();
+        let (old_body, old_evidence) = self.read(p, id)?;
+        if old_body == body
+            && old_evidence == evidence
+            && complete == (n.status == Status::Complete)
+            && self.effective(p, id) == n.status
+        {
+            return Ok(());
+        }
         if complete {
             if body.trim().is_empty() {
                 return Err(
@@ -630,6 +657,23 @@ impl Library {
                 return Err("Every required child must be complete, and the parent needs its own compiled report.".into());
             }
         }
+        if complete
+            && self.projects[p]
+                .dependencies
+                .iter()
+                .filter(|e| e.dependent == id)
+                .any(|e| self.effective(p, e.prerequisite) != Status::Complete)
+        {
+            return Err(
+                "Every tagged prerequisite must be complete before this function can be complete."
+                    .into(),
+            );
+        }
+        let stamps = if complete {
+            self.dependency_stamps(p, id)
+        } else {
+            Default::default()
+        };
         self.write_report(p, id, body, evidence)?;
         let report = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
         let n = self.projects[p]
@@ -645,8 +689,10 @@ impl Library {
             Status::InProgress
         };
         n.accepted_hash = complete.then(|| hash(&report));
+        n.accepted_prerequisites = stamps;
         n.revision += 1;
         self.invalidate(p, id);
+        self.invalidate_dependents(p, id);
         self.projects[p].revision += 1;
         self.persist(p)
     }
@@ -665,6 +711,7 @@ pub struct ResearchUi {
     message: String,
     new_name: String,
     rva: String,
+    dependency_rvas: String,
     new_project_name: String,
     new_project_id: String,
     binary: String,
@@ -692,6 +739,7 @@ impl ResearchUi {
             message,
             new_name: String::new(),
             rva: String::new(),
+            dependency_rvas: String::new(),
             new_project_name: String::new(),
             new_project_id: String::new(),
             binary: String::new(),
@@ -716,6 +764,20 @@ impl ResearchUi {
                     hash(&fs::read_to_string(lib.path(p, id).unwrap()).unwrap_or_default());
                 self.complete = lib.effective(p, id) == Status::Complete;
                 self.binary = lib.projects[p].binary.clone();
+                self.dependency_rvas = lib.projects[p]
+                    .dependencies
+                    .iter()
+                    .filter(|e| e.dependent == id)
+                    .filter_map(|e| {
+                        lib.projects[p]
+                            .nodes
+                            .iter()
+                            .find(|n| n.id == e.prerequisite)
+                            .and_then(|n| n.rva)
+                    })
+                    .map(|r| format!("0x{r:08X}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 self.dirty = false;
                 self.message.clear();
             }
@@ -780,6 +842,16 @@ impl ResearchUi {
                     ui.label(format!("Add {} here",kind.label()));ui.text_edit_singleline(&mut self.new_name);
                     if kind==Kind::Function {ui.horizontal(|ui|{ui.label("RVA (hex)");ui.text_edit_singleline(&mut self.rva);});}
                     if ui.add_enabled(!self.dirty,egui::Button::new(format!("Create {} file",kind.label()))).clicked(){match self.library.as_mut().unwrap().add(self.project,self.node,&self.new_name,&self.rva){Ok(id)=>{self.new_name.clear();self.rva.clear();self.changed=true;nav=Some((self.project,id));},Err(e)=>self.message=e}}
+                }
+                if n.kind==Kind::Function {
+                    ui.separator();ui.label("Prerequisites (function RVAs, comma separated)");
+                    ui.text_edit_singleline(&mut self.dependency_rvas);
+                    if ui.add_enabled(!self.dirty,egui::Button::new("Save prerequisite tags")).clicked(){
+                        match self.library.as_mut().unwrap().set_dependencies(self.project,self.node,&self.dependency_rvas){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}
+                    }
+                    let inbound:Vec<_>=project.dependencies.iter().filter(|e|e.prerequisite==self.node).filter_map(|e|project.nodes.iter().find(|n|n.id==e.dependent)).map(|n|format!("{} (0x{:08X})",n.name,n.rva.unwrap())).collect();
+                    ui.label(format!("Required by: {}",if inbound.is_empty(){"none".into()}else{inbound.join(", ")}));
+                    ui.label("dep.toml lists prerequisites; prereq.toml lists dependents. Managed together by the app.");
                 }
                 ui.label("Save or discard edits before changing records. Parent reports link their direct source reports; evidence remains in the original function files.");
             });
@@ -896,5 +968,265 @@ impl ResearchUi {
     pub fn prevent_close(&mut self) {
         self.open = true;
         self.message = "Save or discard your report edits before closing the app.".into();
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Dependency {
+    pub dependent: u64,
+    pub prerequisite: u64,
+}
+#[derive(Serialize)]
+struct FunctionTag {
+    node_id: u64,
+    rva: String,
+    report: String,
+}
+#[derive(Serialize)]
+struct DependencyFile {
+    schema: u32,
+    project: String,
+    binary: String,
+    function_rva: String,
+    requires: Vec<FunctionTag>,
+}
+#[derive(Serialize)]
+struct PrerequisiteFile {
+    schema: u32,
+    project: String,
+    binary: String,
+    function_rva: String,
+    required_by: Vec<FunctionTag>,
+}
+impl Library {
+    fn validate_dependencies(&self, p: usize, edges: &[Dependency]) -> Result<()> {
+        let functions: std::collections::HashSet<_> = self.projects[p]
+            .nodes
+            .iter()
+            .filter(|n| n.kind == Kind::Function)
+            .map(|n| n.id)
+            .collect();
+        let mut pairs = std::collections::HashSet::new();
+        for e in edges {
+            if e.dependent == e.prerequisite
+                || !functions.contains(&e.dependent)
+                || !functions.contains(&e.prerequisite)
+                || !pairs.insert((e.dependent, e.prerequisite))
+            {
+                return Err(
+                    "Prerequisites must be unique, different functions in this same project."
+                        .into(),
+                );
+            }
+        }
+        fn visit(
+            id: u64,
+            edges: &[Dependency],
+            active: &mut std::collections::HashSet<u64>,
+            done: &mut std::collections::HashSet<u64>,
+        ) -> bool {
+            if done.contains(&id) {
+                return true;
+            }
+            if !active.insert(id) {
+                return false;
+            }
+            for e in edges.iter().filter(|e| e.dependent == id) {
+                if !visit(e.prerequisite, edges, active, done) {
+                    return false;
+                }
+            }
+            active.remove(&id);
+            done.insert(id);
+            true
+        }
+        let mut done = std::collections::HashSet::new();
+        for id in functions {
+            if !visit(id, edges, &mut Default::default(), &mut done) {
+                return Err("That creates a prerequisite cycle. These tags describe research prerequisites, not every call edge.".into());
+            }
+        }
+        Ok(())
+    }
+    fn sync_dependency_files(&self, p: usize) -> Result<()> {
+        let project = &self.projects[p];
+        for node in project.nodes.iter().filter(|n| n.kind == Kind::Function) {
+            let tag = |id| {
+                let n = project.nodes.iter().find(|n| n.id == id).unwrap();
+                FunctionTag {
+                    node_id: id,
+                    rva: format!("0x{:08X}", n.rva.unwrap()),
+                    report: format!("../{:08X}/research.md", n.rva.unwrap()),
+                }
+            };
+            let deps = DependencyFile {
+                schema: 1,
+                project: project.id.clone(),
+                binary: project.binary.clone(),
+                function_rva: format!("0x{:08X}", node.rva.unwrap()),
+                requires: project
+                    .dependencies
+                    .iter()
+                    .filter(|e| e.dependent == node.id)
+                    .map(|e| tag(e.prerequisite))
+                    .collect(),
+            };
+            let prereq = PrerequisiteFile {
+                schema: 1,
+                project: project.id.clone(),
+                binary: project.binary.clone(),
+                function_rva: format!("0x{:08X}", node.rva.unwrap()),
+                required_by: project
+                    .dependencies
+                    .iter()
+                    .filter(|e| e.prerequisite == node.id)
+                    .map(|e| tag(e.dependent))
+                    .collect(),
+            };
+            let folder = self.path(p, node.id)?.parent().unwrap().to_owned();
+            fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+            for (name, body) in [
+                ("dep.toml", toml::to_string_pretty(&deps)),
+                ("prereq.toml", toml::to_string_pretty(&prereq)),
+            ] {
+                let content = format!(
+                    "# Managed by Research Task Manager. Edit through the app or --set-prerequisites.\n{}",
+                    body.map_err(|e| e.to_string())?
+                );
+                let path = folder.join(name);
+                if fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
+                    atomic(&path, content.as_bytes())?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn dependency_stamps(&self, p: usize, id: u64) -> std::collections::BTreeMap<u64, String> {
+        self.projects[p]
+            .dependencies
+            .iter()
+            .filter(|e| e.dependent == id)
+            .map(|e| {
+                let n = self.projects[p]
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == e.prerequisite)
+                    .unwrap();
+                let content = self
+                    .path(p, n.id)
+                    .ok()
+                    .and_then(|path| fs::read_to_string(path).ok())
+                    .unwrap_or_default();
+                (n.id, format!("{}:{}", n.revision, hash(&content)))
+            })
+            .collect()
+    }
+    fn invalidate_dependents(&mut self, p: usize, id: u64) {
+        let mut queue = vec![id];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(source) = queue.pop() {
+            let targets: Vec<_> = self.projects[p]
+                .dependencies
+                .iter()
+                .filter(|e| e.prerequisite == source)
+                .map(|e| e.dependent)
+                .collect();
+            for target in targets {
+                if seen.insert(target) {
+                    let n = self.projects[p]
+                        .nodes
+                        .iter_mut()
+                        .find(|n| n.id == target)
+                        .unwrap();
+                    if n.status == Status::Complete {
+                        n.status = Status::InProgress;
+                    }
+                    n.accepted_hash = None;
+                    n.accepted_prerequisites.clear();
+                    n.revision += 1;
+                    self.invalidate(p, target);
+                    queue.push(target);
+                }
+            }
+        }
+    }
+    pub fn set_dependencies(&mut self, p: usize, id: u64, rvas: &str) -> Result<()> {
+        if !self.projects[p]
+            .nodes
+            .iter()
+            .any(|n| n.id == id && n.kind == Kind::Function)
+        {
+            return Err("Select a function report.".into());
+        }
+        let mut edges: Vec<_> = self.projects[p]
+            .dependencies
+            .iter()
+            .filter(|e| e.dependent != id)
+            .cloned()
+            .collect();
+        for rva in rvas
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+        {
+            let address =
+                u32::from_str_radix(rva.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                    .map_err(|_| format!("Invalid hexadecimal RVA: {rva}"))?;
+            let n = self.projects[p]
+                .nodes
+                .iter()
+                .find(|n| n.rva == Some(address))
+                .ok_or_else(|| format!("RVA {rva} has no function report in this project."))?;
+            edges.push(Dependency {
+                dependent: id,
+                prerequisite: n.id,
+            });
+        }
+        edges.sort_by_key(|e| (e.dependent, e.prerequisite));
+        self.validate_dependencies(p, &edges)?;
+        let mut previous = self.projects[p].dependencies.clone();
+        previous.sort_by_key(|e| (e.dependent, e.prerequisite));
+        if edges == previous {
+            return Ok(());
+        }
+        self.projects[p].dependencies = edges;
+        let n = self.projects[p]
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == id)
+            .unwrap();
+        if n.status == Status::Complete {
+            n.status = Status::InProgress;
+        }
+        n.accepted_hash = None;
+        n.accepted_prerequisites.clear();
+        n.revision += 1;
+        self.invalidate(p, id);
+        self.invalidate_dependents(p, id);
+        self.projects[p].revision += 1;
+        self.persist(p)
+    }
+    pub fn set_dependencies_by_rva(
+        &mut self,
+        project: &str,
+        function: &str,
+        dependencies: &str,
+    ) -> Result<()> {
+        let p = self
+            .projects
+            .iter()
+            .position(|p| p.id == project)
+            .ok_or("Unknown project ID")?;
+        let rva = u32::from_str_radix(
+            function.trim_start_matches("0x").trim_start_matches("0X"),
+            16,
+        )
+        .map_err(|_| "Invalid function RVA")?;
+        let id = self.projects[p]
+            .nodes
+            .iter()
+            .find(|n| n.rva == Some(rva))
+            .ok_or("Unknown function RVA in this project")?
+            .id;
+        self.set_dependencies(p, id, dependencies)
     }
 }

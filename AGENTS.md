@@ -13,3 +13,5 @@ Build one Rust GUI for managing isolated binary research projects. Initial proje
 - Do not add tests or run test commands unless the user asks for testing or verification.
 
 - Every research project owns tools/profiles, tools/scripts, tools/instrumentation and tools/bin. Shared tool databases and working data belong in tools/workspaces, tools/logs or tools/scratch. Function-specific captures, exports, logs and evidence belong in that function's data/ folder. Do not create project-level data/evidence dumps or parallel research reports. Canonical chunk and architecture reports are <kind>/<id>/research.md; the app report is app.md.
+
+- Maintain function prerequisites through the app or --set-prerequisites. Each function has dep.toml and prereq.toml as synchronized generated views of the project dependency graph. Do not duplicate shared function research or count it twice. Prerequisite changes require dependent-report review; adding a use does not reopen the shared prerequisite.
