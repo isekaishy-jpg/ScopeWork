@@ -60,6 +60,7 @@ Scopework is in early development. MSI packages are unsigned. Read each release'
 | [Agent CLI](docs/cli.md) | Creating records, writing reports and managing dependencies |
 | [Build guide](docs/building.md) | Source builds, MSI packaging and repository layout |
 | [Changelog](CHANGELOG.md) | Changes by version |
+| [Concurrent import design](docs/concurrent-import-design.md) | Proposed upgrade for imports, concurrent research edits, and responsive snapshots |
 
 ## Contribute
 
