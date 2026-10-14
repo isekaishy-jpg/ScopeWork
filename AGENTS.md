@@ -11,3 +11,5 @@ Build one Rust GUI for managing isolated binary research projects. Initial proje
 - Keep source installations and binaries read-only. Do not commit binaries, private captures, credentials, or research datasets.
 - Preserve provenance and distinguish observed, specification-defined, and inferred claims.
 - Do not add tests or run test commands unless the user asks for testing or verification.
+
+- Every research project owns tools/profiles, tools/scripts, tools/instrumentation and tools/bin. Store generated material in its own data/analysis, data/captures, data/exports, data/logs or data/scratch. Retain cited evidence under evidence. Never scatter outputs outside the owning project or create parallel research reports there. Keep run input hashes and tool/profile provenance in data/logs.

@@ -15,7 +15,19 @@ data/projects/<project-id>/
   architectures/000001.md      # one canonical report per category
   chunks/000002.md              # one canonical report per chunk
   functions/00001234.md         # one canonical file per function RVA
-  evidence/                    # this project's supporting artifacts
+  evidence/                    # this project's retained supporting artifacts
+  tools/
+    README.md                  # project-local tool/provenance guide
+    profiles/                  # compiler, ABI, type and decompiler profiles
+    scripts/                   # drivers, exporters and processing utilities
+    instrumentation/           # observational hooks and capture utilities
+    bin/                       # tool executables and launchers
+  data/
+    analysis/                  # Ghidra projects and analysis databases
+    captures/                  # runtime captures and traces
+    exports/                   # disassembly, decompilation and extracted tables
+    logs/                      # run commands, input hashes, versions and logs
+    scratch/                   # temporary/reproducible intermediate files
 ```
 
 Select a parent and create its child: App -> Architecture -> Chunk -> Function. Architectures are categories such as Asset Loading or Models. Enter the exact binary build/hash and image base before adding functions. Function identity is an RVA within that project's binary. A function cannot be duplicated elsewhere in the same project. Different binaries require separate projects.
@@ -45,3 +57,5 @@ Options > Dark mode switches palettes and saves the choice. Other menus provide 
 ## Preview mode
 
 The local ignored `data/stock-preview.json` file supplies the Stock assumptions preview. Its function counts came from the existing index; its chunk counts are hypothetical. Forever's preview uses illustrative data. Preview meters allow segment counts to be changed through their context menu. Canonical meters derive segment counts from their chunk records.
+
+Every new project receives these tool/data folders. Existing projects are upgraded on opening without moving or replacing existing files. Research records > Project tools and data folders opens the relevant locations. Tools must write into their owning project's designated data folders, with named run subfolders and input/tool/profile provenance. Canonical research stays in the hierarchy, not in extra output reports. Historical external files are not automatically migrated.

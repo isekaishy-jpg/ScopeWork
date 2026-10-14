@@ -84,6 +84,53 @@ fn relative(n: &Node) -> String {
     }
 }
 
+// One project-local destination for each kind of reversing material.
+const PROJECT_FOLDERS: &[&str] = &[
+    "functions",
+    "chunks",
+    "architectures",
+    "evidence",
+    "tools/profiles",
+    "tools/scripts",
+    "tools/instrumentation",
+    "tools/bin",
+    "data/analysis",
+    "data/captures",
+    "data/exports",
+    "data/logs",
+    "data/scratch",
+];
+fn ensure_folders(dir: &Path) -> Result<()> {
+    for folder in PROJECT_FOLDERS {
+        fs::create_dir_all(dir.join(folder)).map_err(|e| format!("Cannot create {folder}: {e}"))?;
+    }
+    // Preserve an existing project tool guide; no tool or evidence files are replaced.
+    let guide = dir.join("tools/README.md");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&guide)
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(b"# Project reversing tools\n\nThis tools directory belongs exclusively to the project containing it.\n\n- profiles/: compiler, ABI, type-layout, analysis and decompiler profiles.\n- scripts/: analysis drivers, exporters and processing utilities.\n- instrumentation/: separately maintained observational hooks and capture utilities.\n- bin/: project-local tool executables or launchers, with version/provenance notes here.\n\nWrite generated material under the same project's data directory:\n\n- ../data/analysis/: Ghidra projects, analysis databases and other tool working data.\n- ../data/captures/: runtime captures and traces.\n- ../data/exports/: disassembly, decompilation, extracted tables and structured exports.\n- ../data/logs/: tool execution logs.\n- ../data/scratch/: temporary and reproducible intermediate files.\n\nKeep retained evidence in ../evidence/ and link it from canonical function reports. Keep canonical research in ../functions/, ../chunks/, ../architectures/ and ../app.md. Do not create additional research reports under tools or data. Source installations remain read-only. Give each run a named subfolder and record its exact input binary hash, tool/profile versions, command and output paths in its log. Never borrow another project's profile or evidence silently.\n").map_err(|e|e.to_string())?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    Ok(())
+}
+fn open_folder(path: &Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(path).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub struct Library {
     pub root: PathBuf,
     pub projects: Vec<Project>,
@@ -145,6 +192,7 @@ impl Library {
                 if p.nodes.iter().filter(|n| n.kind == Kind::App).count() != 1 {
                     return Err("Project must contain exactly one app report".into());
                 }
+                ensure_folders(&lib.root.join(&p.id))?;
                 lib.projects.push(p);
             }
         }
@@ -185,9 +233,7 @@ impl Library {
         }
         let dir = self.root.join(id);
         fs::create_dir(&dir).map_err(|e| e.to_string())?;
-        for folder in ["functions", "chunks", "architectures", "evidence"] {
-            fs::create_dir(dir.join(folder)).map_err(|e| e.to_string())?;
-        }
+        ensure_folders(&dir)?;
         self.projects.push(Project {
             id: id.into(),
             name: name.into(),
@@ -519,6 +565,15 @@ impl ResearchUi {
             let projects=lib.projects.clone();let project=&projects[self.project];
             ui.horizontal_wrapped(|ui|{for (i,p) in projects.iter().enumerate(){if ui.add_enabled(!self.dirty,egui::Button::new(&p.name).selected(i==self.project)).clicked(){nav=Some((i,0));}}});
             ui.label(format!("Isolated project: {}",lib.dir(self.project).display()));
+            let project_dir=lib.dir(self.project);
+            egui::CollapsingHeader::new("Project tools and data folders").show(ui,|ui|{
+                ui.horizontal_wrapped(|ui|{
+                    for (label,folder) in [("Tools","tools"),("Profiles","tools/profiles"),("Analysis data","data/analysis"),("Captures","data/captures"),("Exports","data/exports"),("Evidence","evidence")] {
+                        if ui.button(label).clicked(){if let Err(e)=open_folder(&project_dir.join(folder)){self.message=e;}}
+                    }
+                });
+                ui.label("Tools and profiles stay in this project. Generated data goes to data/analysis, captures, exports, logs, or scratch. Canonical reports stay in their research folders.");
+            });
             egui::CollapsingHeader::new("New project").show(ui,|ui|{
                 ui.horizontal(|ui|{ui.label("ID");ui.text_edit_singleline(&mut self.new_project_id);ui.label("Name");ui.text_edit_singleline(&mut self.new_project_name);});
                 if ui.add_enabled(!self.dirty,egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{nav=Some((self.library.as_ref().unwrap().projects.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
