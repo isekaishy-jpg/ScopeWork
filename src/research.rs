@@ -26,7 +26,7 @@ impl Kind {
                 "Synthesize the completed chunk reports into an explanation of this subsystem's behavior and interfaces. Every required chunk must be complete."
             }
             Self::App => {
-                "Synthesize the completed architecture reports into an explanation of the complete application and how its subsystems work together. Every required architecture must be complete."
+                "Synthesize the completed architecture reports to fulfill the project's declared research scope, including its boundaries and relevant subsystem interactions. Every required architecture must be complete. Whole-binary understanding is required only when the declared scope calls for it."
             }
         }
     }
@@ -71,6 +71,8 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub binary: String,
+    #[serde(default)]
+    pub research_scope: String,
     pub next_id: u64,
     pub revision: u64,
     pub nodes: Vec<Node>,
@@ -154,6 +156,36 @@ pub struct Library {
     _lock: Option<std::fs::File>,
 }
 impl Library {
+    pub fn set_scope(&mut self, p: usize, scope: &str, expected_revision: u64) -> Result<()> {
+        if self._lock.is_none() {
+            return self.write_current(|l| l.set_scope(p, scope, expected_revision));
+        }
+        if self.projects[p].revision != expected_revision {
+            return Err("Project changed. Reload and review its scope before saving.".into());
+        }
+        let scope = scope.trim();
+        if scope.is_empty() || scope.contains("<!-- research-") {
+            return Err("Define a nonempty research scope without reserved report markers.".into());
+        }
+        if scope == self.projects[p].research_scope {
+            return Ok(());
+        }
+        let (body, evidence) = self.read(p, 0)?;
+        self.projects[p].research_scope = scope.into();
+        self.write_report(p, 0, &body, &evidence)?;
+        let app = self.projects[p]
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == 0)
+            .unwrap();
+        if app.status == Status::Complete {
+            app.status = Status::InProgress;
+        }
+        app.accepted_hash = None;
+        app.revision += 1;
+        self.projects[p].revision += 1;
+        self.persist(p)
+    }
     pub fn report_token(&self, p: usize, id: u64) -> Result<String> {
         let content = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
         Ok(hash(&format!("{}\n{content}", self.projects[p].revision)))
@@ -333,6 +365,7 @@ impl Library {
             id: id.into(),
             name: name.into(),
             binary: binary.into(),
+            research_scope: String::new(),
             dependencies: vec![],
             next_id: 1,
             revision: 0,
@@ -394,6 +427,16 @@ impl Library {
         if let Some(rva) = n.rva {
             md += &format!("\nRVA: `0x{rva:08X}`\n");
         }
+        if n.kind == Kind::App {
+            md += &format!(
+                "\n## Research scope\n\n{}\n",
+                if project.research_scope.trim().is_empty() {
+                    "Not set. Define the project objective, included behavior and boundaries before completing research."
+                } else {
+                    &project.research_scope
+                }
+            );
+        }
         md += "\n## Source reports\n";
         for child in project.nodes.iter().filter(|c| c.parent == Some(id)) {
             let rel = if n.kind == Kind::App {
@@ -440,6 +483,14 @@ impl Library {
         }
     }
     pub fn effective(&self, p: usize, id: u64) -> Status {
+        if self.projects[p].research_scope.trim().is_empty()
+            && self.projects[p]
+                .nodes
+                .iter()
+                .any(|n| n.id == id && n.status == Status::Complete)
+        {
+            return Status::InProgress;
+        }
         let Some(n) = self.projects[p].nodes.iter().find(|n| n.id == id) else {
             return Status::NotStarted;
         };
@@ -569,6 +620,9 @@ impl Library {
             return Ok(());
         }
         if complete {
+            if self.projects[p].research_scope.trim().is_empty() {
+                return Err("Set the project's research scope before completing research.".into());
+            }
             if body.trim().is_empty() {
                 return Err(
                     "Write the compiled understanding report before marking complete.".into(),
@@ -649,6 +703,9 @@ pub struct ResearchUi {
     new_project_name: String,
     new_project_id: String,
     binary: String,
+    scope: String,
+    scope_dirty: bool,
+    scope_revision: u64,
     complete: bool,
 }
 impl ResearchUi {
@@ -680,6 +737,9 @@ impl ResearchUi {
             new_project_name: String::new(),
             new_project_id: String::new(),
             binary: String::new(),
+            scope: String::new(),
+            scope_dirty: false,
+            scope_revision: 0,
             complete: false,
         };
         if s.library.is_some() {
@@ -700,6 +760,9 @@ impl ResearchUi {
                 self.loaded_hash = lib.report_token(p, id).unwrap_or_default();
                 self.complete = lib.effective(p, id) == Status::Complete;
                 self.binary = lib.projects[p].binary.clone();
+                self.scope = lib.projects[p].research_scope.clone();
+                self.scope_dirty = false;
+                self.scope_revision = lib.projects[p].revision;
                 self.dependency_rvas = lib.projects[p]
                     .dependencies
                     .iter()
@@ -730,7 +793,7 @@ impl ResearchUi {
             if !self.message.is_empty(){ui.colored_label(egui::Color32::from_rgb(230,170,80),&self.message);}
             let Some(lib)=&self.library else{return;};
             let projects=lib.projects.clone();let project=&projects[self.project];
-            ui.horizontal_wrapped(|ui|{for (i,p) in projects.iter().enumerate(){if ui.add_enabled(!self.dirty,egui::Button::new(&p.name).selected(i==self.project)).clicked(){nav=Some((i,0));}}});
+            ui.horizontal_wrapped(|ui|{for (i,p) in projects.iter().enumerate(){if ui.add_enabled(!self.has_unsaved(),egui::Button::new(&p.name).selected(i==self.project)).clicked(){nav=Some((i,0));}}});
             ui.label(format!("Isolated project: {}",lib.dir(self.project).display()));
             let project_dir=lib.dir(self.project);
             egui::CollapsingHeader::new("Project tools and data folders").show(ui,|ui|{
@@ -743,13 +806,24 @@ impl ResearchUi {
             });
             egui::CollapsingHeader::new("New project").show(ui,|ui|{
                 ui.horizontal(|ui|{ui.label("ID");ui.text_edit_singleline(&mut self.new_project_id);ui.label("Name");ui.text_edit_singleline(&mut self.new_project_name);});
-                if ui.add_enabled(!self.dirty,egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{nav=Some((self.library.as_ref().unwrap().projects.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
+                if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{nav=Some((self.library.as_ref().unwrap().projects.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
+            });
+            egui::CollapsingHeader::new("Research scope").default_open(true).show(ui,|ui|{
+                ui.label("Define the objective, included behavior, exclusions and boundaries. This can cover the whole binary or a selected part.");
+                if ui.add(egui::TextEdit::multiline(&mut self.scope).desired_width(f32::INFINITY).desired_rows(3)).changed(){self.scope_dirty=true;}
+                ui.label("Scope changes reopen the app report for synthesis review. Adjust affected child assignments explicitly.");
+                ui.horizontal(|ui|{
+                    if ui.add_enabled(!self.dirty,egui::Button::new("Save research scope")).clicked(){
+                        match self.library.as_mut().unwrap().set_scope(self.project,&self.scope,self.scope_revision){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}
+                    }
+                    if ui.button("Discard scope edits").clicked(){self.scope=project.research_scope.clone();self.scope_revision=project.revision;self.scope_dirty=false;}
+                });
             });
             egui::CollapsingHeader::new("Binary identity").show(ui,|ui|{
                 ui.label("Build, SHA-256, image base. Use another project for a different binary.");
                 let locked=project.nodes.iter().any(|n|n.kind==Kind::Function);
                 ui.add_enabled(!locked,egui::TextEdit::singleline(&mut self.binary).desired_width(f32::INFINITY));
-                if ui.add_enabled(!locked&&!self.dirty,egui::Button::new("Save binary identity")).clicked(){
+                if ui.add_enabled(!locked&&!self.has_unsaved(),egui::Button::new("Save binary identity")).clicked(){
                     let result=self.library.as_mut().unwrap().set_binary(self.project,&self.binary);
                     match result{Ok(())=>nav=Some((self.project,self.node)),Err(e)=>self.message=e}
                 }
@@ -762,7 +836,7 @@ impl ResearchUi {
                         if ui.add_enabled(!dirty,egui::Button::new(format!("{}: {} [{:?}]",n.kind.label(),n.name,lib.effective(p,id))).selected(id==selected)).clicked(){*nav=Some((p,id));}
                         ui.indent(id,|ui|{for child in lib.projects[p].nodes.iter().filter(|n|n.parent==Some(id)){tree(ui,lib,p,child.id,selected,dirty,nav);}});
                     }
-                    tree(ui,self.library.as_ref().unwrap(),self.project,0,self.node,self.dirty,&mut nav);
+                    tree(ui,self.library.as_ref().unwrap(),self.project,0,self.node,self.has_unsaved(),&mut nav);
                 });
                 let n=project.nodes.iter().find(|n|n.id==self.node).unwrap();
                 let ui=&mut columns[1];ui.strong(format!("{} — {}",n.kind.label(),n.name));
@@ -775,12 +849,12 @@ impl ResearchUi {
                 if let Some(kind)=n.kind.child() {
                     ui.label(format!("Add {} here",kind.label()));ui.text_edit_singleline(&mut self.new_name);
                     if kind==Kind::Function {ui.horizontal(|ui|{ui.label("RVA (hex)");ui.text_edit_singleline(&mut self.rva);});}
-                    if ui.add_enabled(!self.dirty,egui::Button::new(format!("Create {} file",kind.label()))).clicked(){match self.library.as_mut().unwrap().add(self.project,self.node,&self.new_name,&self.rva){Ok(id)=>{self.new_name.clear();self.rva.clear();self.changed=true;nav=Some((self.project,id));},Err(e)=>self.message=e}}
+                    if ui.add_enabled(!self.has_unsaved(),egui::Button::new(format!("Create {} file",kind.label()))).clicked(){match self.library.as_mut().unwrap().add(self.project,self.node,&self.new_name,&self.rva){Ok(id)=>{self.new_name.clear();self.rva.clear();self.changed=true;nav=Some((self.project,id));},Err(e)=>self.message=e}}
                 }
                 if n.kind==Kind::Function {
                     ui.separator();ui.label("Prerequisites (function RVAs, comma separated)");
                     ui.text_edit_singleline(&mut self.dependency_rvas);
-                    if ui.add_enabled(!self.dirty,egui::Button::new("Save prerequisite tags")).clicked(){
+                    if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Save prerequisite tags")).clicked(){
                         match self.library.as_mut().unwrap().set_dependencies(self.project,self.node,&self.dependency_rvas){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}
                     }
                     let inbound:Vec<_>=project.dependencies.iter().filter(|e|e.prerequisite==self.node).filter_map(|e|project.nodes.iter().find(|n|n.id==e.dependent)).map(|n|format!("{} (0x{:08X})",n.name,n.rva.unwrap())).collect();
@@ -801,9 +875,9 @@ impl ResearchUi {
             });
             if ui.checkbox(&mut self.complete,"Mark complete (I reviewed the scope criteria, understanding and evidence)").changed(){self.dirty=true;}
             ui.horizontal(|ui|{
-                if ui.button("Save canonical report").clicked(){match self.library.as_mut().unwrap().save_report(self.project,self.node,&self.body,&self.evidence,self.complete,&self.loaded_hash){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}}
+                if ui.add_enabled(!self.scope_dirty,egui::Button::new("Save canonical report")).clicked(){match self.library.as_mut().unwrap().save_report(self.project,self.node,&self.body,&self.evidence,self.complete,&self.loaded_hash){Ok(())=>{self.changed=true;nav=Some((self.project,self.node));},Err(e)=>self.message=e}}
                 if ui.button("Discard / reload").clicked(){nav=Some((self.project,self.node));}
-                if self.dirty{ui.label("Unsaved edits");}
+                if self.has_unsaved(){ui.label("Unsaved edits");}
             });
         });
         if let Some((p, id)) = nav {
@@ -849,7 +923,7 @@ impl ResearchUi {
             match lib.refresh() {
                 Ok(()) => {
                     self.changed = true;
-                    if !self.dirty {
+                    if !self.has_unsaved() {
                         self.load(self.project, self.node);
                     }
                 }
@@ -917,7 +991,7 @@ impl ResearchUi {
     }
     pub fn open_record(&mut self, project_id: &str, id: u64) {
         self.open = true;
-        if self.dirty {
+        if self.has_unsaved() {
             self.message =
                 "Save or discard the current edits before opening another report.".into();
             return;
@@ -934,7 +1008,7 @@ impl ResearchUi {
 
 impl ResearchUi {
     pub fn has_unsaved(&self) -> bool {
-        self.dirty
+        self.dirty || self.scope_dirty
     }
     pub fn prevent_close(&mut self) {
         self.open = true;

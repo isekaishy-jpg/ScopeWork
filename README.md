@@ -32,6 +32,14 @@ Select a parent and create its child: App -> Architecture -> Chunk -> Function. 
 
 The editor updates each canonical Markdown file in place. Parent reports link their direct source reports: architecture to chunks, chunks to function files. Function evidence remains in the function file instead of being copied into parallel reports. Parent synthesis is authored in the parent's own report; linking children alone does not complete it.
 
+### Project research scope
+
+In **View > Research records > Research scope**, define the project's objective, included behavior, exclusions and boundaries. A project can cover an entire binary or a selected part. Binary identity identifies the source; research scope defines the assignment. No whole-binary scope is assumed, and no record can be marked complete until scope is set.
+
+The scope is stored in project metadata and displayed in the generated scope section of `app.md`. App completion means the declared scope has been understood and synthesized from its required architecture reports. Counts cover the registered research hierarchy, not every function in the executable. Reviewing scope coverage remains an agent/human responsibility; prose scope does not automatically select functions.
+
+Changing scope reopens the app report for synthesis review. Existing function/chunk/architecture findings remain available; adjust affected assignments explicitly. Scope edits use revision checks to reject concurrent changes. Projects created before this field was added show an unset scope until it is supplied; research is not moved or imported.
+
 ### Completion
 
 Research uses fixed assignments within expanding levels of understanding:
@@ -39,7 +47,7 @@ Research uses fixed assignments within expanding levels of understanding:
 - **Function:** Establish its behavior, inputs, outputs, side effects, boundaries and connections with evidence.
 - **Chunk:** Synthesize completed function reports to explain the chunk's behavior, control flow, data flow and external interactions.
 - **Architecture/category:** Synthesize completed chunk reports to explain subsystem behavior and interfaces.
-- **App:** Synthesize completed architecture reports to explain the complete application and how its subsystems work together.
+- **App:** Synthesize completed architecture reports to fulfill the project's declared research scope and explain relevant subsystem interactions.
 
 Completed children make a parent ready for synthesis; they do not automatically complete it. Each parent needs a separate review of its own understanding. The research editor shows completion criteria for the selected scope beside the completion control.
 
@@ -87,8 +95,12 @@ Agents update tags with `research deps set`; see the [CLI guide](docs/cli.md). T
 
 ## Windows installation and CLI
 
-Build the installer with `powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1` (Rust and .NET SDK required). This permits the build script for that process only. The script installs a pinned local WiX build tool if needed and produces `dist/ResearchDashboard-0.1.0-x64.msi`.
+Build the installer with `powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1` (Rust and .NET SDK required). This permits the build script for that process only. The script installs a pinned local WiX build tool if needed and produces `dist/ResearchDashboard-0.2.0-x64.msi`.
 
 The per-user MSI installs into `%LOCALAPPDATA%\Programs\Research Dashboard`, adds that directory to the user PATH, and creates a Start menu shortcut. Open a new terminal after installation. Use `research --help` for the console CLI, `research gui` to open the dashboard, and `research home` to locate research. The research home is initialized on first use. Uninstall removes the program and its PATH entry while preserving research. The MSI is unsigned; no signing certificate is configured.
 
 The [CLI guide](docs/cli.md) covers project/tab creation, hierarchy creation, report reading/writing, reviewed completion/reopening, prerequisite tags and progress. Successful commands emit JSON. CLI and GUI enforce the same hierarchy, dependency and completion rules.
+
+## Updating an installed app
+
+Install a newer-version MSI over the existing per-user installation. The stable MSI UpgradeCode and MajorUpgrade rule replace the older program; research remains in its separate home. Close the dashboard first. There is no automatic update checker or downloader. Releases must increment the three-part version in Cargo.toml; the MSI build script reads that version so CLI and installer versions stay aligned. Older-version MSI installation is blocked.
