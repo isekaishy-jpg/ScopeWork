@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use eframe::egui::{self, Color32, RichText, Vec2};
+use eframe::egui::{self, Color32, Vec2};
 
 const GREEN: Color32 = Color32::from_rgb(0, 210, 48);
 const RED: Color32 = Color32::from_rgb(228, 48, 40);
@@ -76,174 +76,213 @@ struct Dashboard {
     selection: Option<(usize, usize)>,
 }
 
-fn meter(
-    ui: &mut egui::Ui,
-    row: &Row,
-    row_index: usize,
-    scale: usize,
-    selection: &mut Option<(usize, usize)>,
-) {
-    let colors = [GREEN, RED, GREY];
-    let states = ["Done", "In progress", "Not done"];
-    let total: usize = row.groups.iter().map(|g| g.1 * scale).sum();
-    let done: usize = row
-        .groups
-        .iter()
-        .filter(|g| g.2 == 0)
-        .map(|g| g.1 * scale)
-        .sum();
-    ui.strong(row.name);
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
-    ui.painter().line_segment(
-        [rect.left_top(), rect.right_top()],
-        egui::Stroke::new(2.0, Color32::from_gray(100)),
+fn bevel(p: &egui::Painter, r: egui::Rect, inset: bool) {
+    let (light, dark) = if inset {
+        (Color32::from_gray(110), Color32::WHITE)
+    } else {
+        (Color32::WHITE, Color32::from_gray(110))
+    };
+    p.line_segment(
+        [r.left_bottom(), r.left_top()],
+        egui::Stroke::new(1.0, light),
     );
-    ui.painter().line_segment(
-        [rect.left_top(), rect.left_bottom()],
-        egui::Stroke::new(2.0, Color32::from_gray(100)),
+    p.line_segment([r.left_top(), r.right_top()], egui::Stroke::new(1.0, light));
+    p.line_segment(
+        [r.right_top(), r.right_bottom()],
+        egui::Stroke::new(1.0, dark),
     );
-    ui.painter().line_segment(
-        [rect.left_bottom(), rect.right_bottom()],
-        egui::Stroke::new(1.0, Color32::WHITE),
+    p.line_segment(
+        [r.right_bottom(), r.left_bottom()],
+        egui::Stroke::new(1.0, dark),
     );
-    ui.painter().line_segment(
-        [rect.right_top(), rect.right_bottom()],
-        egui::Stroke::new(1.0, Color32::WHITE),
-    );
-
-    let inner = rect.shrink(3.0);
-    let mut x = inner.left();
-    for (g, &(name, count, status)) in row.groups.iter().enumerate() {
-        let width = (inner.width() - 9.0) * (count * scale) as f32 / total as f32;
-        let r =
-            egui::Rect::from_min_size(egui::pos2(x, inner.top()), Vec2::new(width, inner.height()));
-        let blocks = (width / 6.0).floor().max(1.0) as usize;
-        let step = width / blocks as f32;
-        for block in 0..blocks {
-            for line in 0..4 {
-                let cell = egui::Rect::from_min_size(
-                    egui::pos2(x + block as f32 * step, inner.top() + line as f32 * 8.0),
-                    Vec2::new((step - 1.5).max(0.5), 6.0),
-                );
-                ui.painter().rect_filled(cell, 0.0, colors[status]);
-            }
-        }
-        let response = ui.interact(r, ui.id().with((row_index, g)), egui::Sense::click());
-        if response.clicked() {
-            *selection = Some((row_index, g));
-        }
-        if *selection == Some((row_index, g)) {
-            ui.painter().rect_stroke(
-                r,
-                0.0,
-                egui::Stroke::new(1.0, Color32::WHITE),
-                egui::StrokeKind::Inside,
-            );
-        }
-        response.on_hover_text(format!(
-            "{name} · {} functions · {}",
-            count * scale,
-            states[status]
-        ));
-        x += width + 3.0;
-    }
-    ui.horizontal(|ui| {
-        ui.monospace(format!("Total: {total}"));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.monospace(format!("Done: {done}"));
-        });
-    });
-    let current = row.groups.iter().find(|g| g.2 == 1);
-    ui.label(match current {
-        Some((name, count, _)) => format!("Current chunk: {name} · {} funcs", count * scale),
-        None => "Current chunk: —".to_owned(),
-    });
 }
-
+fn text(p: &egui::Painter, x: f32, y: f32, s: impl ToString, color: Color32) {
+    p.text(
+        egui::pos2(x, y),
+        egui::Align2::LEFT_CENTER,
+        s,
+        egui::FontId::proportional(11.0),
+        color,
+    );
+}
 impl eframe::App for Dashboard {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        let data = rows();
-        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(212, 208, 200))
+                    .inner_margin(8.0),
+            )
+            .show(ctx, |ui| {
+                let origin = ui.min_rect().min;
+                let w = ui.available_width();
+                let p = ui.painter().clone();
+                let black = Color32::BLACK;
+                let bg = Color32::from_rgb(212, 208, 200);
+                let at = |x, y| origin + Vec2::new(x, y);
+                let rect = |x, y, width, height| {
+                    egui::Rect::from_min_size(at(x, y), Vec2::new(width, height))
+                };
                 for (i, name) in ["Stock", "Forever"].iter().enumerate() {
+                    let r = rect(i as f32 * 60.0, 2.0, 60.0, 22.0);
+                    p.rect_filled(r, 0.0, bg);
+                    bevel(&p, r, false);
+                    if i == self.project {
+                        p.line_segment(
+                            [r.left_bottom(), r.right_bottom()],
+                            egui::Stroke::new(2.0, bg),
+                        );
+                    }
+                    text(&p, r.left() + 12.0, r.center().y, *name, black);
                     if ui
-                        .add_sized(
-                            [80.0, 24.0],
-                            egui::Button::new(*name).selected(self.project == i),
-                        )
+                        .interact(r, ui.id().with(i), egui::Sense::click())
                         .clicked()
                     {
                         self.project = i;
                         self.selection = None;
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("Sample data").size(11.0));
-                });
-            });
-        });
-        let scale = self.project + 1;
-        let total: usize = data
-            .iter()
-            .flat_map(|r| r.groups.iter())
-            .map(|g| g.1 * scale)
-            .sum();
-        let done: usize = data
-            .iter()
-            .flat_map(|r| r.groups.iter())
-            .filter(|g| g.2 == 0)
-            .map(|g| g.1 * scale)
-            .sum();
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.monospace(format!("Total functions: {total}    Done: {done}"));
-                ui.separator();
-                for (color, name) in [(GREEN, "Done"), (RED, "In progress"), (GREY, "Not done")] {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(9.0), egui::Sense::hover());
-                    ui.painter().rect_filled(r, 0.0, color);
-                    ui.label(name);
-                }
-            });
-            if let Some((r, g)) = self.selection {
-                let (name, count, state) = data[r].groups[g];
-                ui.label(format!(
-                    "{} / {name}: {} functions · {}",
-                    data[r].name,
-                    count * scale,
-                    ["Done", "In progress", "Not done"][state]
-                ));
-            } else {
-                ui.label("Hover or click a chunk for its function count.");
-            }
-        });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Add meters without adding panels; wrap to the available page width.
-            let columns = (ui.available_width() / 250.0).floor().max(1.0) as usize;
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (row_number, chunk) in data.chunks(columns).enumerate() {
-                    ui.columns(columns, |cols| {
-                        for (column, row) in chunk.iter().enumerate() {
-                            let ui = &mut cols[column];
-                            egui::Frame::new()
-                                .stroke(egui::Stroke::new(1.0, Color32::from_gray(128)))
-                                .inner_margin(7.0)
-                                .show(ui, |ui| {
-                                    meter(
-                                        ui,
-                                        row,
-                                        row_number * columns + column,
-                                        scale,
-                                        &mut self.selection,
-                                    );
-                                });
+                text(
+                    &p,
+                    origin.x + w - 72.0,
+                    origin.y + 12.0,
+                    "Sample data",
+                    Color32::from_gray(85),
+                );
+                let body = rect(0.0, 25.0, w, 550.0);
+                bevel(&p, body, false);
+                // One recessed field of closely stacked meters, like the reference's CPU meters rotated 90 degrees.
+                let field = rect(10.0, 43.0, w - 20.0, 466.0);
+                bevel(&p, field, true);
+                p.rect_filled(rect(18.0, 37.0, 90.0, 13.0), 0.0, bg);
+                text(
+                    &p,
+                    origin.x + 22.0,
+                    origin.y + 43.0,
+                    "Function groups",
+                    black,
+                );
+                text(
+                    &p,
+                    origin.x + 20.0,
+                    origin.y + 61.0,
+                    "Architecture / chunk",
+                    black,
+                );
+                text(&p, origin.x + w - 116.0, origin.y + 61.0, "Funcs", black);
+                text(&p, origin.x + w - 65.0, origin.y + 61.0, "Total", black);
+                let scale = self.project + 1;
+                let data = rows();
+                let colors = [GREEN, RED, GREY];
+                let mut y = 76.0;
+                let mut total = 0;
+                let mut done = 0;
+                for (ri, row) in data.iter().enumerate() {
+                    let category_total: usize = row.groups.iter().map(|g| g.1 * scale).sum();
+                    total += category_total;
+                    for (gi, &(name, n, status)) in row.groups.iter().enumerate() {
+                        if status == 0 {
+                            done += n * scale;
                         }
-                    });
-                    ui.add_space(5.0);
+                        let r = rect(176.0, y, w - 307.0, 13.0);
+                        p.rect_filled(r, 0.0, black);
+                        bevel(&p, r, true);
+                        let inner = r.shrink(2.0);
+                        let cells = (inner.width() / 4.0).floor() as usize;
+                        for k in 0..cells {
+                            let cell = egui::Rect::from_min_size(
+                                egui::pos2(inner.left() + k as f32 * 4.0, inner.top()),
+                                Vec2::new(2.5, inner.height()),
+                            );
+                            p.rect_filled(cell, 0.0, colors[status]);
+                        }
+                        let label = if gi == 0 {
+                            format!("{} / {name}", row.name)
+                        } else {
+                            format!("    {name}")
+                        };
+                        text(&p, origin.x + 20.0, origin.y + y + 6.5, label, black);
+                        text(
+                            &p,
+                            origin.x + w - 116.0,
+                            origin.y + y + 6.5,
+                            format!("{}", n * scale),
+                            black,
+                        );
+                        if gi == 0 {
+                            text(
+                                &p,
+                                origin.x + w - 65.0,
+                                origin.y + y + 6.5,
+                                category_total.to_string(),
+                                black,
+                            );
+                        }
+                        let hit =
+                            ui.interact(r, ui.id().with((ri, gi, "meter")), egui::Sense::click());
+                        if hit.clicked() {
+                            self.selection = Some((ri, gi));
+                        }
+                        if self.selection == Some((ri, gi)) {
+                            p.rect_stroke(
+                                r.expand(1.0),
+                                0.0,
+                                egui::Stroke::new(1.0, Color32::from_rgb(0, 0, 128)),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        hit.on_hover_text(format!(
+                            "{} / {name}: {} functions - {}",
+                            row.name,
+                            n * scale,
+                            ["Done", "In progress", "Not done"][status]
+                        ));
+                        y += 17.0;
+                    }
+                    y += 3.0;
                 }
+                let selected = self.selection.or_else(|| {
+                    data.iter().enumerate().find_map(|(r, row)| {
+                        row.groups.iter().position(|g| g.2 == 1).map(|g| (r, g))
+                    })
+                });
+                text(
+                    &p,
+                    origin.x + 16.0,
+                    origin.y + 527.0,
+                    format!("Total functions: {total}    Done: {done}"),
+                    black,
+                );
+                if let Some((r, g)) = selected {
+                    let (name, count, _) = data[r].groups[g];
+                    text(
+                        &p,
+                        origin.x + 16.0,
+                        origin.y + 547.0,
+                        format!(
+                            "{} chunk: {} / {name}    Functions: {}",
+                            if self.selection.is_some() {
+                                "Selected"
+                            } else {
+                                "Current"
+                            },
+                            data[r].name,
+                            count * scale
+                        ),
+                        black,
+                    );
+                }
+                let mut x = w - 252.0;
+                for (c, label) in [(GREEN, "Done"), (RED, "In progress"), (GREY, "Not done")] {
+                    p.rect_filled(rect(x, 523.0, 8.0, 8.0), 0.0, c);
+                    text(&p, origin.x + x + 12.0, origin.y + 527.0, label, black);
+                    x += match label {
+                        "In progress" => 94.0,
+                        _ => 70.0,
+                    };
+                }
+                ui.allocate_space(Vec2::new(w, 578.0));
             });
-        });
     }
 }
 
@@ -252,12 +291,24 @@ fn main() -> eframe::Result {
         "Research Dashboard",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([840.0, 380.0])
-                .with_min_inner_size([550.0, 380.0]),
+                .with_inner_size([800.0, 600.0])
+                .with_min_inner_size([720.0, 600.0]),
             persist_window: false,
             ..Default::default()
         },
         Box::new(|cc| {
+            let mut fonts = egui::FontDefinitions::default();
+            if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/tahoma.ttf") {
+                fonts
+                    .font_data
+                    .insert("Tahoma".into(), egui::FontData::from_owned(bytes).into());
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .insert(0, "Tahoma".into());
+                cc.egui_ctx.set_fonts(fonts);
+            }
             let mut visuals = egui::Visuals::light();
             visuals.panel_fill = Color32::from_rgb(192, 192, 192);
             visuals.override_text_color = Some(Color32::BLACK);
