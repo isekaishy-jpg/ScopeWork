@@ -188,10 +188,16 @@ fn led(p: &egui::Painter, r: egui::Rect, complete: usize, total: usize, color: C
         complete.min(total) as f32 / total as f32
     };
     let lit = (fraction * cells as f32).floor() as usize;
-    let dark = Color32::from_rgb(color.r() / 3, color.g() / 3, color.b() / 3);
+    let unfinished = Color32::from_rgb(76, 16, 13);
     for i in 0..cells {
         // A black horizontal seam separates the two banks of the classic meter.
-        let cell_color = if i < lit { color } else { dark };
+        let cell_color = if i < lit {
+            GREEN
+        } else if i == lit && color == YELLOW {
+            YELLOW
+        } else {
+            unfinished
+        };
         let half = (inner.height() - 1.0) / 2.0;
         for bank in 0..2 {
             p.rect_filled(
