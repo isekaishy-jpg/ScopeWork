@@ -4,7 +4,7 @@ use eframe::egui::{self, Color32, Vec2};
 
 const GREEN: Color32 = Color32::from_rgb(0, 210, 48);
 const RED: Color32 = Color32::from_rgb(228, 48, 40);
-const GREY: Color32 = Color32::from_rgb(82, 82, 82);
+const YELLOW: Color32 = Color32::from_rgb(238, 193, 55);
 
 struct Row {
     name: &'static str,
@@ -188,7 +188,7 @@ fn led(p: &egui::Painter, r: egui::Rect, complete: usize, total: usize, color: C
         complete.min(total) as f32 / total as f32
     };
     let lit = (fraction * cells as f32).floor() as usize;
-    let dark = Color32::from_rgb(color.r() / 6, color.g() / 6, color.b() / 6);
+    let dark = Color32::from_rgb(color.r() / 3, color.g() / 3, color.b() / 3);
     for i in 0..cells {
         // A black horizontal seam separates the two banks of the classic meter.
         let cell_color = if i < lit { color } else { dark };
@@ -392,6 +392,12 @@ impl eframe::App for Dashboard {
                     }
                 }
                 let total: usize = counts.iter().sum();
+                let total_chunks: usize = data.iter().map(|r| r.groups.len()).sum();
+                let done_chunks = data
+                    .iter()
+                    .flat_map(|r| r.groups.iter())
+                    .filter(|g| g.2 == 0)
+                    .count();
                 let selected = self.selection.unwrap_or((0, 2));
                 let (name, n, status, completed) = data[selected.0].groups[selected.1];
                 let top = 82.0;
@@ -447,13 +453,13 @@ impl eframe::App for Dashboard {
                     ),
                     completed,
                     n,
-                    [GREEN, RED, GREY][status],
+                    [GREEN, YELLOW, RED][status],
                 );
                 text(
                     &p,
                     well.left() + 7.0,
                     well.top() + 164.0,
-                    format!("{} functions", n * scale),
+                    format!("Funcs: {} / {}", completed * scale, n * scale),
                     GREEN,
                 );
                 let bank = r(149.0, top, w - 164.0, meter_h);
@@ -473,7 +479,7 @@ impl eframe::App for Dashboard {
                             egui::pos2(x, y + 15.0),
                             Vec2::new(col_width, 32.0),
                         );
-                        led(&p, meter, finished, num, [GREEN, RED, GREY][state]);
+                        led(&p, meter, finished, num, [GREEN, YELLOW, RED][state]);
                         text(
                             &p,
                             x,
@@ -485,14 +491,14 @@ impl eframe::App for Dashboard {
                             &p,
                             x,
                             meter.bottom() + 10.0,
-                            format!("Chunk: {}", ["Done", "In progress", "Not done"][state]),
+                            format!("Chunk: {} / {total_chunks}", index + 1),
                             Color32::BLACK,
                         );
                         text(
                             &p,
                             x,
                             meter.bottom() + 24.0,
-                            format!("Functions: {}", num * scale),
+                            format!("Funcs: {} / {}", finished * scale, num * scale),
                             Color32::from_gray(65),
                         );
                         let hit = ui.interact(
@@ -546,7 +552,7 @@ impl eframe::App for Dashboard {
                 for (i, (label, value)) in [
                     ("Architecture", data[selected.0].name.to_string()),
                     ("Chunk", name.to_string()),
-                    ("Functions", format!("{}", n * scale)),
+                    ("Funcs", format!("{} / {}", completed * scale, n * scale)),
                     (
                         "Status",
                         ["Done", "In progress", "Not done"][status].to_string(),
@@ -560,8 +566,11 @@ impl eframe::App for Dashboard {
                 }
                 let mut sx = 0.0;
                 for (width, label) in [
-                    (w * 0.34, format!("Functions: {total}")),
-                    (w * 0.33, format!("Done: {}%", counts[0] * 100 / total)),
+                    (w * 0.34, format!("Funcs: {} / {total}", counts[0])),
+                    (
+                        w * 0.33,
+                        format!("Chunks done: {done_chunks} / {total_chunks}"),
+                    ),
                     (w * 0.33, "Sample data".to_string()),
                 ] {
                     let sr = r(sx, h - 20.0, width - 2.0, 19.0);
