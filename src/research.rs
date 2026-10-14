@@ -14,7 +14,7 @@ pub enum Kind {
     Function,
 }
 impl Kind {
-    fn completion_criteria(self) -> &'static str {
+    pub fn completion_criteria(self) -> &'static str {
         match self {
             Self::Function => {
                 "Explain this function's behavior, inputs, outputs, side effects, boundaries and connections, supported by evidence. Complete only the prerequisites necessary to establish this function's behavior."
@@ -148,46 +148,73 @@ fn open_folder(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn rebase_links(text: &str) -> String {
-    let mut output = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("](") {
-        output.push_str(&rest[..start + 2]);
-        rest = &rest[start + 2..];
-        let Some(end) = rest.find(')') else {
-            output.push_str(rest);
-            return output;
-        };
-        let target = &rest[..end];
-        if !target.is_empty()
-            && !target.starts_with('#')
-            && !target.starts_with('/')
-            && !target.starts_with('\\')
-            && !target.contains(':')
-        {
-            if target.starts_with('<') {
-                output.push_str("<../");
-                output.push_str(&target[1..]);
-            } else {
-                output.push_str("../");
-                output.push_str(target);
-            }
-        } else {
-            output.push_str(target);
-        }
-        output.push(')');
-        rest = &rest[end + 1..];
-    }
-    output.push_str(rest);
-    output
-}
-
 pub struct Library {
     pub root: PathBuf,
     pub projects: Vec<Project>,
-    _lock: std::fs::File,
+    _lock: Option<std::fs::File>,
 }
 impl Library {
+    pub fn report_token(&self, p: usize, id: u64) -> Result<String> {
+        let content = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
+        Ok(hash(&format!("{}\n{content}", self.projects[p].revision)))
+    }
+    pub fn release(&mut self) {
+        self._lock = None;
+    }
+    fn fresh(&self) -> Result<Self> {
+        let mut fresh = Self::open(self.root.clone())?;
+        fresh.projects.sort_by_key(|p| {
+            self.projects
+                .iter()
+                .position(|old| old.id == p.id)
+                .unwrap_or(usize::MAX)
+        });
+        Ok(fresh)
+    }
+    fn write_current<T>(&mut self, operation: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let mut fresh = self.fresh()?;
+        let result = operation(&mut fresh);
+        fresh.release();
+        *self = fresh;
+        result
+    }
+    pub fn refresh(&mut self) -> Result<()> {
+        let mut fresh = self.fresh()?;
+        fresh.release();
+        *self = fresh;
+        Ok(())
+    }
+    pub fn set_binary(&mut self, p: usize, binary: &str) -> Result<()> {
+        if self._lock.is_none() {
+            return self.write_current(|l| l.set_binary(p, binary));
+        }
+        if binary.trim().is_empty() {
+            return Err("Binary identity cannot be empty.".into());
+        }
+        if self.projects[p]
+            .nodes
+            .iter()
+            .any(|n| n.kind == Kind::Function)
+        {
+            return Err("Binary identity is locked after adding functions.".into());
+        }
+        self.projects[p].binary = binary.into();
+        let ids: Vec<_> = self.projects[p].nodes.iter().map(|n| n.id).collect();
+        for id in ids {
+            let (body, evidence) = self.read(p, id)?;
+            self.write_report(p, id, &body, &evidence)?;
+            let n = self.projects[p]
+                .nodes
+                .iter_mut()
+                .find(|n| n.id == id)
+                .unwrap();
+            n.accepted_hash = None;
+            n.status = Status::InProgress;
+            n.revision += 1;
+        }
+        self.projects[p].revision += 1;
+        self.persist(p)
+    }
     pub fn open(root: PathBuf) -> Result<Self> {
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         let lock = std::fs::OpenOptions::new()
@@ -198,12 +225,12 @@ impl Library {
             .open(root.join(".library.lock"))
             .map_err(|e| e.to_string())?;
         lock.try_lock().map_err(|_| {
-            "This research library is already open in another app instance.".to_string()
+            "Research library is busy with another operation. Retry shortly.".to_string()
         })?;
         let mut lib = Self {
             root,
             projects: vec![],
-            _lock: lock,
+            _lock: Some(lock),
         };
         for e in fs::read_dir(&lib.root).map_err(|e| e.to_string())? {
             let e = e.map_err(|e| e.to_string())?;
@@ -243,6 +270,11 @@ impl Library {
                 if p.nodes.iter().filter(|n| n.kind == Kind::App).count() != 1 {
                     return Err("Project must contain exactly one app report".into());
                 }
+                if !p.nodes.iter().any(|n| n.id == 0 && n.kind == Kind::App)
+                    || p.nodes.iter().any(|n| n.id >= p.next_id)
+                {
+                    return Err("Invalid app ID or next node ID".into());
+                }
                 ensure_folders(&lib.root.join(&p.id))?;
                 lib.projects.push(p);
             }
@@ -266,8 +298,11 @@ impl Library {
         });
         for p in 0..lib.projects.len() {
             lib.validate_dependencies(p, &lib.projects[p].dependencies)?;
-            lib.migrate_layout(p)?;
-            lib.sync_dependency_files(p)?;
+            for node in &lib.projects[p].nodes {
+                if !lib.path(p, node.id)?.is_file() {
+                    return Err("Canonical report missing. Carry-over is manual; automatic migration is not supported.".into());
+                }
+            }
         }
         Ok(lib)
     }
@@ -281,136 +316,10 @@ impl Library {
         )?;
         self.sync_dependency_files(p)
     }
-    fn migrate_layout(&mut self, p: usize) -> Result<()> {
-        let dir = self.dir(p);
-        let nodes = self.projects[p].nodes.clone();
-        let mut moved = false;
-        for n in &nodes {
-            let legacy = match n.kind {
-                Kind::App => continue,
-                Kind::Architecture => dir.join(format!("architectures/{:06}.md", n.id)),
-                Kind::Chunk => dir.join(format!("chunks/{:06}.md", n.id)),
-                Kind::Function => dir.join(format!("functions/{:08X}.md", n.rva.unwrap())),
-            };
-            let target = self.path(p, n.id)?;
-            if legacy.exists() {
-                if target.exists() {
-                    return Err(format!(
-                        "Both legacy and canonical reports exist: {}. Neither was overwritten.",
-                        target.display()
-                    ));
-                }
-                fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
-                // Both paths are constructed only from the validated project and node IDs.
-                let root = dir.canonicalize().map_err(|e| e.to_string())?;
-                if !legacy
-                    .canonicalize()
-                    .map_err(|e| e.to_string())?
-                    .starts_with(&root)
-                    || !target
-                        .parent()
-                        .unwrap()
-                        .canonicalize()
-                        .map_err(|e| e.to_string())?
-                        .starts_with(&root)
-                {
-                    return Err("Report migration leaves project directory".into());
-                }
-                fs::rename(&legacy, &target).map_err(|e| e.to_string())?;
-                let (body, evidence) = self.read(p, n.id)?;
-                self.write_report(p, n.id, &rebase_links(&body), &rebase_links(&evidence))?;
-                let item = self.projects[p]
-                    .nodes
-                    .iter_mut()
-                    .find(|v| v.id == n.id)
-                    .unwrap();
-                if item.status == Status::Complete {
-                    item.status = Status::InProgress;
-                }
-                item.accepted_hash = None;
-                item.revision += 1;
-                moved = true;
-            }
-            if n.kind == Kind::Function {
-                fs::create_dir_all(target.parent().unwrap().join("data"))
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        // Rebuild generated source-report links after changing canonical paths.
-        if moved {
-            for n in nodes.iter().filter(|n| n.kind != Kind::Function) {
-                let (body, evidence) = self.read(p, n.id)?;
-                self.write_report(p, n.id, &body, &evidence)?;
-                let item = self.projects[p]
-                    .nodes
-                    .iter_mut()
-                    .find(|v| v.id == n.id)
-                    .unwrap();
-                if item.status == Status::Complete {
-                    item.status = Status::InProgress;
-                }
-                item.accepted_hash = None;
-            }
-            self.projects[p].revision += 1;
-            self.persist(p)?;
-        }
-        // Shared tool databases have an unambiguous home. Unowned historical data
-        // is retained for assignment rather than attributed to an invented function.
-        for (from, to) in [
-            ("data/analysis", "tools/workspaces/analysis"),
-            ("data/logs", "tools/logs/legacy"),
-            ("data/scratch", "tools/scratch/legacy"),
-            ("data/captures", "tools/unassigned/captures"),
-            ("data/exports", "tools/unassigned/exports"),
-            ("evidence", "tools/unassigned/evidence"),
-        ] {
-            let source = dir.join(from);
-            let target = dir.join(to);
-            if source.is_dir() {
-                if fs::read_dir(&source)
-                    .map_err(|e| e.to_string())?
-                    .next()
-                    .is_none()
-                {
-                    fs::remove_dir(&source).map_err(|e| e.to_string())?;
-                    continue;
-                }
-                if target.exists() {
-                    return Err(format!(
-                        "Migration destination already exists: {}. Existing data was preserved.",
-                        target.display()
-                    ));
-                }
-                fs::create_dir_all(target.parent().unwrap()).map_err(|e| e.to_string())?;
-                let root = dir.canonicalize().map_err(|e| e.to_string())?;
-                if !source
-                    .canonicalize()
-                    .map_err(|e| e.to_string())?
-                    .starts_with(&root)
-                    || !target
-                        .parent()
-                        .unwrap()
-                        .canonicalize()
-                        .map_err(|e| e.to_string())?
-                        .starts_with(&root)
-                {
-                    return Err("Data migration leaves project directory".into());
-                }
-                fs::rename(source, target).map_err(|e| e.to_string())?;
-            }
-        }
-        let old = dir.join("data");
-        if old.is_dir()
-            && fs::read_dir(&old)
-                .map_err(|e| e.to_string())?
-                .next()
-                .is_none()
-        {
-            fs::remove_dir(old).map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    }
     pub fn create(&mut self, id: &str, name: &str, binary: &str) -> Result<()> {
+        if self._lock.is_none() {
+            return self.write_current(|l| l.create(id, name, binary));
+        }
         if !valid_id(id) || name.trim().is_empty() {
             return Err("Use a project ID with lowercase letters, digits, and hyphens, and a nonempty name.".into());
         }
@@ -578,6 +487,9 @@ impl Library {
         Status::Complete
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
+        if self._lock.is_none() {
+            return self.write_current(|l| l.add(p, parent, name, rva));
+        }
         if name.trim().is_empty() {
             return Err("Enter a name.".into());
         }
@@ -593,8 +505,11 @@ impl Library {
             if self.projects[p].binary.trim().is_empty() {
                 return Err("Set the project's binary build/hash before adding functions.".into());
             }
-            let x = u32::from_str_radix(rva.trim().trim_start_matches("0x"), 16)
-                .map_err(|_| "Enter an RVA in hexadecimal, not a VA.")?;
+            let x = u32::from_str_radix(
+                rva.trim().trim_start_matches("0x").trim_start_matches("0X"),
+                16,
+            )
+            .map_err(|_| "Enter an RVA in hexadecimal, not a VA.")?;
             if self.projects[p].nodes.iter().any(|n| n.rva == Some(x)) {
                 return Err("That function already has a canonical file in this project.".into());
             }
@@ -637,8 +552,11 @@ impl Library {
         complete: bool,
         expected: &str,
     ) -> Result<()> {
-        let current = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
-        if hash(&current) != expected {
+        if self._lock.is_none() {
+            return self
+                .write_current(|l| l.save_report(p, id, body, evidence, complete, expected));
+        }
+        if self.report_token(p, id)? != expected {
             return Err("This report changed outside the editor. Reload it before saving; your text has not been overwritten.".into());
         }
         let n = self.projects[p].nodes.iter().find(|n| n.id == id).unwrap();
@@ -735,11 +653,14 @@ pub struct ResearchUi {
 }
 impl ResearchUi {
     pub fn new() -> Self {
-        let root = std::env::var_os("RESEARCH_DASHBOARD_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("data/projects"));
-        let (library, message) = match Library::open(root) {
-            Ok(l) => (Some(l), String::new()),
+        let (library, message) = match crate::paths::home(None)
+            .and_then(|h| crate::paths::initialize(&h).map(|()| h))
+            .and_then(|h| Library::open(h.join("projects")))
+        {
+            Ok(mut l) => {
+                l.release();
+                (Some(l), String::new())
+            }
             Err(e) => (None, e),
         };
         let mut s = Self {
@@ -776,8 +697,7 @@ impl ResearchUi {
                 self.node = id;
                 self.body = body;
                 self.evidence = evidence;
-                self.loaded_hash =
-                    hash(&fs::read_to_string(lib.path(p, id).unwrap()).unwrap_or_default());
+                self.loaded_hash = lib.report_token(p, id).unwrap_or_default();
                 self.complete = lib.effective(p, id) == Status::Complete;
                 self.binary = lib.projects[p].binary.clone();
                 self.dependency_rvas = lib.projects[p]
@@ -830,9 +750,7 @@ impl ResearchUi {
                 let locked=project.nodes.iter().any(|n|n.kind==Kind::Function);
                 ui.add_enabled(!locked,egui::TextEdit::singleline(&mut self.binary).desired_width(f32::INFINITY));
                 if ui.add_enabled(!locked&&!self.dirty,egui::Button::new("Save binary identity")).clicked(){
-                    let lib=self.library.as_mut().unwrap();lib.projects[self.project].binary=self.binary.clone();
-                    let ids:Vec<_>=lib.projects[self.project].nodes.iter().map(|n|n.id).collect();
-                    let result=(||->Result<()>{for id in ids {let(b,e)=lib.read(self.project,id)?;lib.write_report(self.project,id,&b,&e)?;let n=lib.projects[self.project].nodes.iter_mut().find(|n|n.id==id).unwrap();n.accepted_hash=None;if n.status==Status::Complete{n.status=Status::InProgress;}}lib.persist(self.project)})();
+                    let result=self.library.as_mut().unwrap().set_binary(self.project,&self.binary);
                     match result{Ok(())=>nav=Some((self.project,self.node)),Err(e)=>self.message=e}
                 }
             });
@@ -911,6 +829,37 @@ pub struct ProjectView {
     pub meters: Vec<Meter>,
 }
 impl ResearchUi {
+    pub fn refresh_library(&mut self) {
+        if self.library.is_none() {
+            match crate::paths::home(None).and_then(|h| Library::open(h.join("projects"))) {
+                Ok(mut lib) => {
+                    lib.release();
+                    self.library = Some(lib);
+                    self.project = 0;
+                    self.node = 0;
+                }
+                Err(e) => {
+                    self.message = e;
+                    self.open = true;
+                    return;
+                }
+            }
+        }
+        if let Some(lib) = &mut self.library {
+            match lib.refresh() {
+                Ok(()) => {
+                    self.changed = true;
+                    if !self.dirty {
+                        self.load(self.project, self.node);
+                    }
+                }
+                Err(e) => {
+                    self.message = e;
+                    self.open = true;
+                }
+            }
+        }
+    }
     pub fn snapshot(&self) -> Vec<ProjectView> {
         let Some(lib) = &self.library else {
             return vec![];
@@ -1112,7 +1061,7 @@ impl Library {
                 ("prereq.toml", toml::to_string_pretty(&prereq)),
             ] {
                 let content = format!(
-                    "# Managed by Research Task Manager. Edit through the app or --set-prerequisites.\n{}",
+                    "# Managed by Research Task Manager. Edit through the app or research deps set.\n{}",
                     body.map_err(|e| e.to_string())?
                 );
                 let path = folder.join(name);
@@ -1173,6 +1122,9 @@ impl Library {
         }
     }
     pub fn set_dependencies(&mut self, p: usize, id: u64, rvas: &str) -> Result<()> {
+        if self._lock.is_none() {
+            return self.write_current(|l| l.set_dependencies(p, id, rvas));
+        }
         if !self.projects[p]
             .nodes
             .iter()

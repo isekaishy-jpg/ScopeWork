@@ -14,8 +14,10 @@ Build one Rust GUI for managing isolated binary research projects. Initial proje
 - Keep source installations and binaries read-only. Do not commit binaries, private captures, credentials, or research datasets.
 - Preserve provenance and distinguish observed, specification-defined, and inferred claims.
 - Do not add tests or run test commands unless the user asks for testing or verification.
-- File narrow complaints about the app as individual Markdown reports in the single repository-root complaints/ folder. Follow complaints/README.md; filing the report is the entire process.
+- File narrow complaints about the app as individual Markdown reports in the single complaints/ folder in the active research home (`research home` prints it). Follow that folder's README.md; filing the report is the entire process.
 
 - Every research project owns tools/profiles, tools/scripts, tools/instrumentation and tools/bin. Shared tool databases and working data belong in tools/workspaces, tools/logs or tools/scratch. Function-specific captures, exports, logs and evidence belong in that function's data/ folder. Do not create project-level data/evidence dumps or parallel research reports. Canonical chunk and architecture reports are <kind>/<id>/research.md; the app report is app.md.
 
-- Maintain function prerequisites through the app or --set-prerequisites. Each function has dep.toml and prereq.toml as synchronized generated views of the project dependency graph. Do not duplicate shared function research or count it twice. Prerequisite changes require dependent-report review; adding a use does not reopen the shared prerequisite.
+- Maintain function prerequisites through the app or research deps set. Each function has dep.toml and prereq.toml as synchronized generated views of the project dependency graph. Do not duplicate shared function research or count it twice. Prerequisite changes require dependent-report review; adding a use does not reopen the shared prerequisite.
+
+- Use the documented research CLI for catalog/report mutations; read docs/cli.md. Resolve the home with research home; never assume the checkout is the data home. Do not migrate or import historical material automatically. Carry-over is manual. Keep app installation separate from research; uninstall must preserve user research.

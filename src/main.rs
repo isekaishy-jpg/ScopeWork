@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod research;
+use research_dashboard::research;
 
 use eframe::egui::{self, Color32, Vec2};
 
@@ -721,7 +721,7 @@ impl eframe::App for Dashboard {
                                     )
                                     .clicked()
                             {
-                                self.research.changed = true;
+                                self.research.refresh_library();
                                 self.menu = None;
                             }
                             let label = match menu {
@@ -785,39 +785,6 @@ impl eframe::App for Dashboard {
 }
 
 fn main() -> eframe::Result {
-    let arguments: Vec<String> = std::env::args().collect();
-    if arguments.get(1).is_some_and(|a| a == "--set-prerequisites") {
-        if arguments.len() < 4 {
-            eprintln!("Usage: --set-prerequisites PROJECT FUNCTION_RVA [PREREQUISITE_RVA ...]");
-            std::process::exit(2);
-        }
-        let root = std::env::var_os("RESEARCH_DASHBOARD_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/projects")
-            });
-        let result = research::Library::open(root).and_then(|mut lib| {
-            lib.set_dependencies_by_rva(&arguments[2], &arguments[3], &arguments[4..].join(","))
-        });
-        if let Err(error) = result {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
-
-    if std::env::args().any(|arg| arg == "--migrate-library") {
-        let root = std::env::var_os("RESEARCH_DASHBOARD_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/projects")
-            });
-        if let Err(error) = research::Library::open(root) {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
     eframe::run_native(
         "Research Dashboard",
         eframe::NativeOptions {
@@ -871,8 +838,9 @@ fn main() -> eframe::Result {
                 }
             }
             // Local preview data stays outside Git; no historical completion states are accepted.
-            let preview_path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/stock-preview.json");
+            let preview_path = research_dashboard::paths::home(None)
+                .unwrap_or_default()
+                .join("stock-preview.json");
             if let Ok(bytes) = std::fs::read(preview_path) {
                 if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                     if let Some(meters) = value["meters"]

@@ -9,7 +9,7 @@ Open **View > Research records...**. Stock and Forever start with separate app r
 Each project owns a complete hierarchy:
 
 ```
-data/projects/<project-id>/
+%LOCALAPPDATA%/ResearchDashboard/projects/<project-id>/
   project.json
   app.md
   architectures/<id>/research.md
@@ -47,15 +47,15 @@ Keep each assignment's scope fixed. Record missing knowledge outside it as a sep
 
 Use the completion checkbox only after reviewing the report. Completion requires a written report, function evidence where applicable, and every required child complete. Empty parent reports and parents without children cannot be completed. Changing a child or adding a child reopens completed ancestors. SHA-256 checks detect externally changed completed files, and the editor rejects saves over a concurrently changed file. Use View > Refresh research progress after external edits. Completion is a human attestation supported by these structural checks, not automated judgment of research quality.
 
-Save or discard edits before navigating. Unsaved report edits prevent closing the app. One application instance can write the research library at a time.
+Save or discard edits before navigating. Unsaved report edits prevent closing the app. GUI and CLI share short exclusive write operations. The GUI can stay open while agents work; use View > Refresh research progress to display their changes. Stale report or project revisions require reloading and review before saving.
 
 When a project has architecture records, its dashboard uses them: one meter per architecture, one existing-size segment per chunk (green complete, yellow in progress, dim red not started), and separate function counts. Double-click a meter to open its architecture report. The App report's completion status is separate from function coverage. The existing previews remain explicitly labeled for projects without architecture records; no historical completion claims are imported.
 
-All research data is local and excluded from Git. Default root is `data/projects` in this checkout; set `RESEARCH_DASHBOARD_HOME` to choose another library root before launching. Projects have separate IDs, trees, metadata, evidence directories, and document membership. Do not copy research between projects without an explicit evidence reference and scope review.
+Research lives outside the installation and checkout. The default home is `%LOCALAPPDATA%\ResearchDashboard`, containing `projects/` and a shared `complaints/` folder. Set `RESEARCH_DASHBOARD_HOME` to another absolute home before launching, or use CLI `--home PATH`. Projects have separate IDs, trees, metadata, evidence directories, and document membership. Do not copy research between projects without an explicit evidence reference and scope review.
 
 ## Run
 
-Agents can file narrow app complaints in [complaints/](complaints/README.md), one Markdown report per issue. This is a single shared folder across all research projects; filing the report is the entire process.
+Agents file narrow app complaints in the single `complaints/` folder under the research home, one Markdown report per issue. `research home` prints its path. Filing the report is the entire process. The [folder guide](complaints/README.md) is bundled into new homes.
 
 ```powershell
 cargo run --release
@@ -67,11 +67,11 @@ Options > Dark mode switches palettes and saves the choice. Other menus provide 
 
 ## Preview mode
 
-The local ignored `data/stock-preview.json` file supplies the Stock assumptions preview. Its function counts came from the existing index; its chunk counts are hypothetical. Forever's preview uses illustrative data. Preview meters allow segment counts to be changed through their context menu. Canonical meters derive segment counts from their chunk records.
+The optional `stock-preview.json` file in the research home supplies the Stock assumptions preview. Its function counts came from the existing index; its chunk counts are hypothetical. Forever's preview uses illustrative data. Preview meters allow segment counts to be changed through their context menu. Canonical meters derive segment counts from their chunk records.
 
 Every function has its own folder: `research.md` plus `data/`. Use relative `data/<file>` links from that report. There is no new project-level evidence or data directory. Shared tool state lives under `tools/workspaces`, `tools/logs`, and `tools/scratch`. The research editor has an **Open this function's data folder** button.
 
-Existing flat canonical reports migrate to the folder layout when the library opens. Generated source-report links are rebuilt; ordinary relative inline Markdown links are rebased. Affected completion records reopen for review. The app refuses to overwrite a conflicting destination. Empty obsolete folders are removed; any historical unowned captures/exports are preserved under `tools/unassigned` for deliberate assignment to functions, not attributed automatically. Shared old analysis data moves to `tools/workspaces/analysis`. Use `research-dashboard.exe --migrate-library` to apply folder migration without opening the GUI.
+There is no migration or import workflow. Existing material is carried over manually; the app never moves historical research into a new home.
 
 Meter pairs use padded inset panels sized to their own meter and text widths. The second panel follows the first with a small gap rather than a fixed half-window offset. Large meters grow their own row and remain scrollable. The total-progress meter occupies a separate full-width panel below the meter bank.
 
@@ -83,10 +83,12 @@ The app maintains both directions from the project's dependency graph in `projec
 
 A dependent function cannot be marked complete until its prerequisites are complete. Its completion records which prerequisite revisions it used. Changes to a shared function reopen transitive dependents and their owning chunk/architecture/app reports. External changes are detected by the report hash checks. Merely referencing an already understood function does not reopen that shared function. Re-saving unchanged research does not invalidate dependents.
 
-Agents can update tags without hand-editing two files. Close the GUI first to release the library write lock:
+Agents update tags with `research deps set`; see the [CLI guide](docs/cli.md). The dashboard may remain open. Both TOML files are maintained by the app; do not edit them directly.
 
-```powershell
-research-dashboard.exe --set-prerequisites stock 0x00123456 0x000ABCDE 0x00012345
-```
+## Windows installation and CLI
 
-The first RVA is the dependent function; subsequent RVAs replace its prerequisite list. Omit subsequent RVAs to clear the list. All function records must already exist in that project. Use `RESEARCH_DASHBOARD_HOME` for a non-default library. Do not edit the generated TOML files directly; use this command or the app so both directions remain consistent.
+Build the installer with `powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1` (Rust and .NET SDK required). This permits the build script for that process only. The script installs a pinned local WiX build tool if needed and produces `dist/ResearchDashboard-0.1.0-x64.msi`.
+
+The per-user MSI installs into `%LOCALAPPDATA%\Programs\Research Dashboard`, adds that directory to the user PATH, and creates a Start menu shortcut. Open a new terminal after installation. Use `research --help` for the console CLI, `research gui` to open the dashboard, and `research home` to locate research. The research home is initialized on first use. Uninstall removes the program and its PATH entry while preserving research. The MSI is unsigned; no signing certificate is configured.
+
+The [CLI guide](docs/cli.md) covers project/tab creation, hierarchy creation, report reading/writing, reviewed completion/reopening, prerequisite tags and progress. Successful commands emit JSON. CLI and GUI enforce the same hierarchy, dependency and completion rules.

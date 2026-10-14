@@ -1,0 +1,51 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Research Dashboard" Manufacturer="Research Dashboard" Version="$(Version)"
+           UpgradeCode="ABEF253A-84C6-449A-BAB8-EBD64BC612B4" Scope="perUser" InstallerVersion="500">
+    <MajorUpgrade DowngradeErrorMessage="A newer Research Dashboard is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Research Dashboard">
+          <Component Id="DesktopApp" Guid="823CFF3B-D10B-4945-9B9A-3C3E8B4725D8">
+            <File Id="DashboardExe" Source="$(BuildDir)\research-dashboard.exe" />
+            <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" KeyPath="yes" />
+          </Component>
+          <Component Id="ConsoleApp" Guid="633A1A70-C073-4FC7-A407-AF96966204F4">
+            <File Id="ResearchExe" Source="$(BuildDir)\research.exe" />
+            <Environment Id="UserPath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="no" />
+            <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="CLI" Value="1" Type="integer" KeyPath="yes" />
+          </Component>
+          <Component Id="UserGuide" Guid="E4EFB6A4-CE73-4723-8D5B-225DBB6B9677">
+            <File Source="$(SourceDir)\README.md" />
+            <File Source="$(SourceDir)\AGENTS.md" />
+            <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="Guide" Value="1" Type="integer" KeyPath="yes" />
+          </Component>
+          <Directory Id="DocsFolder" Name="docs">
+            <Component Id="CliGuide" Guid="28D781C9-A270-4EE6-A861-F9D16C963B96">
+              <File Source="$(SourceDir)\docs\cli.md" />
+              <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="CliGuide" Value="1" Type="integer" KeyPath="yes" />
+              <RemoveFolder Id="RemoveDocsFolder" On="uninstall" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="MenuFolder" Name="Research Dashboard">
+        <Component Id="StartMenu" Guid="4C1A845C-891B-41DE-B5E9-CDBB4D2B58C1">
+          <Shortcut Id="DashboardShortcut" Name="Research Dashboard" Target="[#DashboardExe]" WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="Shortcut" Value="1" Type="integer" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main" Title="Research Dashboard" Level="1">
+      <ComponentRef Id="DesktopApp" />
+      <ComponentRef Id="ConsoleApp" />
+      <ComponentRef Id="UserGuide" />
+      <ComponentRef Id="CliGuide" />
+      <ComponentRef Id="StartMenu" />
+    </Feature>
+  </Package>
+</Wix>
