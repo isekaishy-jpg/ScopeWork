@@ -68,6 +68,8 @@ pub struct Node {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default = "legacy_layout")]
+    pub layout_version: u32,
     pub id: String,
     pub name: String,
     pub binary: String,
@@ -79,6 +81,11 @@ pub struct Project {
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
 }
+fn legacy_layout() -> u32 {
+    1
+}
+#[path = "layout.rs"]
+mod layout;
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 fn hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -97,19 +104,31 @@ fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && !["con", "prn", "aux", "nul", "com1", "lpt1"].contains(&id)
 }
-fn relative(n: &Node) -> String {
-    match n.kind {
-        Kind::App => "app.md".into(),
-        Kind::Architecture => format!("architectures/{:06}/research.md", n.id),
-        Kind::Chunk => format!("chunks/{:06}/research.md", n.id),
-        Kind::Function => format!("functions/{:08X}/research.md", n.rva.unwrap()),
+fn relative(project: &Project, n: &Node) -> String {
+    if n.kind == Kind::App {
+        return "app.md".into();
     }
+    let folder = match n.kind {
+        Kind::Function => format!("{:08X}", n.rva.unwrap()),
+        _ => format!("{:06}", n.id),
+    };
+    if n.kind == Kind::Architecture {
+        return format!("architectures/{folder}/research.md");
+    }
+    let parent = project
+        .nodes
+        .iter()
+        .find(|v| Some(v.id) == n.parent)
+        .unwrap();
+    let parent_path = relative(project, parent);
+    format!(
+        "{}/{folder}/research.md",
+        parent_path.trim_end_matches("/research.md")
+    )
 }
 
 // One project-local destination for each kind of reversing material.
 const PROJECT_FOLDERS: &[&str] = &[
-    "functions",
-    "chunks",
     "architectures",
     "tools/profiles",
     "tools/scripts",
@@ -132,7 +151,7 @@ fn ensure_folders(dir: &Path) -> Result<()> {
     {
         Ok(mut f) => {
             use std::io::Write;
-            f.write_all(b"# Project reversing tools\n\nThis directory belongs only to its enclosing research project.\n\nprofiles/: compiler, ABI, type and analysis profiles.\nscripts/: analysis drivers and exporters.\ninstrumentation/: observational hooks and capture utilities.\nbin/: tool binaries or launchers.\nworkspaces/: shared Ghidra projects and whole-binary analysis databases.\nlogs/: shared tool run logs and provenance.\nscratch/: shared temporary working files.\n\nFunction-specific captures, exports and evidence belong in ../functions/<RVA>/data/, beside that function's research.md. Link to them from research.md using data/<filename>. Do not create project-level evidence or data dumps. Chunks and architecture reports reference the canonical reports below them. Source installations remain read-only. Record input binary hashes and tool/profile versions for tool runs.\n").map_err(|e|e.to_string())?;
+            f.write_all(b"# Project reversing tools\n\nThis directory belongs only to its enclosing research project.\n\nprofiles/: compiler, ABI, type and analysis profiles.\nscripts/: analysis drivers and exporters.\ninstrumentation/: observational hooks and capture utilities.\nbin/: tool binaries or launchers.\nworkspaces/: shared Ghidra projects and whole-binary analysis databases.\nlogs/: shared tool run logs and provenance.\nscratch/: shared temporary working files.\n\nFunction-specific captures, exports and evidence belong in ../architectures/<category>/<chunk>/<RVA>/data/, beside that function's research.md. Link to them from research.md using data/<filename>. Do not create project-level evidence or data dumps. Chunks and architecture reports reference the canonical reports below them. Source installations remain read-only. Record input binary hashes and tool/profile versions for tool runs.\n").map_err(|e|e.to_string())?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e.to_string()),
@@ -158,7 +177,7 @@ pub struct Library {
 impl Library {
     pub fn set_scope(&mut self, p: usize, scope: &str, expected_revision: u64) -> Result<()> {
         if self._lock.is_none() {
-            return self.write_current(|l| l.set_scope(p, scope, expected_revision));
+            return self.write_project(p, |l, p| l.set_scope(p, scope, expected_revision));
         }
         if self.projects[p].revision != expected_revision {
             return Err("Project changed. Reload and review its scope before saving.".into());
@@ -201,6 +220,28 @@ impl Library {
         *self = fresh;
         result
     }
+    fn write_project<T>(
+        &mut self,
+        p: usize,
+        operation: impl FnOnce(&mut Self, usize) -> Result<T>,
+    ) -> Result<T> {
+        let id = self
+            .projects
+            .get(p)
+            .ok_or("Project no longer exists")?
+            .id
+            .clone();
+        let mut fresh = self.fresh()?;
+        let current = fresh
+            .projects
+            .iter()
+            .position(|v| v.id == id)
+            .ok_or("Project was removed. Refresh before continuing.")?;
+        let result = operation(&mut fresh, current);
+        fresh.release();
+        *self = fresh;
+        result
+    }
     pub fn refresh(&mut self) -> Result<()> {
         let mut fresh = self.fresh()?;
         fresh.release();
@@ -209,7 +250,7 @@ impl Library {
     }
     pub fn set_binary(&mut self, p: usize, binary: &str) -> Result<()> {
         if self._lock.is_none() {
-            return self.write_current(|l| l.set_binary(p, binary));
+            return self.write_project(p, |l, p| l.set_binary(p, binary));
         }
         if binary.trim().is_empty() {
             return Err("Binary identity cannot be empty.".into());
@@ -262,7 +303,7 @@ impl Library {
             }
             let path = e.path().join("project.json");
             if path.exists() {
-                let p: Project =
+                let mut p: Project =
                     serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
                         .map_err(|e| e.to_string())?;
                 if !valid_id(&p.id) || e.file_name().to_string_lossy() != p.id {
@@ -298,6 +339,14 @@ impl Library {
                 {
                     return Err("Invalid app ID or next node ID".into());
                 }
+                // Reject malformed dependencies before any migration changes files.
+                let validation = Self {
+                    root: lib.root.clone(),
+                    projects: vec![p.clone()],
+                    _lock: None,
+                };
+                validation.validate_dependencies(0, &p.dependencies)?;
+                layout::migrate(&lib.root.join(&p.id), &mut p)?;
                 ensure_folders(&lib.root.join(&p.id))?;
                 lib.projects.push(p);
             }
@@ -307,7 +356,10 @@ impl Library {
             lib.validate_dependencies(p, &lib.projects[p].dependencies)?;
             for node in &lib.projects[p].nodes {
                 if !lib.path(p, node.id)?.is_file() {
-                    return Err("Canonical report missing. Carry-over is manual; automatic migration is not supported.".into());
+                    return Err(
+                        "Canonical report missing. Restore the missing report before continuing."
+                            .into(),
+                    );
                 }
             }
         }
@@ -337,6 +389,7 @@ impl Library {
         fs::create_dir(&dir).map_err(|e| e.to_string())?;
         ensure_folders(&dir)?;
         self.projects.push(Project {
+            layout_version: 2,
             id: id.into(),
             name: name.into(),
             binary: binary.into(),
@@ -366,7 +419,7 @@ impl Library {
             .iter()
             .find(|n| n.id == id)
             .ok_or("Unknown report")?;
-        Ok(self.dir(p).join(relative(n)))
+        Ok(self.dir(p).join(relative(&self.projects[p], n)))
     }
     pub fn read(&self, p: usize, id: u64) -> Result<(String, String)> {
         let full = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
@@ -404,11 +457,7 @@ impl Library {
         }
         md += "\n## Source reports\n";
         for child in project.nodes.iter().filter(|c| c.parent == Some(id)) {
-            let rel = if n.kind == Kind::App {
-                relative(child)
-            } else {
-                format!("../../{}", relative(child))
-            };
+            let rel = layout::link(&relative(project, n), &relative(project, child));
             md += &format!(
                 "- [{}]({})\n",
                 child.name.replace('[', "(").replace(']', ")"),
@@ -496,7 +545,7 @@ impl Library {
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
         if self._lock.is_none() {
-            return self.write_current(|l| l.add(p, parent, name, rva));
+            return self.write_project(p, |l, p| l.add(p, parent, name, rva));
         }
         if name.trim().is_empty() {
             return Err("Enter a name.".into());
@@ -538,7 +587,7 @@ impl Library {
             accepted_hash: None,
             accepted_prerequisites: Default::default(),
         };
-        let path = self.dir(p).join(relative(&relnode));
+        let path = self.dir(p).join(relative(&self.projects[p], &relnode));
         if path.exists() {
             return Err("Canonical file already exists; refusing to replace it.".into());
         }
@@ -561,8 +610,9 @@ impl Library {
         expected: &str,
     ) -> Result<()> {
         if self._lock.is_none() {
-            return self
-                .write_current(|l| l.save_report(p, id, body, evidence, complete, expected));
+            return self.write_project(p, |l, p| {
+                l.save_report(p, id, body, evidence, complete, expected)
+            });
         }
         if self.report_token(p, id)? != expected {
             return Err("This report changed outside the editor. Reload it before saving; your text has not been overwritten.".into());
@@ -645,6 +695,9 @@ pub struct ResearchUi {
     pub library: Option<Library>,
     pub changed: bool,
     project: usize,
+    project_id: String,
+    last_poll: std::time::Instant,
+    fingerprint: String,
     node: u64,
     body: String,
     evidence: String,
@@ -679,6 +732,9 @@ impl ResearchUi {
             library,
             changed: true,
             project: 0,
+            project_id: String::new(),
+            last_poll: std::time::Instant::now(),
+            fingerprint: String::new(),
             node: 0,
             body: String::new(),
             evidence: String::new(),
@@ -714,6 +770,7 @@ impl ResearchUi {
         match lib.read(p, id) {
             Ok((body, evidence)) => {
                 self.project = p;
+                self.project_id = lib.projects[p].id.clone();
                 self.node = id;
                 self.body = body;
                 self.evidence = evidence;
@@ -749,14 +806,31 @@ impl ResearchUi {
         }
         let mut open = self.open;
         let mut nav = None;
+        let mut navigation_ids: Vec<_> = self
+            .library
+            .as_ref()
+            .map(|l| l.projects.iter().map(|p| p.id.clone()).collect())
+            .unwrap_or_default();
         egui::Window::new("Research records").open(&mut open).default_size([950.0,700.0]).vscroll(true).show(ctx,|ui| {
             if !self.message.is_empty(){ui.colored_label(egui::Color32::from_rgb(230,170,80),&self.message);}
             let Some(lib)=&self.library else{return;};
             let projects=lib.projects.clone();
             egui::CollapsingHeader::new("New project").default_open(projects.is_empty()).show(ui,|ui|{
                 ui.horizontal(|ui|{ui.label("ID");ui.text_edit_singleline(&mut self.new_project_id);ui.label("Name");ui.text_edit_singleline(&mut self.new_project_name);});
-                if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{nav=Some((self.library.as_ref().unwrap().projects.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
+                if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){match self.library.as_mut().unwrap().create(&self.new_project_id,&self.new_project_name,""){Ok(())=>{navigation_ids.push(self.new_project_id.clone());nav=Some((navigation_ids.len()-1,0));self.changed=true;},Err(e)=>self.message=e}}
             });
+            let found = projects.iter().position(|p| p.id == self.project_id);
+            if let Some(p) = found { self.project = p; }
+            let orphan = found.is_none() || !projects[self.project].nodes.iter().any(|n| n.id == self.node);
+            if orphan && self.has_unsaved() {
+                ui.label("The project or report was removed. Your unsaved draft is retained here.");
+                if ui.button("Copy draft").clicked() { ui.ctx().copy_text(format!("Scope: {}\n\n{}\n\n{}",self.scope,self.body,self.evidence)); }
+                ui.add(egui::TextEdit::multiline(&mut self.body).desired_rows(12));
+                ui.add(egui::TextEdit::multiline(&mut self.evidence).desired_rows(4));
+                if ui.button("Discard removed report draft").clicked() { self.dirty=false; self.scope_dirty=false; self.project_id.clear(); self.project=0; self.node=0; if !projects.is_empty() { nav=Some((0,0)); } }
+                return;
+            }
+            if orphan && !projects.is_empty() { nav=Some((found.unwrap_or(0),0)); return; }
             let Some(project)=projects.get(self.project) else {
                 ui.label("Create a project above to start researching.");
                 return;
@@ -845,7 +919,15 @@ impl ResearchUi {
             });
         });
         if let Some((p, id)) = nav {
-            self.load(p, id);
+            if let Some(current) = navigation_ids.get(p).and_then(|id| {
+                self.library
+                    .as_ref()?
+                    .projects
+                    .iter()
+                    .position(|v| &v.id == id)
+            }) {
+                self.load(current, id);
+            }
         }
         self.open = open;
     }
@@ -868,36 +950,91 @@ pub struct ProjectView {
     pub research_scope: String,
 }
 impl ResearchUi {
-    pub fn refresh_library(&mut self) {
-        if self.library.is_none() {
-            match crate::paths::home(None).and_then(|h| Library::open(h.join("projects"))) {
-                Ok(mut lib) => {
-                    lib.release();
-                    self.library = Some(lib);
-                    self.project = 0;
-                    self.node = 0;
-                }
-                Err(e) => {
-                    self.message = e;
-                    self.open = true;
-                    return;
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        if self.last_poll.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        self.last_poll = std::time::Instant::now();
+        let mut signature = String::new();
+        if let Some(lib) = &self.library {
+            if let Ok(entries) = fs::read_dir(&lib.root) {
+                let mut paths: Vec<_> = entries
+                    .flatten()
+                    .map(|e| e.path().join("project.json"))
+                    .filter(|p| p.is_file())
+                    .collect();
+                paths.sort();
+                for path in paths {
+                    signature.push_str(&format!(
+                        "{}:{:?};",
+                        path.display(),
+                        fs::metadata(&path).map(|m| (m.len(), m.modified().ok()))
+                    ));
                 }
             }
-        }
-        if let Some(lib) = &mut self.library {
-            match lib.refresh() {
-                Ok(()) => {
-                    self.changed = true;
-                    if !self.has_unsaved() {
-                        self.load(self.project, self.node);
+            for (p, project) in lib.projects.iter().enumerate() {
+                for n in &project.nodes {
+                    if let Ok(path) = lib.path(p, n.id) {
+                        signature.push_str(&format!(
+                            "{:?};",
+                            fs::metadata(&path).map(|m| (m.len(), m.modified().ok()))
+                        ));
                     }
                 }
+            }
+        }
+        let fingerprint = hash(&signature);
+        if self.library.is_none() || fingerprint != self.fingerprint {
+            match self.refresh_library_inner() {
+                Ok(()) => self.fingerprint = fingerprint,
+                Err(e) if e.contains("library is busy") => {}
                 Err(e) => {
                     self.message = e;
                     self.open = true;
                 }
             }
         }
+    }
+    pub fn refresh_library(&mut self) {
+        if let Err(e) = self.refresh_library_inner() {
+            self.message = e;
+            self.open = true;
+        }
+    }
+    fn refresh_library_inner(&mut self) -> Result<()> {
+        if self.library.is_none() {
+            let mut lib =
+                crate::paths::home(None).and_then(|h| Library::open(h.join("projects")))?;
+            lib.release();
+            self.library = Some(lib);
+        } else {
+            self.library.as_mut().unwrap().refresh()?;
+        }
+        self.changed = true;
+        let lib = self.library.as_ref().unwrap();
+        let selected = lib.projects.iter().position(|p| p.id == self.project_id);
+        if let Some(p) = selected {
+            self.project = p;
+        }
+        if !self.has_unsaved() {
+            let p = selected.unwrap_or(0);
+            let id = lib
+                .projects
+                .get(p)
+                .and_then(|p| p.nodes.iter().find(|n| n.id == self.node))
+                .filter(|_| selected.is_some())
+                .map(|n| n.id)
+                .unwrap_or(0);
+            if lib.projects.is_empty() {
+                self.project = 0;
+                self.project_id.clear();
+                self.node = 0;
+            } else {
+                self.load(p, id);
+            }
+        }
+        Ok(())
     }
     pub fn snapshot(&self) -> Vec<ProjectView> {
         let Some(lib) = &self.library else {
@@ -1067,7 +1204,7 @@ impl Library {
                 FunctionTag {
                     node_id: id,
                     rva: format!("0x{:08X}", n.rva.unwrap()),
-                    report: format!("../{:08X}/research.md", n.rva.unwrap()),
+                    report: layout::link(&relative(project, node), &relative(project, n)),
                 }
             };
             let deps = DependencyFile {
@@ -1163,7 +1300,7 @@ impl Library {
     }
     pub fn set_dependencies(&mut self, p: usize, id: u64, rvas: &str) -> Result<()> {
         if self._lock.is_none() {
-            return self.write_current(|l| l.set_dependencies(p, id, rvas));
+            return self.write_project(p, |l, p| l.set_dependencies(p, id, rvas));
         }
         if !self.projects[p]
             .nodes

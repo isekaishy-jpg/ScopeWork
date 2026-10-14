@@ -32,12 +32,20 @@ Selection precedence is:
 3. The home saved by the installer.
 4. The default local home. An existing earlier `ResearchDashboard` home is retained when present.
 
-Changing the selected home opens another library. Scopework never automatically imports or moves existing research.
+Changing the selected home opens another library. Scopework never automatically imports historical research or moves projects between homes.
 
 ## Upgrades and removal
 
-Close Scopework and install a newer-version MSI. Setup reuses saved location and option choices. The app has no automatic update checker or downloader.
+Close Scopework and stop agent CLI/tool jobs before installing a newer-version MSI. Setup reuses saved location and option choices. The app has no automatic update checker or downloader.
 
 For local development, you can run the rebuilt `target/release/research-dashboard.exe` directly without reinstalling. It uses the same research-home selection. Installed shortcuts continue to launch the installed copy until you upgrade it.
 
 Re-running the same-version MSI offers Repair or Uninstall. Uninstall removes application files, shortcuts, and its PATH entry. Research files and the saved research-home setting are preserved.
+
+## Version 0.4.2 folder upgrade
+
+On first GUI or CLI library open, existing current projects migrate to `architectures/<category-id>/<chunk-id>/<RVA>/`. Each level owns its report; functions retain their complete data folders. New projects use this layout immediately. Keep old app/CLI copies closed after upgrading.
+
+A retained journal in each project at `tools/workspaces/layout-migration-v2/journal.json` records original catalog/report text and old/new paths. Interrupted upgrades resume; conflicting files stop migration without overwriting them. Standard report references, generated dependency files and schema-1 annotation report references/hash pins are updated. Custom scripts must resolve canonical paths from the CLI instead of assuming flat folders.
+
+Project tabs and progress refresh automatically about every two seconds. Removing a project folder removes its tab; surviving tabs retain their identity. Unsaved edits for a removed report remain available to copy or discard and cannot be saved into a different project.

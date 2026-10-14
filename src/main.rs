@@ -206,9 +206,13 @@ impl eframe::App for Dashboard {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.research.prevent_close();
         }
+        self.research.poll(ctx);
         if self.research.changed {
+            let selected_id = self.projects.get(self.project).map(|p| p.id.clone());
             self.projects = self.research.snapshot();
-            self.project = self.project.min(self.projects.len().saturating_sub(1));
+            self.project = selected_id
+                .and_then(|id| self.projects.iter().position(|p| p.id == id))
+                .unwrap_or(0);
             self.research.changed = false;
             self.selection = None;
         }

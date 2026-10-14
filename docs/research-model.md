@@ -10,11 +10,15 @@ Each project owns a complete hierarchy:
 <research-home>/projects/<project-id>/
   project.json
   app.md
-  architectures/<id>/research.md
-  chunks/<id>/research.md
-  functions/<RVA>/
+  architectures/<category-id>/
     research.md
-    data/                       # this function's captures, exports and raw evidence
+    <chunk-id>/
+      research.md
+      <RVA>/
+        research.md
+        dep.toml
+        prereq.toml
+        data/                       # this function's captures, exports and raw evidence
   tools/
     README.md
     profiles/
@@ -74,7 +78,7 @@ Options > Dark mode switches palettes and saves the choice. Other menus provide 
 
 Every function has its own folder: `research.md` plus `data/`. Use relative `data/<file>` links from that report. There is no new project-level evidence or data directory. Shared tool state lives under `tools/workspaces`, `tools/logs`, and `tools/scratch`. The research editor has an **Open this function's data folder** button.
 
-There is no migration or import workflow. Existing material is carried over manually; the app never moves historical research into a new home.
+Version 0.4.2 upgrades the current catalog to nested architecture/chunk/function folders on first open. Original catalog/report text and the path mapping remain in tools/workspaces/layout-migration-v2/journal.json. Entire function folders move together, preserving data. Report links and dependency views are rebased; valid completion hashes are carried forward only for these path changes. Stale evidence stays stale. This does not import historical research or move projects between homes.
 
 Meter pairs use padded inset panels sized to their own meter and text widths. The second panel follows the first with a small gap rather than a fixed half-window offset. Large meters grow their own row and remain scrollable. The total-progress meter occupies a separate full-width panel below the meter bank.
 
