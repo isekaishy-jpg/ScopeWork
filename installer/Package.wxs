@@ -42,6 +42,7 @@
       <Directory Id="ProgramsFolder" Name="Programs">
         <Directory Id="INSTALLFOLDER" Name="Scopework">
           <Component Id="DesktopApp" Guid="823CFF3B-D10B-4945-9B9A-3C3E8B4725D8">
+            <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
             <File Id="DashboardExe" Source="$(BuildDir)\research-dashboard.exe" />
             <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" KeyPath="yes" />
           </Component>
@@ -56,6 +57,7 @@
           <Component Id="UserGuide" Guid="E4EFB6A4-CE73-4723-8D5B-225DBB6B9677">
             <File Source="$(SourceDir)\README.md" />
             <File Source="$(SourceDir)\AGENTS.md" />
+            <File Source="$(SourceDir)\TODO.md" />
             <File Source="$(SourceDir)\LICENSE" />
             <File Source="$(SourceDir)\CONTRIBUTING.md" />
             <File Source="$(SourceDir)\CHANGELOG.md" />
@@ -69,6 +71,7 @@
               <File Source="$(SourceDir)\docs\building.md" />
               <File Source="$(SourceDir)\docs\concurrent-import-design.md" />
               <File Source="$(SourceDir)\docs\qualification-0.5.0.md" />
+              <File Source="$(SourceDir)\docs\qualification-0.6.0.md" />
               <RegistryValue Root="HKCU" Key="Software\ResearchDashboard" Name="CliGuide" Value="1" Type="integer" KeyPath="yes" />
               <RemoveFolder Id="RemoveDocsFolder" On="uninstall" />
             </Component>

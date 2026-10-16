@@ -107,6 +107,7 @@ pub mod imports;
 #[path = "layout.rs"]
 mod layout;
 pub use catalog_batch::Batch;
+pub use catalog_batch::Removal;
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 fn hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -474,7 +475,7 @@ impl Library {
         } else {
             None
         };
-        if project.as_ref().is_some_and(|p| p.layout_version < 4) {
+        if project.as_ref().is_some_and(|p| p.layout_version < 5) {
             if !recover {
                 return Err("migration_required: open this project with the current CLI before planning an import".into());
             }
@@ -485,10 +486,14 @@ impl Library {
                 serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?;
             catalog_batch::resume(&dir, &mut p)?;
+            imports::recover(&dir, &mut p)?;
+            if p.active_import.is_some() {
+                return Err("Finish or cancel the active import with the previous Scopework version before upgrading this project.".into());
+            }
             Self::validate_project(&p, id)?;
             layout::migrate(&dir, &mut p)?;
-            if p.layout_version < 4 {
-                let backup = dir.join("tools/workspaces/layout-migration-v4");
+            if p.layout_version < 5 {
+                let backup = dir.join("tools/workspaces/layout-migration-v5");
                 fs::create_dir_all(&backup).map_err(|e| e.to_string())?;
                 if !backup.join("before.json").exists() {
                     atomic(
@@ -496,14 +501,14 @@ impl Library {
                         &serde_json::to_vec_pretty(&p).map_err(|e| e.to_string())?,
                     )?;
                 }
-                p.layout_version = 4;
+                p.layout_version = 5;
                 atomic(
                     &path,
                     &serde_json::to_vec_pretty(&p).map_err(|e| e.to_string())?,
                 )?;
                 atomic(
                     &backup.join("migration.json"),
-                    b"{\"format\":4,\"authored_reports_changed\":false}",
+                    b"{\"format\":5,\"authored_reports_changed\":false}",
                 )?;
             }
             drop(locks);
@@ -514,7 +519,7 @@ impl Library {
             );
         }
         if let Some(p) = &mut project {
-            if p.layout_version != 4 {
+            if p.layout_version != 5 {
                 return Err("Unsupported catalog format; upgrade Scopework.".into());
             }
             let pending = dir
@@ -629,7 +634,7 @@ impl Library {
         fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
         ensure_folders(&stage)?;
         let project = Project {
-            layout_version: 4,
+            layout_version: 5,
             structural_epoch: 0,
             active_import: None,
             last_import: None,

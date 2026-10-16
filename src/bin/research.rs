@@ -39,6 +39,13 @@ enum Command {
     Node(NodeCommand),
     #[command(subcommand)]
     Deps(DepsCommand),
+    /// Inspect completed journal storage, or compact full history to change receipts.
+    Journal {
+        project: String,
+        /// Apply compaction; without this flag only report usage and reclaimable bytes.
+        #[arg(long)]
+        compact: bool,
+    },
     /// Effective progress and records ready for review (not automatic completion).
     Status { project: String },
 }
@@ -132,6 +139,22 @@ enum ProjectCommand {
 }
 #[derive(Subcommand)]
 enum NodeCommand {
+    /// Preview explicit branch deletion from JSON; --expect applies the reviewed token.
+    Delete {
+        project: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        expect: Option<String>,
+    },
+    /// Preview empty architecture/chunk pruning; authored scopes are retained by default.
+    Prune {
+        project: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        expect: Option<String>,
+    },
     /// Read multiple canonical reports and edit tokens from one project snapshot.
     ReadBatch {
         project: String,
@@ -292,6 +315,9 @@ fn run(args: Args) -> Result<Value, String> {
             }
         };
     }
+    if let Command::Journal { project, compact } = &args.command {
+        return Library::inspect_journals(root, project, *compact);
+    }
     if let Command::Node(NodeCommand::Batch { project, file }) = &args.command {
         let batch: Batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
@@ -319,6 +345,8 @@ fn run(args: Args) -> Result<Value, String> {
         ) => Some(project.as_str()),
         Command::Node(
             NodeCommand::List { project }
+            | NodeCommand::Delete { project, .. }
+            | NodeCommand::Prune { project, .. }
             | NodeCommand::ReadBatch { project, .. }
             | NodeCommand::SaveBatch { project, .. }
             | NodeCommand::Batch { project, .. }
@@ -330,6 +358,7 @@ fn run(args: Args) -> Result<Value, String> {
             | NodeCommand::Reopen { project, .. },
         ) => Some(project.as_str()),
         Command::Deps(DepsCommand::Get { project, .. } | DepsCommand::Set { project, .. })
+        | Command::Journal { project, .. }
         | Command::Status { project } => Some(project.as_str()),
         _ => None,
     };
@@ -337,10 +366,15 @@ fn run(args: Args) -> Result<Value, String> {
         &args.command,
         Command::Project(ProjectCommand::Show { .. })
             | Command::Node(
-                NodeCommand::Show { .. } | NodeCommand::List { .. } | NodeCommand::ReadBatch { .. }
+                NodeCommand::Show { .. }
+                    | NodeCommand::List { .. }
+                    | NodeCommand::ReadBatch { .. }
+                    | NodeCommand::Delete { expect: None, .. }
+                    | NodeCommand::Prune { expect: None, .. }
             )
             | Command::Deps(DepsCommand::Get { .. })
             | Command::Status { .. }
+            | Command::Journal { compact: false, .. }
     );
     let mut lib = if read_only {
         Library::read_project(home.join("projects"), selected.unwrap())?
@@ -348,6 +382,13 @@ fn run(args: Args) -> Result<Value, String> {
         Library::open_project(home.join("projects"), selected)?
     };
     match args.command {
+        Command::Journal {
+            project: id,
+            compact,
+        } => {
+            let p = project(&lib, &id)?;
+            lib.journal_history(p, compact)
+        }
         Command::Import(_) => unreachable!("import commands handled before opening a library"),
         Command::Init => Ok(locations),
         Command::Project(command) => match command {
@@ -409,6 +450,26 @@ fn run(args: Args) -> Result<Value, String> {
             }
         },
         Command::Node(command) => match command {
+            NodeCommand::Delete {
+                project: id,
+                file,
+                expect,
+            } => {
+                let p = project(&lib, &id)?;
+                let request = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                lib.remove_nodes(p, &request, false, expect.as_deref())
+            }
+            NodeCommand::Prune {
+                project: id,
+                file,
+                expect,
+            } => {
+                let p = project(&lib, &id)?;
+                let request = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                lib.remove_nodes(p, &request, true, expect.as_deref())
+            }
             NodeCommand::ReadBatch { project: id, nodes } => {
                 lib.read_reports(project(&lib, &id)?, &nodes)
             }

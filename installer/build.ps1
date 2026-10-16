@@ -1,6 +1,13 @@
 param()
 $ErrorActionPreference = 'Stop'
 $repository = Split-Path $PSScriptRoot -Parent
+$originalTemp = $env:TEMP
+$originalTmp = $env:TMP
+$scratchRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+$scratch = Join-Path $scratchRoot ('Scopework-package-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $scratch | Out-Null
+$env:TEMP = $scratch
+$env:TMP = $scratch
 Push-Location $repository
 try {
     $metadata = & cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
@@ -20,9 +27,19 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'WiX dialog library setup failed.' }
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $repository 'dist') | Out-Null
-    & $wixTool build (Join-Path $PSScriptRoot 'Package.wxs') (Join-Path $PSScriptRoot 'Wizard.wxs') -ext $uiExtension -culture en-US -arch x64 -d "Version=$Version" -d "BuildDir=$repository\target\release" -d "SourceDir=$repository" -o "$repository\dist\Scopework-$Version-x64.msi"
+    & $wixTool build (Join-Path $PSScriptRoot 'Package.wxs') (Join-Path $PSScriptRoot 'Wizard.wxs') -ext $uiExtension -culture en-US -arch x64 -intermediateFolder (Join-Path $scratch 'wix') -pdbtype none -d "Version=$Version" -d "BuildDir=$repository\target\release" -d "SourceDir=$repository" -o "$repository\dist\Scopework-$Version-x64.msi"
     if ($LASTEXITCODE -ne 0) { throw 'MSI build failed.' }
     $package = Join-Path $repository "dist\Scopework-$Version-x64.msi"
     $checksum = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
     "$checksum  $([System.IO.Path]::GetFileName($package))" | Set-Content -LiteralPath "$package.sha256" -Encoding ascii
-} finally { Pop-Location }
+} finally {
+    Pop-Location
+    $env:TEMP = $originalTemp
+    $env:TMP = $originalTmp
+    $resolvedScratch = [System.IO.Path]::GetFullPath($scratch)
+    if ([System.IO.Path]::GetDirectoryName($resolvedScratch).TrimEnd('\') -ne $scratchRoot.TrimEnd('\') -or
+        [System.IO.Path]::GetFileName($resolvedScratch) -notmatch '^Scopework-package-[0-9a-f]{32}$') {
+        throw 'Refusing cleanup outside the owned package workspace.'
+    }
+    Remove-Item -LiteralPath $resolvedScratch -Recurse -Force
+}

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 - 2026-10-16
+
+See [qualification and limits](docs/qualification-0.6.0.md).
+
+- Store pending and completed catalog transactions as changed-record deltas with whole-catalog conflict fingerprints. Preserve recovery of older full journals; add `research journal PROJECT [--compact]` to inspect storage and compact completed history without deleting it.
+- Add preview/token-checked `node delete` and `node prune` commands. Removed reports and supporting files are archived; recognized report links and annotation provenance follow the archive. Dependencies are removed and affected consumers/ancestors require review.
+- Introduce catalog format 5 to exclude older writers that cannot recover delta journals. Finish or cancel active imports with the previous version before migrating.
+- Clean package-build scratch directories in `finally`, suppress packaging debug sidecars, and remove empty application folders during uninstall/upgrade. Preserve research and Windows Installer's own repair cache.
+- Replace the 150,000-function qualification fixture with a self-cleaning 16-function smoke run, capped at 100. Concurrency tests also use small fixtures.
+
 ## 0.5.0 - 2026-10-14
 
 See [qualification and performance limits](docs/qualification-0.5.0.md).

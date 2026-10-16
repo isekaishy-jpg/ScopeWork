@@ -2,6 +2,8 @@
 
 Build Scopework, a Rust GUI and agent CLI for managing isolated binary research projects. Start with an empty library. Projects are created explicitly; never seed development projects or sample dashboards.
 
+Before starting a maintenance session, read `TODO.md` for the user's deferred work. Do not treat deferred items as already implemented or verified.
+
 - Keep the approved dashboard design. Do not redesign it while implementing research storage or workflows.
 - Canonical hierarchy: App -> Architecture category -> Chunk -> Function. Research composes upward. Every node has exactly one canonical Markdown report in its project directory.
 - Update canonical files in place; do not create overlapping follow-up reports. Keep each function's supporting data in architectures/<category>/<chunk>/<RVA>/data/ beside its research.md, and link it from that report.
@@ -14,6 +16,7 @@ Build Scopework, a Rust GUI and agent CLI for managing isolated binary research 
 - Keep source installations and binaries read-only. Do not commit binaries, private captures, credentials, or research datasets.
 - Preserve provenance and distinguish observed, specification-defined, and inferred claims.
 - The restriction on testing research text does not apply to this software. Add focused regression tests for meaningful behavior changes and run appropriate build, test and lint checks. Keep the dashboard free of known errors and warnings; avoid repeating verification without a new change, failure or unresolved concern.
+- Use small, self-cleaning disk fixtures for software validation. Do not generate 150,000-function/file qualification trees or other mass-file fixtures. The smoke harness is capped at 100 functions; metadata scale checks should stay in memory. Remove only the temporary workspace owned by the current run, including after failures.
 - File narrow complaints about the app as individual Markdown reports in the single complaints/ folder in the active research home (`research home` prints it). Follow that folder's README.md; filing the report is the entire process.
 
 - Every research project owns tools/profiles, tools/scripts, tools/instrumentation and tools/bin. Shared tool databases and working data belong in tools/workspaces, tools/logs or tools/scratch. Function-specific captures, exports, logs and evidence belong in that function's data/ folder. Do not create project-level data/evidence dumps or parallel research reports. Canonical architecture reports are architectures/<category>/research.md and chunk reports are architectures/<category>/<chunk>/research.md; the app report is app.md.

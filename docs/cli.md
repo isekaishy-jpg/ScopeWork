@@ -101,7 +101,7 @@ These IDs are illustrative; referenced nodes must exist. JSON RVAs are unsigned 
 
 `update` moves or renames nodes without changing their IDs or RVAs. Omitted fields are preserved. `reorder` must contain every direct child exactly once; it controls browser, meter and generated source-link order. Arrays may be omitted. Existing research bodies, evidence and data stay with their nodes. New records start unresearched; the batch cannot import completion claims or fabricate report content.
 
-Mixed batches containing updates/reordering/link repair hold the project write lock, records the original catalog and affected reports under `tools/workspaces/catalog-transactions-v4/pending`, stages moved folders, updates reports and affected dependency views, and commits the catalog last. The next CLI/GUI open resumes interrupted work after checking recorded inputs. Completed journals remain under `revision-N`; preserve them if recovery reports a conflict. Do not manually edit files during a pending transaction. The journal does not back up arbitrary supporting data; maintain ordinary backups separately.
+Mixed batches containing updates/reordering/link repair hold the project write lock, record a recoverable catalog delta and affected reports under `tools/workspaces/catalog-transactions-v4/pending`, stages moved folders, updates reports and affected dependency views, and commits the catalog last. The next CLI/GUI open resumes interrupted work after checking recorded inputs. Completed journals remain under `revision-N`; preserve them if recovery reports a conflict. Do not manually edit files during a pending transaction. The journal does not back up arbitrary supporting data; maintain ordinary backups separately.
 
 Ownership, membership, name, order and report changes reopen affected accepted reports and their consumers/ancestors for review. Recognized internal Markdown and prose paths are rebased; external URLs and paths outside the project are retained. Schema-1 annotation-ledger report paths follow moves while original review hashes remain pinned, requiring review of changed evidence.
 
@@ -206,3 +206,48 @@ Use schema 2 to omit a global revision precondition while retaining all-or-nothi
 Submit with `research node save-batch PROJECT --file INPUT.json`. An optional `expect_revision` adds a deliberately strict project-wide precondition. Schema 1 still requires it. Every input is checked against the same starting snapshot before any report changes. Draft batches never attest completion.
 
 Errors retain the JSON `error` message on stderr and include a machine-readable `kind` (for example `record_conflict`, `structural_job_conflict`, `busy`, or `operation_failed`). Successful JSON stays on stdout. See [0.5.0 qualification](qualification-0.5.0.md) for large-catalog latency limits.
+
+## Node deletion and empty-node pruning (0.6.0)
+
+Both commands preview by default. Save a JSON request with the exact binary and current revision from `project show`:
+
+```json
+{"schema":1,"binary":"exact build identity","expect_revision":42,"ids":[17,19]}
+```
+
+```powershell
+research node delete PROJECT --file remove.json
+research node delete PROJECT --file remove.json --expect PREVIEW_TOKEN
+```
+
+Deletion includes every descendant of the selected IDs. App 0 is never deletable. The preview lists candidates, archive paths, removed dependency edges and surviving reports requiring review. `--expect` must match the preview token; changes to the catalog or affected report content reject the operation. No node IDs are reused.
+
+Pruning accepts additional optional fields:
+
+```json
+{"schema":1,"binary":"exact build identity","expect_revision":42,"ids":[],"keep":[25],"name_prefix":"Retired","context_only":true,"include_authored":false,"recursive":true}
+```
+
+```powershell
+research node prune PROJECT --file prune.json
+research node prune PROJECT --file prune.json --expect PREVIEW_TOKEN
+```
+
+An empty organization node is an Architecture or Chunk with no remaining child nodes. Functions are never prune candidates. By default, authored body/evidence or extra supporting files also protect a childless scope. `include_authored:true` explicitly permits their archival. `ids` limits eligible IDs (empty means all); `keep` always protects listed nodes. `name_prefix` and `context_only` further restrict candidates. `recursive:true` considers ancestors that become empty, but **all filters still apply to ancestors**. Without it, only nodes that were already childless are selected. Intentionally open source scopes can be retained with `keep`, selection filters, or the default authored-content protection.
+
+Removed node directories are moved, not destroyed, to `tools/workspaces/deleted-nodes/revision-N/ID/`. Supporting files retain their bytes. Recognized links in canonical reports and schema-1 annotation report references follow the archive; original annotation review hashes are retained and require review before reapplication. Opaque paths in custom scripts or supporting files are not rewritten. Archived generated dependency files are historical snapshots. Live dependency edges involving deleted nodes are removed, surviving generated dependency views are synchronized, and affected consumers/ancestors are reopened. Active imports block structural removal.
+
+The standard pending journal recovers interrupted moves, report updates and catalog publication. Completed receipts retain before/after metadata, report text and old/new paths; the archive retains supporting data. There is no automatic undelete command. Recovery from a completed deletion requires restoring the intended records and files using its receipt under controlled maintenance, accounting for later edits; do not copy an old catalog over a live one.
+
+## Journal storage and compaction (0.6.0)
+
+```powershell
+research journal PROJECT
+research journal PROJECT --compact
+```
+
+The first command reports completed journal bytes, potential savings, pending journal bytes, and per-journal formats/paths. The second atomically converts completed full journals to change receipts. It does not remove history, reports, data, or pending/incomplete transactions. These history commands bypass project migration and recovery, so pending journals remain untouched even when they need conflict resolution. Interrupted compaction is repeatable; already compacted entries are retained. Only recognized `revision-N/journal.json` records in the catalog transaction directories are eligible.
+
+New pending journals and completed receipts use schema-1 deltas: project metadata excluding inventory arrays, changed node/edge records with their array positions, affected reports/sidecars, directory moves, and fingerprints of the complete before/after catalog. Recovery reconstructs and verifies the other catalog state against those fingerprints. Older full pending journals remain readable. A completed receipt cannot be replayed by renaming it to `pending`.
+
+Retention policy: retain compact completed change history indefinitely, including removed-node archives; never automatically expire evidence. This removes unchanged whole-inventory duplication per edit, while storage still grows with actual changed content. Whole-catalog reorder operations can have large deltas. The format-5 migration keeps one full pre-upgrade catalog. Import publication history and other tool workspaces are separate from catalog-journal compaction and are not included in its byte totals.

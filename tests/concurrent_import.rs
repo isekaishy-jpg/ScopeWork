@@ -61,6 +61,10 @@ impl Fixture {
         serde_json::from_slice(&o.stdout).unwrap()
     }
     fn input(&self, count: usize) -> PathBuf {
+        assert!(
+            count <= 100,
+            "Use small fixtures; large on-disk inventories are prohibited"
+        );
         let p = self.ok(&["project", "show", "fixture"]);
         let batch = json!({"schema":1,"binary":p["binary"],"expect_revision":p["revision"],"create":(0..count).map(|i|json!({"parent":2,"name":format!("Imported {i}"),"rva":0x10000+i*16})).collect::<Vec<_>>()});
         let path = self.home.join("request.json");
@@ -144,7 +148,7 @@ fn unrelated_tokens_survive_and_completion_has_a_distinct_purpose() {
 #[test]
 fn existing_reports_are_editable_during_preparation_and_parent_text_survives() {
     let f = Fixture::new();
-    let input = f.input(1536);
+    let input = f.input(16);
     let mut child = f
         .command(&[
             "import",
@@ -153,7 +157,7 @@ fn existing_reports_are_editable_during_preparation_and_parent_text_survives() {
             "--file",
             input.to_str().unwrap(),
         ])
-        .env("SCOPEWORK_IMPORT_DELAY_MS", "100")
+        .env("SCOPEWORK_IMPORT_DELAY_MS", "1500")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -221,7 +225,7 @@ fn existing_reports_are_editable_during_preparation_and_parent_text_survives() {
     );
     let p = f.ok(&["node", "show", "fixture", "2"]);
     assert_eq!(p["body"], "parent prose during import");
-    assert_eq!(p["children"].as_array().unwrap().len(), 1538);
+    assert_eq!(p["children"].as_array().unwrap().len(), 18);
 }
 #[test]
 fn pause_cancel_and_reservation_never_reuse_ids() {
@@ -678,4 +682,123 @@ fn single_creation_refuses_foreign_data_and_reserved_windows_names() {
                 .success()
         );
     }
+}
+
+#[test]
+fn branch_delete_recovers_after_each_publication_boundary() {
+    for point in ["journal", "moves", "reports", "catalog"] {
+        let f = Fixture::new();
+        let p = f.ok(&["project", "show", "fixture"]);
+        let report = f.ok(&["node", "show", "fixture", "3"]);
+        let source = PathBuf::from(report["report"].as_str().unwrap());
+        fs::write(
+            source.parent().unwrap().join("data/capture.bin"),
+            b"retained capture",
+        )
+        .unwrap();
+        let request = f.home.join("remove.json");
+        fs::write(
+            &request,
+            serde_json::to_vec(
+                &json!({"schema":1,"binary":p["binary"],"expect_revision":p["revision"],"ids":[2]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let preview = f.ok(&[
+            "node",
+            "delete",
+            "fixture",
+            "--file",
+            request.to_str().unwrap(),
+        ]);
+        let failed = f
+            .command(&[
+                "node",
+                "delete",
+                "fixture",
+                "--file",
+                request.to_str().unwrap(),
+                "--expect",
+                preview["token"].as_str().unwrap(),
+            ])
+            .env("SCOPEWORK_CATALOG_FAIL_AT", point)
+            .output()
+            .unwrap();
+        assert_eq!(
+            failed.status.code(),
+            Some(99),
+            "{point}: {}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        let after = f.ok(&["project", "show", "fixture"]);
+        assert_eq!(after["nodes"].as_array().unwrap().len(), 2);
+        let archive = preview["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == 3)
+            .unwrap()["archive"]
+            .as_str()
+            .unwrap();
+        let capture = f
+            .home
+            .join("projects/fixture")
+            .join(archive)
+            .parent()
+            .unwrap()
+            .join("data/capture.bin");
+        assert_eq!(fs::read(capture).unwrap(), b"retained capture");
+        assert_eq!(
+            after["revision"],
+            f.ok(&["project", "show", "fixture"])["revision"]
+        );
+    }
+}
+
+#[test]
+fn journal_inspection_and_compaction_do_not_recover_or_migrate_pending_projects() {
+    let f = Fixture::new();
+    let root = f.home.join("projects/fixture");
+    let path = root.join("project.json");
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    catalog["layout_version"] = json!(4);
+    let original = serde_json::to_vec(&catalog).unwrap();
+    fs::write(&path, &original).unwrap();
+    let pending = root.join("tools/workspaces/catalog-transactions-v4/pending");
+    fs::create_dir_all(&pending).unwrap();
+    fs::write(pending.join("journal.json"), b"conflicted pending fixture").unwrap();
+    for args in [
+        vec!["journal", "fixture"],
+        vec!["journal", "fixture", "--compact"],
+    ] {
+        let status = f.ok(&args);
+        assert_eq!(status["pending_bytes"], b"conflicted pending fixture".len());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            fs::read(pending.join("journal.json")).unwrap(),
+            b"conflicted pending fixture"
+        );
+    }
+    assert!(!root.join("tools/workspaces/layout-migration-v5").exists());
+}
+
+#[test]
+fn format_five_upgrade_preserves_reports_and_original_catalog() {
+    let f = Fixture::new();
+    let root = f.home.join("projects/fixture");
+    let report = fs::read(root.join("app.md")).unwrap();
+    let path = root.join("project.json");
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    catalog["layout_version"] = json!(4);
+    fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    let migrated = f.ok(&["project", "show", "fixture"]);
+    assert_eq!(migrated["layout_version"], 5);
+    assert_eq!(migrated["nodes"], catalog["nodes"]);
+    assert_eq!(fs::read(root.join("app.md")).unwrap(), report);
+    let backup: Value = serde_json::from_slice(
+        &fs::read(root.join("tools/workspaces/layout-migration-v5/before.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(backup, catalog);
 }

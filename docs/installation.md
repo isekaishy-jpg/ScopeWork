@@ -42,6 +42,14 @@ For local development, you can run the rebuilt `target/release/research-dashboar
 
 Re-running the same-version MSI offers Repair or Uninstall. Uninstall removes application files, shortcuts, and its PATH entry. Research files and the saved research-home setting are preserved.
 
+Setup uses Windows Installer's embedded cabinet rather than a separate app-owned extraction/updater cache. Windows manages its installation scratch and repair cache; Scopework does not delete that cache or your downloaded MSI. Empty application, documentation, asset and shortcut directories are removed on uninstall/upgrade. Unknown files in those directories are preserved. Package-build temporary files are cleaned on success or failure.
+
+## Version 0.6.0 journal upgrade
+
+Finish or cancel active imports with the previous version, then close all old GUI/CLI processes. The first project open upgrades its compatibility marker to format 5 under an exclusive library gate, retaining one pre-upgrade catalog in `tools/workspaces/layout-migration-v5`. Reports and supporting evidence do not change. Older executables reject format 5 because they cannot recover the new delta journals.
+
+New edits retain only changed catalog records plus affected report and sidecar contents. To inspect existing completed history, run `research journal PROJECT`; to compact it without deleting history, run `research journal PROJECT --compact`. Each completed journal is replaced atomically. An interrupted compaction can be run again. History inspection and compaction bypass project migration and pending recovery; pending journals remain untouched. See the [CLI guide](cli.md) for retention and archive semantics.
+
 ## Version 0.4.2 folder upgrade
 
 On first GUI or CLI library open, existing current projects migrate to `architectures/<category-id>/<chunk-id>/<RVA>/`. Each level owns its report; functions retain their complete data folders. New projects use this layout immediately. Keep old app/CLI copies closed after upgrading.

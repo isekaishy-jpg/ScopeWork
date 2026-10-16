@@ -2,6 +2,12 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
+#[path = "catalog_remove.rs"]
+mod catalog_remove;
+#[path = "journal_history.rs"]
+mod journal_history;
+pub use catalog_remove::Removal;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Batch {
@@ -77,6 +83,7 @@ struct Sidecar {
     after: String,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Journal {
     before: Project,
     after: Project,
@@ -112,6 +119,13 @@ fn contained(root: &Path, path: &Path) -> Result<()> {
     layout::inside(root, path)
 }
 
+fn fault(_point: &str) {
+    #[cfg(debug_assertions)]
+    if std::env::var("SCOPEWORK_CATALOG_FAIL_AT").as_deref() == Ok(_point) {
+        std::process::exit(99);
+    }
+}
+
 pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
     let folder = pending(root);
     let path = folder.join("journal.json");
@@ -119,8 +133,8 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
         return Ok(());
     }
     contained(root, &path)?;
-    let j: Journal = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let j = journal_history::read_pending(&fs::read(&path).map_err(|e| e.to_string())?, project)?;
+    fault("journal");
     if !same(project, &j.before) && !same(project, &j.after) {
         return Err("Catalog changed during batch transaction. Preserve its journal and resolve the conflict.".into());
     }
@@ -195,6 +209,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
             fs::rename(stage, to).map_err(|e| e.to_string())?;
         }
     }
+    fault("moves");
     let functions: HashSet<_> = j
         .after
         .nodes
@@ -215,6 +230,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
     for file in &j.sidecars {
         atomic(&root.join(&file.path), file.after.as_bytes())?;
     }
+    fault("reports");
     let temporary = Library {
         root: root.parent().ok_or("Missing library directory")?.into(),
         projects: vec![j.after.clone()],
@@ -228,12 +244,14 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
         &root.join("project.json"),
         &serde_json::to_vec_pretty(&j.after).map_err(|e| e.to_string())?,
     )?;
-    *project = j.after;
+    *project = j.after.clone();
+    fault("catalog");
     let receipt = folder.with_file_name(format!("revision-{}", project.revision));
     if receipt.exists() {
         return Err("Batch receipt already exists; preserve the pending journal.".into());
     }
-    fs::rename(folder, receipt).map_err(|e| e.to_string())?;
+    fs::rename(folder, &receipt).map_err(|e| e.to_string())?;
+    journal_history::compact(&receipt.join("journal.json"), &j)?;
     Ok(())
 }
 
@@ -283,7 +301,7 @@ impl Library {
         let folder = prepare_pending(&root)?;
         atomic(
             &folder.join("journal.json"),
-            &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
+            &journal_history::pending_bytes(&journal)?,
         )?;
         #[cfg(debug_assertions)]
         if std::env::var("SCOPEWORK_METADATA_FAIL_AT").as_deref() == Ok("journal") {
@@ -430,7 +448,7 @@ impl Library {
         let folder = prepare_pending(&root)?;
         atomic(
             &folder.join("journal.json"),
-            &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
+            &journal_history::pending_bytes(&journal)?,
         )?;
         resume(&root, &mut self.projects[p])?;
         Ok(changed)
@@ -761,7 +779,7 @@ impl Library {
         fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         atomic(
             &folder.join("journal.json"),
-            &serde_json::to_vec(&j).map_err(|e| e.to_string())?,
+            &journal_history::pending_bytes(&j)?,
         )?;
         resume(&root, &mut self.projects[p])?;
         Ok(created)
@@ -979,14 +997,29 @@ mod tests {
         let workspace = Workspace::new();
         let mut lib = workspace.populate("alpha");
         let batch = inputs(&lib, &[3, 4]);
+        let before = lib.projects[0].clone();
         lib.save_reports(0, &batch).unwrap();
         let root = lib.dir(0);
         let receipt = root.join(format!(
             "tools/workspaces/catalog-transactions-v4/revision-{}",
             lib.projects[0].revision
         ));
-        let journal: Journal =
+        let delta: serde_json::Value =
             serde_json::from_slice(&fs::read(receipt.join("journal.json")).unwrap()).unwrap();
+        assert_eq!(delta["kind"], "completed-catalog-delta");
+        let journal = Journal {
+            before,
+            after: lib.projects[0].clone(),
+            edits: serde_json::from_value(delta["edits"].clone()).unwrap(),
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![],
+        };
+        atomic(
+            &receipt.join("journal.json"),
+            &serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
         // Simulate interruption after the first report, before catalog commit.
         atomic(
             &root.join("project.json"),
@@ -1010,5 +1043,198 @@ mod tests {
         }
         assert!(!pending(&root).exists());
         assert!(receipt.exists());
+    }
+
+    #[test]
+    fn delta_journal_round_trips_both_states_and_rejects_unrelated_changes() {
+        let workspace = Workspace::new();
+        let lib = workspace.populate("alpha");
+        let mut before = lib.projects[0].clone();
+        // Scale metadata in memory only: no per-function files are generated.
+        for id in 5..1005 {
+            let mut node = before.nodes[3].clone();
+            node.id = id;
+            node.rva = Some(id as u32 * 16);
+            before.nodes.push(node);
+        }
+        before.next_id = 1005;
+        let mut after = before.clone();
+        after.nodes[3].name = "Changed".into();
+        after.revision += 1;
+        let j = Journal {
+            before,
+            after,
+            edits: vec![],
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![],
+        };
+        let bytes = journal_history::pending_bytes(&j).unwrap();
+        assert!(
+            bytes.len() < 4000,
+            "a single edit must not duplicate the inventory"
+        );
+        for current in [&j.before, &j.after] {
+            let recovered = journal_history::read_pending(&bytes, current).unwrap();
+            assert!(same(&recovered.before, &j.before));
+            assert!(same(&recovered.after, &j.after));
+        }
+        let mut conflict = j.before.clone();
+        conflict.nodes[4].name = "Unrelated external edit".into();
+        assert!(journal_history::read_pending(&bytes, &conflict).is_err());
+        let mut deleted = j.after.clone();
+        deleted.nodes.remove(3);
+        let deletion = Journal {
+            before: j.after.clone(),
+            after: deleted,
+            edits: vec![],
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![],
+        };
+        let bytes = journal_history::pending_bytes(&deletion).unwrap();
+        assert!(
+            bytes.len() < 4000,
+            "deletion must not copy records merely because their array indices shifted"
+        );
+        for current in [&deletion.before, &deletion.after] {
+            let recovered = journal_history::read_pending(&bytes, current).unwrap();
+            assert!(same(&recovered.before, &deletion.before));
+            assert!(same(&recovered.after, &deletion.after));
+        }
+        let mut reordered = j.after.clone();
+        reordered.nodes.swap(3, 4);
+        reordered.nodes.remove(5);
+        reordered.dependencies.push(Dependency {
+            dependent: 4,
+            prerequisite: 3,
+        });
+        let rearranged = Journal {
+            before: j.after,
+            after: reordered,
+            edits: vec![],
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![],
+        };
+        let bytes = journal_history::pending_bytes(&rearranged).unwrap();
+        for current in [&rearranged.before, &rearranged.after] {
+            let recovered = journal_history::read_pending(&bytes, current).unwrap();
+            assert!(same(&recovered.before, &rearranged.before));
+            assert!(same(&recovered.after, &rearranged.after));
+        }
+    }
+
+    #[test]
+    fn history_compaction_preserves_pending_and_report_history() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        let mut before = lib.projects[0].clone();
+        before.revision -= 1;
+        let j = Journal {
+            before,
+            after: lib.projects[0].clone(),
+            edits: vec![],
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![],
+        };
+        let receipt = lib.dir(0).join(format!(
+            "tools/workspaces/catalog-transactions-v4/revision-{}/journal.json",
+            j.after.revision
+        ));
+        atomic(&receipt, &serde_json::to_vec(&j).unwrap()).unwrap();
+        let folder = prepare_pending(&lib.dir(0)).unwrap();
+        fs::write(folder.join("journal.json"), b"pending sentinel").unwrap();
+        let status = lib.journal_history(0, false).unwrap();
+        assert!(status["reclaimable_bytes"].as_u64().unwrap() > 0);
+        lib.journal_history(0, true).unwrap();
+        assert_eq!(
+            fs::read(folder.join("journal.json")).unwrap(),
+            b"pending sentinel"
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+        assert_eq!(receipt["kind"], "completed-catalog-delta");
+        assert!(receipt["before"].get("nodes").is_none());
+        assert_eq!(
+            lib.journal_history(0, false).unwrap()["reclaimable_bytes"],
+            0
+        );
+    }
+
+    #[test]
+    fn branch_removal_archives_evidence_rewrites_links_and_reopens_consumers() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        lib.set_dependencies(0, 4, "1000").unwrap();
+        let source = lib.path(0, 3).unwrap();
+        fs::write(
+            source.parent().unwrap().join("data/capture.bin"),
+            b"evidence",
+        )
+        .unwrap();
+        let token = lib.report_token(0, 4).unwrap();
+        lib.save_report(
+            0,
+            4,
+            "[source](../00001000/research.md)",
+            "evidence",
+            false,
+            &token,
+        )
+        .unwrap();
+        let request: Removal = serde_json::from_value(serde_json::json!({"schema":1,"binary":lib.projects[0].binary,"expect_revision":lib.projects[0].revision,"ids":[3]})).unwrap();
+        let preview = lib.remove_nodes(0, &request, false, None).unwrap();
+        assert!(source.exists());
+        assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
+        assert!(lib.remove_nodes(0, &request, false, Some("stale")).is_err());
+        let result = lib
+            .remove_nodes(0, &request, false, preview["token"].as_str())
+            .unwrap();
+        assert!(!source.exists());
+        let archived = lib
+            .dir(0)
+            .join(result["candidates"][0]["archive"].as_str().unwrap());
+        assert_eq!(
+            fs::read(archived.parent().unwrap().join("data/capture.bin")).unwrap(),
+            b"evidence"
+        );
+        assert!(lib.projects[0].dependencies.is_empty());
+        assert!(
+            fs::read_to_string(lib.path(0, 4).unwrap())
+                .unwrap()
+                .contains("deleted-nodes")
+        );
+        assert!(
+            !fs::read_to_string(lib.path(0, 2).unwrap())
+                .unwrap()
+                .contains("[Producer]")
+        );
+        assert!(
+            lib.remove_nodes(0, &request, false, preview["token"].as_str())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn prune_preserves_authored_scopes_functions_and_explicit_keep() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        let empty = lib.add(0, 1, "Retired empty", "").unwrap();
+        let authored = lib.add(0, 1, "Open discovery", "").unwrap();
+        let keep = lib.add(0, 1, "Retained empty", "").unwrap();
+        let token = lib.report_token(0, authored).unwrap();
+        lib.save_report(0, authored, "Original source evidence", "", false, &token)
+            .unwrap();
+        let request: Removal = serde_json::from_value(serde_json::json!({"schema":1,"binary":lib.projects[0].binary,"expect_revision":lib.projects[0].revision,"recursive":true,"keep":[keep]})).unwrap();
+        let preview = lib.remove_nodes(0, &request, true, None).unwrap();
+        assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(preview["candidates"][0]["id"], empty);
+        lib.remove_nodes(0, &request, true, preview["token"].as_str())
+            .unwrap();
+        assert!(lib.projects[0].nodes.iter().any(|n| n.id == authored));
+        assert!(lib.projects[0].nodes.iter().any(|n| n.id == keep));
+        assert!(lib.projects[0].nodes.iter().any(|n| n.id == 3));
     }
 }
