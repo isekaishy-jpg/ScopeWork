@@ -171,6 +171,7 @@ pub struct RecordRead {
     pub binary: String,
     pub revision: u64,
     pub dependency_rvas: String,
+    pub review_flag: Option<super::ReviewFlag>,
 }
 impl Library {
     pub fn record(&self, p: usize, id: u64) -> Result<RecordRead> {
@@ -219,6 +220,7 @@ impl Library {
             binary: project.binary.clone(),
             revision: project.revision,
             dependency_rvas,
+            review_flag: self.review_flags(p)?.remove(&id),
         })
     }
 }

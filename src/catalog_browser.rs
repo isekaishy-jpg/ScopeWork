@@ -13,6 +13,7 @@ pub(super) struct Browser {
     expanded: HashSet<u64>,
     query: String,
     focus: bool,
+    flagged_only: bool,
     visible: Vec<(u64, usize)>,
     needs_layout: bool,
     selection: u64,
@@ -26,6 +27,8 @@ pub(super) struct BrowserData {
     children: HashMap<u64, Vec<u64>>,
     focusable: HashSet<u64>,
     pub paths: HashMap<u64, String>,
+    /// Review flag reasons by node ID (from the review-flags sidecar).
+    pub flags: HashMap<u64, String>,
 }
 struct Row {
     id: u64,
@@ -89,12 +92,23 @@ impl Browser {
                 self.needs_layout = true;
             }
         });
-        if ui
-            .checkbox(&mut self.focus, "Required research only")
-            .changed()
-        {
-            self.needs_layout = true;
-        }
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut self.focus, "Required research only")
+                .changed()
+            {
+                self.needs_layout = true;
+            }
+            if ui
+                .checkbox(
+                    &mut self.flagged_only,
+                    format!("Flagged for review ({})", self.data.flags.len()),
+                )
+                .changed()
+            {
+                self.needs_layout = true;
+            }
+        });
         if self.needs_layout {
             self.generation += 1;
             self.needs_layout = false;
@@ -127,8 +141,11 @@ impl Browser {
                 let data = self.data.clone();
                 let expanded = self.expanded.clone();
                 let focus = self.focus;
+                let flagged = self.flagged_only;
                 let query = self.query.trim().to_lowercase();
-                match background::spawn(runtime, move || data.visible(&expanded, focus, &query)) {
+                match background::spawn(runtime, move || {
+                    data.visible(&expanded, focus, flagged, &query)
+                }) {
                     Ok(task) => {
                         self.pending = Some((self.generation, task));
                         self.selection_generation = self.generation;
@@ -197,7 +214,7 @@ impl Browser {
 }
 
 impl BrowserData {
-    pub fn new(project: &Project) -> Self {
+    pub fn new(project: &Project, flags: &std::collections::BTreeMap<u64, ReviewFlag>) -> Self {
         let index = catalog_index::Index::new(project);
         let mut data = Self {
             key: (project.id.clone(), project.revision),
@@ -212,6 +229,10 @@ impl BrowserData {
             }
         }
         data.paths = index.paths;
+        data.flags = flags
+            .iter()
+            .map(|(id, f)| (*id, f.reason.clone()))
+            .collect();
         data.children = index.children;
         data.rows = project
             .nodes
@@ -220,7 +241,12 @@ impl BrowserData {
                 let address = n.rva.map(|r| format!(" 0x{r:08X}")).unwrap_or_default();
                 let required = index.required.contains(&n.id);
                 let label = format!(
-                    "{}: {}{}{}",
+                    "{}{}: {}{}{}",
+                    if flags.contains_key(&n.id) {
+                        "⚑ "
+                    } else {
+                        ""
+                    },
                     n.kind.label(),
                     n.name,
                     address,
@@ -245,9 +271,27 @@ impl BrowserData {
 
         data
     }
-    fn visible(&self, expanded: &HashSet<u64>, focus: bool, query: &str) -> Vec<(u64, usize)> {
+    fn visible(
+        &self,
+        expanded: &HashSet<u64>,
+        focus: bool,
+        flagged: bool,
+        query: &str,
+    ) -> Vec<(u64, usize)> {
         let mut visible = vec![];
-        if query.is_empty() {
+        if flagged {
+            // Flagged records are listed flat so they can be found regardless of expansion.
+            visible.extend(
+                self.rows
+                    .iter()
+                    .filter(|r| {
+                        self.flags.contains_key(&r.id)
+                            && (!focus || r.required)
+                            && r.search.contains(query)
+                    })
+                    .map(|r| (r.id, 0)),
+            );
+        } else if query.is_empty() {
             let mut stack = vec![(0, 0)];
             while let Some((id, depth)) = stack.pop() {
                 if focus && !self.focusable.contains(&id) {

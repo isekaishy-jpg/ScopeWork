@@ -4,6 +4,8 @@
     <MajorUpgrade DowngradeErrorMessage="A newer Scopework is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- Skip the system restore point and reduce costing work so progress starts promptly (per-user, small payload). -->
+    <Property Id="MSIFASTINSTALL" Value="1" />
     <Icon Id="ScopeworkIcon" SourceFile="$(SourceDir)\assets\scopework.ico" />
     <Property Id="ARPPRODUCTICON" Value="ScopeworkIcon" />
     <Property Id="OLDINSTALLDIR">

@@ -71,6 +71,31 @@ Prerequisite RVAs must already have canonical function records in the same proje
 
 The dashboard can stay open during CLI work. Writes reload the latest catalog under a project-specific exclusive lock. Reads share a coherent project lease. Writes serialize; contention may return a busy error and can be retried. Additive import preparation releases the project lease, allowing existing records to remain usable. Different projects proceed independently. Conflicting report edits require review. Background polling updates meters and catalog snapshots automatically; **View > Refresh research progress** requests an immediate refresh. Unsaved editor text is retained and stale saves are rejected.
 
+## Evidence-only saves and status reset (0.7.0)
+
+Generated evidence (inventories, census or decoding sections) should not count as research started. Add `--evidence-only` to `node save`, or `"evidence_only": true` to a `save-batch` request. The report is saved with the usual token checks and journaling, but a Not Started record stays Not Started. A completed record still reopens, because its accepted text changed.
+
+To return records that were marked In Progress only by generated evidence:
+
+```powershell
+$project = research project show example | ConvertFrom-Json
+# request.json: {"schema":1,"binary":"<exact binary>","expect_revision":<revision>,"all_in_progress":true}
+#           or: {"schema":1,"binary":"<exact binary>","expect_revision":<revision>,"ids":[12,13]}
+research node reset-status example --file request.json
+```
+
+Complete records are never changed. Report text and evidence are untouched.
+
+## Review flags (0.7.0)
+
+```powershell
+research node flag example 12 --reason "Check the error branch"
+research node flagged example
+research node unflag example 12
+```
+
+A flag marks a record for review with a short reason. It does not change status, but it blocks completion until cleared. `node show` returns `review_flag`; `status` reports the flag count and a per-record `review_flag`, and flagged records are not `ready_for_review`. Flags are stored in `review-flags.json` beside `project.json` and change through the catalog journal. Deleting a node removes its flag. In the GUI, flagged records show ⚑ in the browser, the "Flagged for review" filter lists them, and the editor has flag and clear controls.
+
 ## Complaints
 
 Put one narrow Markdown report per app issue in the `complaints` path printed by `research home`. Filing the report is the whole process.

@@ -207,6 +207,31 @@ enum NodeCommand {
         evidence_file: PathBuf,
         #[arg(long)]
         expect: String,
+        /// Attach generated evidence without marking research started (Not Started stays Not Started).
+        #[arg(long)]
+        evidence_only: bool,
+    },
+    /// Flag a record for review with a short reason (blocks completion until cleared).
+    Flag {
+        project: String,
+        node: u64,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Clear a record's review flag.
+    Unflag {
+        project: String,
+        node: u64,
+    },
+    /// List flagged records.
+    Flagged {
+        project: String,
+    },
+    /// Return In Progress records to Not Started from a JSON request (ids or all_in_progress).
+    ResetStatus {
+        project: String,
+        #[arg(long)]
+        file: PathBuf,
     },
     /// Attest reviewed understanding after reading the scope criteria and report.
     Complete {
@@ -354,6 +379,10 @@ fn run(args: Args) -> Result<Value, String> {
             | NodeCommand::Create { project, .. }
             | NodeCommand::Show { project, .. }
             | NodeCommand::Save { project, .. }
+            | NodeCommand::ResetStatus { project, .. }
+            | NodeCommand::Flag { project, .. }
+            | NodeCommand::Unflag { project, .. }
+            | NodeCommand::Flagged { project, .. }
             | NodeCommand::Complete { project, .. }
             | NodeCommand::Reopen { project, .. },
         ) => Some(project.as_str()),
@@ -369,6 +398,7 @@ fn run(args: Args) -> Result<Value, String> {
                 NodeCommand::Show { .. }
                     | NodeCommand::List { .. }
                     | NodeCommand::ReadBatch { .. }
+                    | NodeCommand::Flagged { .. }
                     | NodeCommand::Delete { expect: None, .. }
                     | NodeCommand::Prune { expect: None, .. }
             )
@@ -532,12 +562,47 @@ fn run(args: Args) -> Result<Value, String> {
                 body_file,
                 evidence_file,
                 expect: token,
+                evidence_only,
             } => {
                 let p = project(&lib, &id)?;
                 let body = fs::read_to_string(body_file).map_err(|e| e.to_string())?;
                 let evidence = fs::read_to_string(evidence_file).map_err(|e| e.to_string())?;
-                lib.save_report(p, node, &body, &evidence, false, &token)?;
+                if evidence_only {
+                    lib.save_evidence(p, node, &body, &evidence, &token)?;
+                } else {
+                    lib.save_report(p, node, &body, &evidence, false, &token)?;
+                }
                 node_view(&lib, p, node)
+            }
+            NodeCommand::Flag {
+                project: id,
+                node,
+                reason,
+            } => {
+                let p = project(&lib, &id)?;
+                lib.set_review_flag(p, node, Some(&reason))?;
+                node_view(&lib, p, node)
+            }
+            NodeCommand::Unflag { project: id, node } => {
+                let p = project(&lib, &id)?;
+                lib.set_review_flag(p, node, None)?;
+                node_view(&lib, p, node)
+            }
+            NodeCommand::Flagged { project: id } => {
+                let p = project(&lib, &id)?;
+                let flags = lib.review_flags(p)?;
+                let rows: Vec<_> = flags.iter().map(|(n, f)| {
+                    let node = lib.projects[p].nodes.iter().find(|x| x.id == *n);
+                    json!({"id":n,"name":node.map(|x| x.name.as_str()),"kind":node.map(|x| x.kind),"reason":f.reason,"flagged_at_revision":f.flagged_at_revision})
+                }).collect();
+                Ok(json!({"project":id,"flagged":rows}))
+            }
+            NodeCommand::ResetStatus { project: id, file } => {
+                let p = project(&lib, &id)?;
+                let request = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                let reset = lib.reset_status(p, &request)?;
+                Ok(json!({"project":id,"revision":lib.projects[p].revision,"reset":reset}))
             }
             NodeCommand::Complete {
                 project: id,
@@ -594,12 +659,13 @@ fn run(args: Args) -> Result<Value, String> {
             for e in &lib.projects[p].dependencies {
                 deps.entry(e.dependent).or_default().push(e.prerequisite);
             }
+            let flags = lib.review_flags(p)?;
             let records:Vec<_>=lib.projects[p].nodes.iter().map(|n|{
                 let children = kids.get(&n.id).cloned().unwrap_or_default();
                 let blocked_children:Vec<_>=children.iter().copied().filter(|id|states[id]!=Status::Complete).collect();
                 let blocked_prerequisites:Vec<_>=deps.get(&n.id).into_iter().flatten().copied().filter(|id|states[id]!=Status::Complete).collect();
                 json!({"id":n.id,"name":n.name,"kind":n.kind,"status":states[&n.id],"required_research":required.contains(&n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
-                    "ready_for_review":states[&n.id]!=Status::Complete&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty())})
+                    "ready_for_review":states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty()),"review_flag":flags.get(&n.id)})
             }).collect();
             let inventory = lib.projects[p]
                 .nodes
@@ -612,7 +678,7 @@ fn run(args: Args) -> Result<Value, String> {
                 .filter(|n| n.kind == Kind::Function && required.contains(&n.id))
                 .count();
             Ok(
-                json!({"project":id,"app_status":states[&0],"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions,"records":records}),
+                json!({"project":id,"app_status":states[&0],"review_flags":flags.len(),"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions,"records":records}),
             )
         }
         Command::Home | Command::Gui | Command::Criteria { .. } => unreachable!(),

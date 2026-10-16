@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 - 2026-10-16
+
+- Add evidence-only report saves (`node save --evidence-only`, `"evidence_only": true` in `save-batch`). Generated evidence no longer marks research started, so Not Started records keep their dim red meter segments. Add `node reset-status` to return In Progress records to Not Started by ID or for every In Progress record. Meter colours are unchanged: dim red Not Started, yellow In Progress, green Complete.
+- Add review flags: `node flag --reason`, `node unflag` and `node flagged`. Flags appear in `node show`, `status` (count and per record) and the GUI (⚑ marker, "Flagged for review" filter, flag and clear controls in the editor). Flags block completion until cleared, never change status, are dropped with deleted nodes, and live in a journaled `review-flags.json` sidecar that older versions leave intact.
+- Style secondary windows, menus, popups and fields in the dashboard's Windows 95 Task Manager look (square corners, no shadows, grey faces, thin borders, navy selection) from one shared definition used for light and dark modes. Group project settings, tools and import under one collapsed header so the record browser and editor show first.
+- Set `MSIFASTINSTALL=1` so setup skips the system restore point and costs less before progress starts. Document closing Scopework before upgrades and the end-of-install PATH broadcast.
+- Document that moving a function between chunks reopens both chunks, their ancestors and the moved function, while keeping its report and `data/`. Add regression coverage for moves, evidence-only saves, status reset and review flags. Recovery tests that rely on debug-only fault injection now skip explicitly in release test runs.
+
 ## 0.6.0 - 2026-10-16
 
 See [qualification and limits](docs/qualification-0.6.0.md).

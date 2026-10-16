@@ -108,6 +108,7 @@ pub mod imports;
 mod layout;
 pub use catalog_batch::Batch;
 pub use catalog_batch::Removal;
+pub use catalog_batch::ReviewFlag;
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 fn hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -817,6 +818,7 @@ impl Library {
                     body: body.into(),
                     evidence: evidence.into(),
                 }],
+                evidence_only: false,
             };
             self.save_reports(p, &batch)?;
             return Ok(());
@@ -835,6 +837,12 @@ impl Library {
         } else {
             Default::default()
         };
+        if complete && self.review_flags(p)?.contains_key(&id) {
+            return Err(
+                "This record is flagged for review. Clear the review flag before completing it."
+                    .into(),
+            );
+        }
         if complete {
             if body.trim().is_empty() {
                 return Err(
@@ -901,6 +909,36 @@ impl Library {
     }
 }
 
+impl Library {
+    /// Save generated evidence without changing a Not Started or In Progress status.
+    pub fn save_evidence(
+        &mut self,
+        p: usize,
+        id: u64,
+        body: &str,
+        evidence: &str,
+        expected: &str,
+    ) -> Result<()> {
+        if !self.writable(p) {
+            return self.write_project(p, |l, p| l.save_evidence(p, id, body, evidence, expected));
+        }
+        self.check_edit_token(p, id, expected, "draft")?;
+        let batch = catalog_batch::ReportBatch {
+            schema: 2,
+            binary: self.projects[p].binary.clone(),
+            expect_revision: None,
+            reports: vec![catalog_batch::ReportSave {
+                id,
+                expect: expected.into(),
+                body: body.into(),
+                evidence: evidence.into(),
+            }],
+            evidence_only: true,
+        };
+        self.save_reports(p, &batch).map(|_| ())
+    }
+}
+
 type ActionResult = Result<Option<(String, u64)>>;
 
 pub struct ResearchUi {
@@ -941,6 +979,7 @@ pub struct ResearchUi {
     scope_dirty: bool,
     scope_revision: u64,
     complete: bool,
+    flag_reason: String,
 }
 impl Default for ResearchUi {
     fn default() -> Self {
@@ -988,6 +1027,7 @@ impl ResearchUi {
             scope_dirty: false,
             scope_revision: 0,
             complete: false,
+            flag_reason: String::new(),
         }
     }
     fn load(&mut self, p: usize, id: u64) {
@@ -1066,52 +1106,55 @@ impl ResearchUi {
             ui.horizontal_wrapped(|ui|{for (i,p) in projects.iter().enumerate(){if ui.add_enabled(!self.has_unsaved(),egui::Button::new(&p.name).selected(i==self.project)).clicked(){nav=Some((i,0));}}});
             ui.label(format!("Isolated project: {}",project_dir.display()));
 
-            egui::CollapsingHeader::new("Project tools and data folders").show(ui,|ui|{
-                ui.horizontal_wrapped(|ui|{
-                    for (label,folder) in [("Tools","tools"),("Profiles","tools/profiles"),("Shared analysis","tools/workspaces"),("Tool logs","tools/logs")] {
-                        if ui.button(label).clicked()&& let Err(e)=open_folder(&project_dir.join(folder)){self.message=e;}
-                    }
-                });
-                ui.label("Each function owns research.md and data/ in its function folder. Only shared tool workspaces, logs and scratch stay under tools/.");
-            });
-            egui::CollapsingHeader::new("Inventory import").show(ui,|ui|{
-                ui.label("Creation-only JSON batch (exact binary identity and project revision)");
-                ui.text_edit_singleline(&mut self.import_file);
-                if ui.button("Start background import").clicked() {
-                    let file=self.import_file.clone();let project=project.id.clone();
-                    self.action(move |root|{let batch:Batch=serde_json::from_slice(&fs::read(file).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;let job=imports::reserve(&root,&project,&batch)?;background::launch_import(&root,&project,&job.id)?;Ok(None)});
-                }
-                if let Some(job)=self.jobs.get(&project.id).cloned() {
-                    ui.label(format!("{:?}: {} / {} prepared; committed inventory remains separate",job.state,job.prepared,job.total));
-                    if job.state==imports::JobState::Verifying {ui.label(format!("{} / {} records verified",job.verified,job.total));}
-                    if let Some(error)=&job.error {ui.colored_label(egui::Color32::YELLOW,error);}
-                    ui.label(format!("Job {}",job.id));
-                    if !matches!(job.state,imports::JobState::Committed|imports::JobState::Cancelled) {
-                        ui.horizontal(|ui|{
-                            if ui.button("Pause").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{imports::request(&root,&project,&id,false)?;Ok(None)});}
-                            if ui.button("Resume").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{background::launch_import(&root,&project,&id)?;Ok(None)});}
-                            if ui.button("Cancel import").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{imports::request(&root,&project,&id,true)?;Ok(None)});}
-                        });
-                    }
-                }
-            });
-            egui::CollapsingHeader::new("Research scope").default_open(true).show(ui,|ui|{
-                ui.label("A few words describing what is being researched, e.g. Rendering or Asset platform.");
-                if ui.add(egui::TextEdit::singleline(&mut self.scope).desired_width(f32::INFINITY)).changed(){self.scope_dirty=true;}
-                ui.horizontal(|ui|{
-                    if ui.add_enabled(!self.dirty,egui::Button::new("Save research scope")).clicked(){
-                        let scope=self.scope.clone();let revision=self.scope_revision;self.mutate(move |lib,p,id|{lib.set_scope(p,&scope,revision)?;Ok(id)});
-                    }
-                    if ui.button("Discard scope edits").clicked(){self.scope=project.research_scope.clone();self.scope_revision=project.revision;self.scope_dirty=false;}
-                });
-            });
-            egui::CollapsingHeader::new("Binary identity").show(ui,|ui|{
-                ui.label("Build, SHA-256, image base. Use another project for a different binary.");
-                let locked=project.nodes.iter().any(|n|n.kind==Kind::Function);
-                ui.add_enabled(!locked,egui::TextEdit::singleline(&mut self.binary).desired_width(f32::INFINITY));
-                if ui.add_enabled(!locked&&!self.has_unsaved(),egui::Button::new("Save binary identity")).clicked(){
-                    let binary=self.binary.clone();self.mutate(move |lib,p,id|{lib.set_binary(p,&binary)?;Ok(id)});
-                }
+            // Settings and tools stay collapsed so the record browser and editor are the first thing shown.
+            egui::CollapsingHeader::new("Project settings, tools and import").default_open(false).show(ui,|ui|{
+             egui::CollapsingHeader::new("Project tools and data folders").show(ui,|ui|{
+                 ui.horizontal_wrapped(|ui|{
+                     for (label,folder) in [("Tools","tools"),("Profiles","tools/profiles"),("Shared analysis","tools/workspaces"),("Tool logs","tools/logs")] {
+                         if ui.button(label).clicked()&& let Err(e)=open_folder(&project_dir.join(folder)){self.message=e;}
+                     }
+                 });
+                 ui.label("Each function owns research.md and data/ in its function folder. Only shared tool workspaces, logs and scratch stay under tools/.");
+             });
+             egui::CollapsingHeader::new("Inventory import").show(ui,|ui|{
+                 ui.label("Creation-only JSON batch (exact binary identity and project revision)");
+                 ui.text_edit_singleline(&mut self.import_file);
+                 if ui.button("Start background import").clicked() {
+                     let file=self.import_file.clone();let project=project.id.clone();
+                     self.action(move |root|{let batch:Batch=serde_json::from_slice(&fs::read(file).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;let job=imports::reserve(&root,&project,&batch)?;background::launch_import(&root,&project,&job.id)?;Ok(None)});
+                 }
+                 if let Some(job)=self.jobs.get(&project.id).cloned() {
+                     ui.label(format!("{:?}: {} / {} prepared; committed inventory remains separate",job.state,job.prepared,job.total));
+                     if job.state==imports::JobState::Verifying {ui.label(format!("{} / {} records verified",job.verified,job.total));}
+                     if let Some(error)=&job.error {ui.colored_label(egui::Color32::YELLOW,error);}
+                     ui.label(format!("Job {}",job.id));
+                     if !matches!(job.state,imports::JobState::Committed|imports::JobState::Cancelled) {
+                         ui.horizontal(|ui|{
+                             if ui.button("Pause").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{imports::request(&root,&project,&id,false)?;Ok(None)});}
+                             if ui.button("Resume").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{background::launch_import(&root,&project,&id)?;Ok(None)});}
+                             if ui.button("Cancel import").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{imports::request(&root,&project,&id,true)?;Ok(None)});}
+                         });
+                     }
+                 }
+             });
+             egui::CollapsingHeader::new("Research scope").default_open(true).show(ui,|ui|{
+                 ui.label("A few words describing what is being researched, e.g. Rendering or Asset platform.");
+                 if ui.add(egui::TextEdit::singleline(&mut self.scope).desired_width(f32::INFINITY)).changed(){self.scope_dirty=true;}
+                 ui.horizontal(|ui|{
+                     if ui.add_enabled(!self.dirty,egui::Button::new("Save research scope")).clicked(){
+                         let scope=self.scope.clone();let revision=self.scope_revision;self.mutate(move |lib,p,id|{lib.set_scope(p,&scope,revision)?;Ok(id)});
+                     }
+                     if ui.button("Discard scope edits").clicked(){self.scope=project.research_scope.clone();self.scope_revision=project.revision;self.scope_dirty=false;}
+                 });
+             });
+             egui::CollapsingHeader::new("Binary identity").show(ui,|ui|{
+                 ui.label("Build, SHA-256, image base. Use another project for a different binary.");
+                 let locked=project.nodes.iter().any(|n|n.kind==Kind::Function);
+                 ui.add_enabled(!locked,egui::TextEdit::singleline(&mut self.binary).desired_width(f32::INFINITY));
+                 if ui.add_enabled(!locked&&!self.has_unsaved(),egui::Button::new("Save binary identity")).clicked(){
+                     let binary=self.binary.clone();self.mutate(move |lib,p,id|{lib.set_binary(p,&binary)?;Ok(id)});
+                 }
+             });
             });
             ui.separator();
             ui.columns(2,|columns| {
@@ -1126,6 +1169,15 @@ impl ResearchUi {
                     let batch = Batch { schema: 1, repair_legacy_links: false, binary: project.binary.clone(), expect_revision: project.revision, create: vec![], update: vec![catalog_batch::Update { id: n.id, parent: None, name: None, context_only: Some(context_only) }], reorder: vec![] };
                     self.mutate(move |lib,p,id|{lib.batch(p,&batch)?;Ok(id)});
                 }
+                let flag=self.browser_data[self.project].flags.get(&n.id).cloned();
+                ui.horizontal(|ui|{
+                    match &flag {
+                        Some(reason)=>{ui.colored_label(egui::Color32::from_rgb(170,90,0),format!("⚑ Flagged for review: {reason}"));
+                            if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Clear flag")).clicked(){self.mutate(move |lib,p,id|{lib.set_review_flag(p,id,None)?;Ok(id)});}}
+                        None=>{ui.add(egui::TextEdit::singleline(&mut self.flag_reason).hint_text("Reason to review").desired_width(220.0));
+                            if ui.add_enabled(!self.has_unsaved()&&!self.flag_reason.trim().is_empty(),egui::Button::new("Flag for review")).clicked(){let reason=std::mem::take(&mut self.flag_reason);self.mutate(move |lib,p,id|{lib.set_review_flag(p,id,Some(&reason))?;Ok(id)});}}
+                    }
+                });
                 if n.kind==Kind::Function && ui.button("Open this function's data folder").clicked(){
                     let path=project_dir.join(&self.browser_data[self.project].paths[&self.node]).parent().unwrap().join("data");
                     if let Err(e)=open_folder(&path){self.message=e;}

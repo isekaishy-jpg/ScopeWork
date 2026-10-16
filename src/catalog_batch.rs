@@ -53,6 +53,10 @@ pub struct ReportBatch {
     pub binary: String,
     pub expect_revision: Option<u64>,
     pub reports: Vec<ReportSave>,
+    /// Attach generated evidence without starting research: Not Started stays Not Started.
+    /// A completed report still reopens, because its accepted text changes.
+    #[serde(default)]
+    pub evidence_only: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -255,6 +259,141 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
     Ok(())
 }
 
+/// Review flags live in a journaled sidecar beside the catalog, keyed by node ID, so older
+/// Scopework versions leave them intact instead of dropping an unknown catalog field.
+pub const REVIEW_FLAGS: &str = "review-flags.json";
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub struct ReviewFlag {
+    pub reason: String,
+    pub flagged_at_revision: u64,
+}
+pub(super) fn read_flags(root: &Path) -> Result<std::collections::BTreeMap<u64, ReviewFlag>> {
+    let path = root.join(REVIEW_FLAGS);
+    if !path.is_file() {
+        return Ok(Default::default());
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    if value["schema"] != 1 {
+        return Err("Unsupported review flag file".into());
+    }
+    serde_json::from_value(value["flags"].clone()).map_err(|e| e.to_string())
+}
+fn flags_text(flags: &std::collections::BTreeMap<u64, ReviewFlag>) -> Result<String> {
+    serde_json::to_string_pretty(&serde_json::json!({"schema":1,"flags":flags}))
+        .map_err(|e| e.to_string())
+}
+impl Library {
+    pub fn review_flags(&self, p: usize) -> Result<std::collections::BTreeMap<u64, ReviewFlag>> {
+        read_flags(&self.dir(p))
+    }
+    /// Flag (Some reason) or clear (None) a record for review. Flags never change status; they block completion.
+    pub fn set_review_flag(&mut self, p: usize, id: u64, reason: Option<&str>) -> Result<()> {
+        if !self.writable(p) {
+            return self.write_project(p, |l, p| l.set_review_flag(p, id, reason));
+        }
+        if !self.projects[p].nodes.iter().any(|n| n.id == id) {
+            return Err("Unknown node".into());
+        }
+        let root = self.dir(p);
+        let path = root.join(REVIEW_FLAGS);
+        if !path.is_file() {
+            atomic(&path, flags_text(&Default::default())?.as_bytes())?;
+        }
+        let before_text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut flags = read_flags(&root)?;
+        match reason.map(str::trim) {
+            Some("") => return Err("A review flag needs a short reason.".into()),
+            Some(reason) => {
+                flags.insert(
+                    id,
+                    ReviewFlag {
+                        reason: reason.into(),
+                        flagged_at_revision: self.projects[p].revision + 1,
+                    },
+                );
+            }
+            None => {
+                if flags.remove(&id).is_none() {
+                    return Ok(());
+                }
+            }
+        }
+        let before = self.projects[p].clone();
+        let mut after = before.clone();
+        after.revision += 1;
+        let journal = Journal {
+            before,
+            after,
+            edits: vec![],
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![Sidecar {
+                path: REVIEW_FLAGS.into(),
+                before: before_text,
+                after: flags_text(&flags)?,
+            }],
+        };
+        let folder = prepare_pending(&root)?;
+        atomic(
+            &folder.join("journal.json"),
+            &journal_history::pending_bytes(&journal)?,
+        )?;
+        resume(&root, &mut self.projects[p])
+    }
+}
+/// Return started-but-incomplete records to Not Started (for example after generated evidence was attached).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusReset {
+    pub schema: u32,
+    pub binary: String,
+    pub expect_revision: u64,
+    #[serde(default)]
+    pub ids: Vec<u64>,
+    /// Apply to every In Progress record instead of listing IDs.
+    #[serde(default)]
+    pub all_in_progress: bool,
+}
+impl Library {
+    pub fn reset_status(&mut self, p: usize, request: &StatusReset) -> Result<Vec<u64>> {
+        if !self.writable(p) {
+            return self.write_project(p, |l, p| l.reset_status(p, request));
+        }
+        let before = self.projects[p].clone();
+        if request.schema != 1
+            || request.binary != before.binary
+            || request.expect_revision != before.revision
+            || request.all_in_progress == !request.ids.is_empty()
+        {
+            return Err("Status reset requires schema 1, the exact binary and revision, and either ids or all_in_progress.".into());
+        }
+        let wanted: HashSet<u64> = request.ids.iter().copied().collect();
+        if wanted
+            .iter()
+            .any(|id| !before.nodes.iter().any(|n| n.id == *id))
+        {
+            return Err("Unknown node in status reset".into());
+        }
+        let mut after = before.clone();
+        let mut reset = vec![];
+        for n in &mut after.nodes {
+            if n.status == Status::InProgress && (request.all_in_progress || wanted.contains(&n.id))
+            {
+                n.status = Status::NotStarted;
+                n.revision += 1;
+                reset.push(n.id);
+            }
+        }
+        if reset.is_empty() {
+            return Ok(reset);
+        }
+        after.revision += 1;
+        self.commit_metadata(p, before, after, vec![], vec![])?;
+        Ok(reset)
+    }
+}
 impl Library {
     pub(super) fn commit_report(
         &mut self,
@@ -379,14 +518,16 @@ impl Library {
             if original == output && node.status != Status::Complete {
                 continue;
             }
-            statuses.insert(
-                input.id,
-                if input.body.trim().is_empty() && input.evidence.trim().is_empty() {
-                    Status::NotStarted
-                } else {
-                    Status::InProgress
-                },
-            );
+            if !batch.evidence_only {
+                statuses.insert(
+                    input.id,
+                    if input.body.trim().is_empty() && input.evidence.trim().is_empty() {
+                        Status::NotStarted
+                    } else {
+                        Status::InProgress
+                    },
+                );
+            }
             edits.push(Edit {
                 id: input.id,
                 old: Some(path.clone()),
@@ -864,6 +1005,7 @@ mod tests {
                     evidence: "Synthetic fixture evidence".into(),
                 })
                 .collect(),
+            evidence_only: false,
         }
     }
     #[test]

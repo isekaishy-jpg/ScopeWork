@@ -184,10 +184,15 @@ pub(super) fn snapshot(
         .collect::<Vec<_>>();
     let runtime = runtime(2)?;
     let input = projects.clone();
+    let flag_root = root.clone();
     let browser = join(spawn(&runtime, move || {
         input
             .iter()
-            .map(|p| Arc::new(catalog_browser::BrowserData::new(p)))
+            .map(|p| {
+                let flags =
+                    super::catalog_batch::read_flags(&flag_root.join(&p.id)).unwrap_or_default();
+                Arc::new(catalog_browser::BrowserData::new(p, &flags))
+            })
             .collect()
     })?)?;
     Ok(Snapshot {

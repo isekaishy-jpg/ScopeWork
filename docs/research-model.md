@@ -61,6 +61,12 @@ When a project has architecture records, its dashboard uses them: one meter per 
 
 Research lives outside the installation and checkout. The installer lets you choose a research home; new installations default to `%LOCALAPPDATA%\Scopework`. It contains `projects/` and one shared `complaints/` folder. The saved home is shared by the GUI and CLI. Earlier default homes continue to be used when present; no research is moved. Set `RESEARCH_DASHBOARD_HOME` to another absolute home before launching, or use CLI `--home PATH`. Projects have separate IDs, trees, metadata, evidence directories, and document membership. Do not copy research between projects without an explicit evidence reference and scope review.
 
+### Moves, review flags and evidence-only saves
+
+Moving a function between chunks reopens both chunks and their ancestors. The moved function also returns to In Progress, because its report is regenerated with the new parent link. Its research text and `data/` folder move with it unchanged.
+
+Review flags mark any record for another look, with a reason. They block completion until cleared and never change status. Evidence attached by tools should use evidence-only saves so Not Started meters stay dim red until research actually starts.
+
 ## Run
 
 Agents file narrow app complaints in the single `complaints/` folder under the research home, one Markdown report per issue. `research home` prints its path. Filing the report is the entire process. The [folder guide](../complaints/README.md) is bundled into new homes.

@@ -275,6 +275,21 @@ impl Library {
                 });
             }
         }
+        let flag_path = root.join(super::REVIEW_FLAGS);
+        if !removed.is_empty() && flag_path.is_file() {
+            let original = fs::read_to_string(&flag_path).map_err(|e| e.to_string())?;
+            let mut flags = super::read_flags(&root)?;
+            let count = flags.len();
+            flags.retain(|id, _| !removed.contains(id));
+            if flags.len() != count {
+                sidecars.push(Sidecar {
+                    path: super::REVIEW_FLAGS.into(),
+                    before: original,
+                    after: serde_json::to_string_pretty(&json!({"schema":1,"flags":flags}))
+                        .map_err(|e| e.to_string())?,
+                });
+            }
+        }
         if !removed.is_empty() {
             after.revision += 1;
             after.structural_epoch += 1;

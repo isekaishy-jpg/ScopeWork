@@ -36,6 +36,8 @@ Changing the selected home opens another library. Scopework never automatically 
 
 ## Upgrades and removal
 
+Close Scopework (the dashboard and any `research.exe` workers) before upgrading, so files are not in use. Setup skips the system restore point (`MSIFASTINSTALL`). When the PATH option is on, Windows broadcasts the environment change to open windows at the end of setup; an unresponsive application can make that last step look stalled for a short time. If setup seems to hang, run `msiexec /i Scopework-<version>-x64.msi /l*v install.log` and check which action is slow.
+
 Close Scopework and stop agent CLI/tool jobs before installing a newer-version MSI. Setup reuses saved location and option choices. The app has no automatic update checker or downloader.
 
 For local development, you can run the rebuilt `target/release/research-dashboard.exe` directly without reinstalling. It uses the same research-home selection. Installed shortcuts continue to launch the installed copy until you upgrade it.

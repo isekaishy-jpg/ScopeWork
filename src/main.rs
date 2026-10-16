@@ -55,6 +55,73 @@ fn foreground(dark: bool) -> Color32 {
     }
 }
 
+/// Windows 95 Task Manager styling for every egui surface (secondary windows, menus, popups, fields),
+/// matching the custom-painted dashboard: square corners, no shadows, grey faces, thin dark borders.
+fn classic_visuals(dark: bool) -> egui::Visuals {
+    let mut visuals = if dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    let face = background(dark);
+    let ink = foreground(dark);
+    let edge = if dark {
+        Color32::from_gray(90)
+    } else {
+        Color32::from_gray(100)
+    };
+    visuals.override_text_color = Some(ink);
+    visuals.panel_fill = face;
+    visuals.window_fill = face;
+    visuals.faint_bg_color = face;
+    visuals.extreme_bg_color = if dark {
+        Color32::from_rgb(15, 18, 23)
+    } else {
+        Color32::WHITE
+    };
+    visuals.window_stroke = egui::Stroke::new(1.0_f32, edge);
+    visuals.window_corner_radius = egui::CornerRadius::ZERO;
+    visuals.menu_corner_radius = egui::CornerRadius::ZERO;
+    visuals.window_shadow = egui::Shadow::NONE;
+    visuals.popup_shadow = egui::Shadow::NONE;
+    visuals.selection.bg_fill = if dark {
+        Color32::from_rgb(37, 48, 66)
+    } else {
+        Color32::from_rgb(0, 0, 128)
+    };
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, if dark { ink } else { Color32::WHITE });
+    for (widget, fill) in [
+        (&mut visuals.widgets.noninteractive, face),
+        (&mut visuals.widgets.inactive, face),
+        (
+            &mut visuals.widgets.hovered,
+            if dark {
+                Color32::from_rgb(45, 50, 60)
+            } else {
+                Color32::from_rgb(212, 208, 200)
+            },
+        ),
+        (
+            &mut visuals.widgets.active,
+            if dark {
+                Color32::from_rgb(20, 23, 28)
+            } else {
+                Color32::from_rgb(170, 170, 170)
+            },
+        ),
+        (&mut visuals.widgets.open, face),
+    ] {
+        widget.corner_radius = egui::CornerRadius::ZERO;
+        widget.bg_fill = fill;
+        widget.weak_bg_fill = fill;
+        widget.bg_stroke = egui::Stroke::new(1.0_f32, edge);
+        widget.fg_stroke = egui::Stroke::new(1.0_f32, ink);
+        widget.expansion = 0.0;
+    }
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, edge);
+    visuals
+}
+
 fn bevel(p: &egui::Painter, r: egui::Rect, inset: bool) {
     let dark_mode = p.ctx().style().visuals.dark_mode;
     let highlight = if dark_mode {
@@ -250,23 +317,7 @@ impl eframe::App for Dashboard {
             self.selection = None;
         }
         if ctx.style().visuals.dark_mode != self.dark {
-            let mut visuals = if self.dark {
-                egui::Visuals::dark()
-            } else {
-                egui::Visuals::light()
-            };
-            visuals.override_text_color = Some(foreground(self.dark));
-            visuals.panel_fill = background(self.dark);
-            for widget in [
-                &mut visuals.widgets.noninteractive,
-                &mut visuals.widgets.inactive,
-                &mut visuals.widgets.hovered,
-                &mut visuals.widgets.active,
-                &mut visuals.widgets.open,
-            ] {
-                widget.corner_radius = egui::CornerRadius::ZERO;
-            }
-            ctx.set_visuals(visuals);
+            ctx.set_visuals(classic_visuals(self.dark));
         }
         let bg = background(self.dark);
         let ink = foreground(self.dark);
@@ -767,20 +818,7 @@ fn main() -> eframe::Result {
                     .insert(0, "Tahoma".into());
                 cc.egui_ctx.set_fonts(fonts);
             }
-            let mut visuals = egui::Visuals::light();
-            visuals.panel_fill = Color32::from_rgb(192, 192, 192);
-            visuals.override_text_color = Some(Color32::BLACK);
-            visuals.selection.bg_fill = Color32::from_rgb(170, 180, 196);
-            for widget in [
-                &mut visuals.widgets.noninteractive,
-                &mut visuals.widgets.inactive,
-                &mut visuals.widgets.hovered,
-                &mut visuals.widgets.active,
-                &mut visuals.widgets.open,
-            ] {
-                widget.corner_radius = egui::CornerRadius::ZERO;
-            }
-            cc.egui_ctx.set_visuals(visuals);
+            cc.egui_ctx.set_visuals(classic_visuals(false));
             cc.egui_ctx.style_mut(|s| {
                 s.spacing.item_spacing = Vec2::new(8.0, 4.0);
             });

@@ -101,6 +101,14 @@ impl Drop for Fixture {
         fs::remove_dir_all(target).unwrap();
     }
 }
+/// Fault and I/O injection only exist in debug builds; release test runs skip these recovery tests explicitly.
+fn skipped_without_fault_injection() -> bool {
+    if cfg!(debug_assertions) {
+        return false;
+    }
+    eprintln!("skipped: requires debug-build fault injection (run without --release)");
+    true
+}
 #[test]
 fn unrelated_tokens_survive_and_completion_has_a_distinct_purpose() {
     let f = Fixture::new();
@@ -273,6 +281,9 @@ fn pause_cancel_and_reservation_never_reuse_ids() {
 }
 #[test]
 fn process_exit_at_each_publication_boundary_recovers_once() {
+    if skipped_without_fault_injection() {
+        return;
+    }
     for point in [
         "segment_planned",
         "segment_done",
@@ -318,6 +329,9 @@ fn process_exit_at_each_publication_boundary_recovers_once() {
 }
 #[test]
 fn cancellation_preserves_changed_and_foreign_files_and_recovers_release() {
+    if skipped_without_fault_injection() {
+        return;
+    }
     let f = Fixture::new();
     let input = f.input(2);
     let failed = f
@@ -499,6 +513,9 @@ fn completion_inputs_and_schema_two_batch_conflicts() {
 }
 #[test]
 fn completed_segment_tamper_and_read_only_plan_are_detected() {
+    if skipped_without_fault_injection() {
+        return;
+    }
     let f = Fixture::new();
     let input = f.input(2);
     let before = fs::read(f.home.join("projects/fixture/project.json")).unwrap();
@@ -548,6 +565,9 @@ fn completed_segment_tamper_and_read_only_plan_are_detected() {
 }
 #[test]
 fn provider_failure_resumes_without_reallocating_or_overwriting() {
+    if skipped_without_fault_injection() {
+        return;
+    }
     let f = Fixture::new();
     let input = f.input(4);
     assert!(
@@ -616,6 +636,9 @@ fn shared_reads_coexist_and_exclude_cross_process_writes() {
 }
 #[test]
 fn metadata_journals_recover_dependencies_and_empty_pending_is_reusable() {
+    if skipped_without_fault_injection() {
+        return;
+    }
     let f = Fixture::new();
     let a = f.ok(&["node", "show", "fixture", "3"]);
     let failed = f
@@ -686,6 +709,9 @@ fn single_creation_refuses_foreign_data_and_reserved_windows_names() {
 
 #[test]
 fn branch_delete_recovers_after_each_publication_boundary() {
+    if skipped_without_fault_injection() {
+        return;
+    }
     for point in ["journal", "moves", "reports", "catalog"] {
         let f = Fixture::new();
         let p = f.ok(&["project", "show", "fixture"]);
