@@ -104,6 +104,8 @@ mod catalog_index;
 pub mod coordination;
 #[path = "edit_tokens.rs"]
 mod edit_tokens;
+#[path = "history.rs"]
+pub mod history;
 #[path = "imports.rs"]
 pub mod imports;
 #[path = "layout.rs"]

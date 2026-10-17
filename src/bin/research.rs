@@ -48,6 +48,9 @@ enum Command {
     Claim(ClaimCommand),
     /// Completed records reopened by structural changes, waiting for their owner's review.
     ReviewQueue { project: String },
+    /// Read the project history (catalog receipts and tooling entries) or append a tooling entry.
+    #[command(subcommand)]
+    History(HistoryCommand),
     /// Inspect completed journal storage, or compact full history to change receipts.
     Journal {
         project: String,
@@ -301,6 +304,56 @@ enum NodeCommand {
     },
 }
 #[derive(Subcommand)]
+enum HistoryCommand {
+    /// Entries newest first: catalog transaction receipts and project tooling entries.
+    Show {
+        project: String,
+        /// Only entries touching this node.
+        #[arg(long)]
+        node: Option<u64>,
+        /// Lowest catalog revision to include.
+        #[arg(long)]
+        since: Option<u64>,
+        /// Highest catalog revision to include.
+        #[arg(long)]
+        until: Option<u64>,
+        /// Maximum entries (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Only catalog receipts or only tooling entries.
+        #[arg(long, value_enum)]
+        only: Option<HistorySource>,
+        /// Only tooling entries of this kind (or `catalog`).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Include changed records, not only a summary.
+        #[arg(long)]
+        detail: bool,
+    },
+    /// Append a tooling entry (for example ledger-change, ghidra-apply, generated-artifact).
+    Append {
+        project: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        summary: String,
+        /// Nodes the entry concerns (repeatable).
+        #[arg(long = "node")]
+        nodes: Vec<u64>,
+        /// Paths or identifiers the entry refers to (repeatable).
+        #[arg(long = "ref")]
+        refs: Vec<String>,
+        /// JSON file with the diff (what changed, not a whole-file copy).
+        #[arg(long)]
+        diff_file: Option<PathBuf>,
+    },
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum HistorySource {
+    Catalog,
+    Tooling,
+}
+#[derive(Subcommand)]
 enum ClaimCommand {
     /// Claim a branch; another owner's unexpired claim is refused unless --force.
     Set {
@@ -479,7 +532,10 @@ fn run(args: Args) -> Result<Value, String> {
             | ClaimCommand::Release { project, .. }
             | ClaimCommand::List { project },
         )
-        | Command::ReviewQueue { project } => Some(project.as_str()),
+        | Command::ReviewQueue { project }
+        | Command::History(
+            HistoryCommand::Show { project, .. } | HistoryCommand::Append { project, .. },
+        ) => Some(project.as_str()),
         Command::Deps(DepsCommand::Get { project, .. } | DepsCommand::Set { project, .. })
         | Command::Journal { project, .. }
         | Command::Status { project, .. } => Some(project.as_str()),
@@ -499,6 +555,7 @@ fn run(args: Args) -> Result<Value, String> {
             | Command::Deps(DepsCommand::Get { .. })
             | Command::Claim(ClaimCommand::List { .. })
             | Command::ReviewQueue { .. }
+            | Command::History(HistoryCommand::Show { .. })
             | Command::Status { .. }
             | Command::Journal { compact: false, .. }
     );
@@ -866,6 +923,48 @@ fn run(args: Args) -> Result<Value, String> {
                 Ok(json!({"project": id, "claims": claims}))
             }
         },
+        Command::History(HistoryCommand::Show {
+            project: id,
+            node,
+            since,
+            until,
+            limit,
+            only,
+            kind,
+            detail,
+        }) => {
+            let p = project(&lib, &id)?;
+            lib.history(
+                p,
+                &research_dashboard::research::history::HistoryFilter {
+                    node,
+                    since,
+                    until,
+                    limit,
+                    catalog: !matches!(only, Some(HistorySource::Tooling)),
+                    tooling: !matches!(only, Some(HistorySource::Catalog)),
+                    detail,
+                    kind,
+                },
+            )
+        }
+        Command::History(HistoryCommand::Append {
+            project: id,
+            kind,
+            summary,
+            nodes,
+            refs,
+            diff_file,
+        }) => {
+            let p = project(&lib, &id)?;
+            let diff = diff_file
+                .map(|f| -> Result<Value, String> {
+                    serde_json::from_slice(&fs::read(f).map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())
+                })
+                .transpose()?;
+            lib.append_history(p, &kind, &summary, &nodes, &refs, diff)
+        }
         Command::ReviewQueue { project: id } => {
             let p = project(&lib, &id)?;
             let states = lib.effective_all(p);
