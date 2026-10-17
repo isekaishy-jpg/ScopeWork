@@ -125,3 +125,84 @@ fn writes_remove_orphaned_temporaries_and_store_compact_catalogs() {
     let parsed: Value = serde_json::from_str(&catalog).unwrap();
     assert_eq!(parsed["nodes"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn locks_lists_the_holder_and_waiters_and_wait_idle_returns_after_release() {
+    let f = Fixture::new();
+    let held = f.hold();
+    let mut waiter = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        .arg("--home")
+        .arg(&f.home)
+        .args(["--wait", "20", "node", "show", "fixture", "0"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut seen = false;
+    for _ in 0..100 {
+        let locks = f.ok(&["locks", "fixture"]);
+        assert_eq!(locks["writer_active"], true);
+        assert_eq!(locks["writer"]["pid"], 4242);
+        if locks["waiting"].as_array().unwrap().len() == 1 {
+            assert_eq!(locks["waiting"][0]["write"], false);
+            seen = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(seen, "the waiting reader should be listed");
+    let idle = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        .arg("--home")
+        .arg(&f.home)
+        .args(["wait", "fixture", "--idle", "--timeout", "20"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    drop(held);
+    assert!(waiter.wait().unwrap().success());
+    let out = idle.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let waited: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(waited["waited_ms"].as_u64().unwrap() >= 250);
+    assert!(
+        f.ok(&["locks", "fixture"])["waiting"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn wait_times_out_and_session_answers_one_line_per_command() {
+    let f = Fixture::new();
+    let _held = f.hold();
+    let out = f.run(&["wait", "fixture", "--idle", "--timeout", "1"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("\"kind\":\"timeout\""));
+    drop(_held);
+    use std::io::Write;
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        .arg("--home")
+        .arg(&f.home)
+        .arg("session")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"[\"project\",\"revision\",\"fixture\"]\n[\"nope\"]\n[\"session\"]\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let lines: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["ok"]["project"], "fixture");
+    assert_eq!(lines[1]["kind"], "usage");
+    assert_eq!(lines[2]["kind"], "usage");
+}

@@ -51,6 +51,27 @@ enum Command {
     /// Read the project history (catalog receipts and tooling entries) or append a tooling entry.
     #[command(subcommand)]
     History(HistoryCommand),
+    /// Who holds a project's lock and which processes are waiting for it (takes no lock).
+    Locks { project: String },
+    /// Block until a condition holds instead of polling from outside.
+    Wait {
+        project: String,
+        /// Until no writer holds the project lock.
+        #[arg(long)]
+        idle: bool,
+        /// Until the catalog revision is above this value.
+        #[arg(long)]
+        revision_above: Option<u64>,
+        /// Until this node's effective status is Complete.
+        #[arg(long)]
+        complete: Option<u64>,
+        /// Give up after this many seconds (exit 1, kind `timeout`).
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+    },
+    /// Run commands from stdin, one JSON array of arguments per line, answering one JSON line each.
+    /// Keeps one process (and its caches) for many commands.
+    Session,
     /// Inspect completed journal storage, or compact full history to change receipts.
     Journal {
         project: String,
@@ -479,6 +500,55 @@ fn run(args: Args) -> Result<Value, String> {
                 job_result(imports::request(&root, project, job, true)?)
             }
         };
+    }
+    if let Command::Locks { project } = &args.command {
+        return research_dashboard::research::lock_status(&root, project);
+    }
+    if let Command::Wait {
+        project: id,
+        idle,
+        revision_above,
+        complete,
+        timeout,
+    } = &args.command
+    {
+        if !idle && revision_above.is_none() && complete.is_none() {
+            return Err(
+                "Give at least one condition: --idle, --revision-above or --complete.".into(),
+            );
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(*timeout);
+        let started = std::time::Instant::now();
+        loop {
+            let status = research_dashboard::research::lock_status(&root, id)?;
+            let idle_ok = !idle || status["writer_active"] == false;
+            let revision = fs::read(root.join(id).join("project.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|v| v["revision"].as_u64())
+                .unwrap_or(0);
+            let revision_ok = revision_above.is_none_or(|r| revision > r);
+            let complete_ok = match complete {
+                None => true,
+                Some(node) => match Library::read_project(root.clone(), id) {
+                    Ok(lib) => lib
+                        .projects
+                        .first()
+                        .is_some_and(|_| lib.effective_all(0).get(node) == Some(&Status::Complete)),
+                    Err(e) if e.contains("is busy") => false,
+                    Err(e) => return Err(e),
+                },
+            };
+            if idle_ok && revision_ok && complete_ok {
+                return Ok(
+                    json!({"project": id, "revision": revision, "waited_ms": started.elapsed().as_millis() as u64}),
+                );
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("timeout: condition not met within {timeout} s"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
     }
     if let Command::Journal { project, compact } = &args.command {
         return Library::inspect_journals(root, project, *compact);
@@ -978,26 +1048,77 @@ fn run(args: Args) -> Result<Value, String> {
             }).collect();
             Ok(json!({"project": id, "count": entries.len(), "entries": entries}))
         }
-        Command::Home | Command::Gui | Command::Criteria { .. } => unreachable!(),
+        Command::Home
+        | Command::Gui
+        | Command::Criteria { .. }
+        | Command::Locks { .. }
+        | Command::Wait { .. }
+        | Command::Session => unreachable!(),
     }
 }
+/// JSON-lines command loop: each stdin line is a JSON array of arguments (without `research`).
+fn session(home: Option<PathBuf>, wait: Option<u64>) {
+    use std::io::{BufRead, Write};
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let answer = match serde_json::from_str::<Vec<String>>(&line) {
+            Err(e) => {
+                json!({"error": format!("Each line must be a JSON array of arguments: {e}"), "kind": "usage"})
+            }
+            Ok(words) => {
+                let mut argv = vec!["research".to_string()];
+                if let Some(home) = &home {
+                    argv.extend(["--home".into(), home.to_string_lossy().into_owned()]);
+                }
+                if let Some(wait) = wait {
+                    argv.extend(["--wait".into(), wait.to_string()]);
+                }
+                argv.extend(words);
+                match Args::try_parse_from(&argv) {
+                    Err(e) => json!({"error": e.to_string(), "kind": "usage"}),
+                    Ok(args) if matches!(args.command, Command::Session | Command::Gui) => {
+                        json!({"error": "session and gui cannot run inside a session", "kind": "usage"})
+                    }
+                    Ok(args) => match run(args) {
+                        Ok(value) => json!({"ok": value}),
+                        Err(error) => json!({"error": error, "kind": error_kind(&error)}),
+                    },
+                }
+            }
+        };
+        if writeln!(stdout, "{answer}").is_err() || stdout.flush().is_err() {
+            break;
+        }
+    }
+}
+fn error_kind(error: &str) -> &str {
+    error
+        .split_once(':')
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| {
+            !prefix.is_empty() && prefix.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
+        })
+        .unwrap_or(if error.contains("is busy") {
+            "busy"
+        } else {
+            "operation_failed"
+        })
+}
 fn main() {
-    match run(Args::parse()) {
+    let args = Args::parse();
+    if matches!(args.command, Command::Session) {
+        session(args.home, args.wait);
+        return;
+    }
+    match run(args) {
         Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
         Err(error) => {
-            let kind = error
-                .split_once(':')
-                .map(|(prefix, _)| prefix)
-                .filter(|prefix| {
-                    !prefix.is_empty()
-                        && prefix.bytes().all(|c| c.is_ascii_lowercase() || c == b'_')
-                })
-                .unwrap_or(if error.contains("is busy") {
-                    "busy"
-                } else {
-                    "operation_failed"
-                });
-            eprintln!("{}", json!({"error":error,"kind":kind}));
+            eprintln!("{}", json!({"error":error,"kind":error_kind(&error)}));
             std::process::exit(1);
         }
     }

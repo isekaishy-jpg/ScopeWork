@@ -296,6 +296,66 @@ fn lock_holder(folder: &Path, id: &str) -> Option<String> {
         v["since"].as_str().unwrap_or("?")
     ))
 }
+/// While a process waits for a project lock it registers here, so `research locks` can list it.
+struct WaiterRecord(PathBuf);
+impl Drop for WaiterRecord {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+fn register_waiter(folder: &Path, id: &str, writable: bool) -> Option<WaiterRecord> {
+    let waiters = folder.join(format!("{id}.waiters"));
+    fs::create_dir_all(&waiters).ok()?;
+    let path = waiters.join(format!(
+        "{}-{}.json",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let command: Vec<String> = std::env::args().skip(1).take(3).collect();
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let record = serde_json::json!({"pid": std::process::id(), "command": command.join(" "), "since_unix": since, "write": writable});
+    fs::write(&path, record.to_string()).ok()?;
+    Some(WaiterRecord(path))
+}
+/// Who holds and who waits for a project's lock, without taking it.
+pub fn lock_status(projects: &Path, id: &str) -> Result<serde_json::Value> {
+    if !valid_id(id) {
+        return Err("Invalid project ID".into());
+    }
+    let folder = projects.join(".project-locks");
+    let path = folder.join(format!("{id}.lock"));
+    let (writer, readers) = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+        Err(_) => (false, false),
+        Ok(file) => {
+            let writer = file.try_lock_shared().is_err();
+            if !writer {
+                let _ = file.unlock();
+            }
+            let readers = !writer && file.try_lock().is_err();
+            if !writer && !readers {
+                let _ = file.unlock();
+            }
+            (writer, readers)
+        }
+    };
+    let holder = writer
+        .then(|| fs::read_to_string(folder.join(format!("{id}.holder"))).ok())
+        .flatten()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let mut waiters: Vec<serde_json::Value> = fs::read_dir(folder.join(format!("{id}.waiters")))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| fs::read_to_string(e.path()).ok())
+        .filter_map(|t| serde_json::from_str(&t).ok())
+        .collect();
+    waiters.sort_by_key(|w: &serde_json::Value| w["since_unix"].as_u64().unwrap_or(0));
+    Ok(
+        serde_json::json!({"project": id, "writer_active": writer, "readers_active": readers, "writer": holder, "waiting": waiters}),
+    )
+}
 fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
     let folder = root.join(".project-locks");
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
@@ -306,7 +366,21 @@ fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
         .truncate(false)
         .open(folder.join(format!("{id}.lock")))
         .map_err(|e| e.to_string())?;
-    wait_lock(&file, writable).map_err(|_| match lock_holder(&folder, id) {
+    let immediate = if writable {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    let _waiting = (immediate.is_err()
+        && LOCK_WAIT_MS.load(std::sync::atomic::Ordering::Relaxed) > 0)
+        .then(|| register_waiter(&folder, id, writable))
+        .flatten();
+    if immediate.is_ok() {
+        Ok(())
+    } else {
+        wait_lock(&file, writable)
+    }
+    .map_err(|_| match lock_holder(&folder, id) {
         Some(holder) => format!(
             "Research project '{id}' is busy with another operation ({holder}). Retry shortly."
         ),
