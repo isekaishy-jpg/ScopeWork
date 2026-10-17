@@ -106,6 +106,8 @@ mod edit_tokens;
 pub mod imports;
 #[path = "layout.rs"]
 mod layout;
+#[path = "report_hashes.rs"]
+mod report_hashes;
 pub use catalog_batch::Batch;
 pub use catalog_batch::Removal;
 pub use catalog_batch::ReviewFlag;

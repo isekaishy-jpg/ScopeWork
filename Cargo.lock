@@ -2108,6 +2108,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "solcache",
  "solworker",
  "toml 0.9.12+spec-1.1.0",
  "uuid",
@@ -2391,6 +2392,11 @@ checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "solcache"
+version = "0.1.0"
+source = "git+https://github.com/isekaishy-jpg/solcache.git?rev=63105fecf152f4ad4e74c90fbeef24572726e0dc#63105fecf152f4ad4e74c90fbeef24572726e0dc"
 
 [[package]]
 name = "solworker"

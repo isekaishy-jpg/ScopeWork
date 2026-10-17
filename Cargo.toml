@@ -11,6 +11,7 @@ readme = "README.md"
 
 [dependencies]
 solworker = { git = "https://github.com/isekaishy-jpg/solworker.git", rev = "273b45b04f8c30d5fcc6c017bdaad4eab9ff8cde" }
+solcache = { git = "https://github.com/isekaishy-jpg/solcache.git", rev = "63105fecf152f4ad4e74c90fbeef24572726e0dc" }
 uuid = { version = "1", features = ["v4", "serde"] }
 regex = "1"
 clap = { version = "4.5", features = ["derive"] }

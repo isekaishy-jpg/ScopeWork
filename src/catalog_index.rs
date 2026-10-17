@@ -110,9 +110,40 @@ impl<'a> Index<'a> {
         md += evidence;
         md
     }
-    fn state(
+    /// Hashes of the reports an evaluation of `roots` may compare: every completed node in the
+    /// closure over children and prerequisites, plus those nodes' prerequisites.
+    fn report_hashes(
         &self,
         dir: &Path,
+        roots: impl IntoIterator<Item = u64>,
+    ) -> HashMap<u64, Option<String>> {
+        let mut seen = HashSet::new();
+        let mut queue: Vec<u64> = roots.into_iter().collect();
+        let mut wanted = HashSet::new();
+        while let Some(id) = queue.pop() {
+            if !seen.insert(id) || !self.nodes.contains_key(&id) {
+                continue;
+            }
+            let deps = self.requires.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+            if self.nodes[&id].status == Status::Complete {
+                wanted.insert(id);
+                wanted.extend(deps.iter().copied());
+            }
+            queue.extend(deps.iter().copied());
+            if let Some(kids) = self.children.get(&id) {
+                queue.extend(kids.iter().copied());
+            }
+        }
+        let ids: Vec<u64> = wanted.into_iter().collect();
+        let rels: Vec<&str> = ids.iter().map(|id| self.paths[id].as_str()).collect();
+        let hashes = report_hashes::hashes(dir, &rels);
+        ids.into_iter()
+            .map(|id| (id, hashes.get(&self.paths[&id]).cloned().flatten()))
+            .collect()
+    }
+    fn state(
+        &self,
+        hashes: &HashMap<u64, Option<String>>,
         id: u64,
         cache: &mut HashMap<u64, Status>,
         active: &mut HashSet<u64>,
@@ -136,32 +167,36 @@ impl<'a> Index<'a> {
         if state == Status::NotStarted
             && kids
                 .iter()
-                .any(|id| self.state(dir, *id, cache, active) != Status::NotStarted)
+                .any(|id| self.state(hashes, *id, cache, active) != Status::NotStarted)
         {
             state = Status::InProgress;
         }
         if state == Status::Complete {
-            let valid = fs::read_to_string(dir.join(&self.paths[&id]))
-                .ok()
-                .is_some_and(|s| Some(hash(&s)) == n.accepted_hash);
+            let valid = hashes.get(&id).cloned().flatten().is_some()
+                && hashes.get(&id).cloned().flatten() == n.accepted_hash;
             let deps = self.requires.get(&id).cloned().unwrap_or_default();
             let stamps: std::collections::BTreeMap<_, _> = deps
                 .iter()
                 .map(|id| {
-                    let text = fs::read_to_string(dir.join(&self.paths[id])).unwrap_or_default();
-                    (*id, format!("{}:{}", self.nodes[id].revision, hash(&text)))
+                    // A missing or unreadable prerequisite report stamps as the empty text, as before.
+                    let digest = hashes
+                        .get(id)
+                        .cloned()
+                        .flatten()
+                        .unwrap_or_else(|| hash(""));
+                    (*id, format!("{}:{}", self.nodes[id].revision, digest))
                 })
                 .collect();
             if !valid
                 || n.accepted_prerequisites != stamps
                 || deps
                     .iter()
-                    .any(|id| self.state(dir, *id, cache, active) != Status::Complete)
+                    .any(|id| self.state(hashes, *id, cache, active) != Status::Complete)
                 || (n.kind != Kind::Function
                     && (kids.is_empty()
                         || kids
                             .iter()
-                            .any(|id| self.state(dir, *id, cache, active) != Status::Complete)))
+                            .any(|id| self.state(hashes, *id, cache, active) != Status::Complete)))
             {
                 state = Status::InProgress;
             }
@@ -175,18 +210,21 @@ impl<'a> Index<'a> {
         dir: &Path,
         ids: impl IntoIterator<Item = u64>,
     ) -> HashMap<u64, Status> {
+        let ids: Vec<u64> = ids.into_iter().collect();
+        let hashes = self.report_hashes(dir, ids.iter().copied());
         let mut cache = HashMap::new();
         let mut active = HashSet::new();
         for id in ids {
-            self.state(dir, id, &mut cache, &mut active);
+            self.state(&hashes, id, &mut cache, &mut active);
         }
         cache
     }
     pub fn states(&self, dir: &Path) -> HashMap<u64, Status> {
+        let hashes = self.report_hashes(dir, self.nodes.keys().copied());
         let mut cache = HashMap::new();
         let mut active = HashSet::new();
         for id in self.nodes.keys() {
-            self.state(dir, *id, &mut cache, &mut active);
+            self.state(&hashes, *id, &mut cache, &mut active);
         }
         cache
     }
