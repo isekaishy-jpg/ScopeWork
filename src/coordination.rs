@@ -95,6 +95,22 @@ pub(super) fn queue_reopened(
     write_map("entries", &queue)
 }
 
+/// Queue entries whose record is not complete (by the catalog's recorded status), latest reason each.
+pub(super) fn open_queue(dir: &Path, project: &Project) -> std::collections::HashMap<u64, String> {
+    let text = fs::read_to_string(dir.join(REVIEW_QUEUE)).unwrap_or_default();
+    let complete: std::collections::HashSet<u64> = project
+        .nodes
+        .iter()
+        .filter(|n| n.status == Status::Complete)
+        .map(|n| n.id)
+        .collect();
+    read_map::<Vec<QueueEntry>>(&text, "entries")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(id, _)| !complete.contains(id))
+        .filter_map(|(id, entries)| entries.last().map(|e| (id, e.reason.clone())))
+        .collect()
+}
 impl Library {
     /// Claims that are currently in force (unexpired), by node.
     pub fn claims(&self, p: usize) -> Result<BTreeMap<u64, Claim>> {

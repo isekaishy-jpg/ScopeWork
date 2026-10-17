@@ -191,7 +191,8 @@ pub(super) fn snapshot(
             .map(|p| {
                 let flags =
                     super::catalog_batch::read_flags(&flag_root.join(&p.id)).unwrap_or_default();
-                Arc::new(catalog_browser::BrowserData::new(p, &flags))
+                let queued = super::coordination::open_queue(&flag_root.join(&p.id), p);
+                Arc::new(catalog_browser::BrowserData::new(p, &flags, &queued))
             })
             .collect()
     })?)?;

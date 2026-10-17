@@ -14,6 +14,7 @@ pub(super) struct Browser {
     query: String,
     focus: bool,
     flagged_only: bool,
+    queued_only: bool,
     visible: Vec<(u64, usize)>,
     needs_layout: bool,
     selection: u64,
@@ -29,6 +30,8 @@ pub(super) struct BrowserData {
     pub paths: HashMap<u64, String>,
     /// Review flag reasons by node ID (from the review-flags sidecar).
     pub flags: HashMap<u64, String>,
+    /// Records reopened by structural changes and not complete again, with the latest reason.
+    pub queued: HashMap<u64, String>,
 }
 struct Row {
     id: u64,
@@ -108,6 +111,15 @@ impl Browser {
             {
                 self.needs_layout = true;
             }
+            if ui
+                .checkbox(
+                    &mut self.queued_only,
+                    format!("Review queue ({})", self.data.queued.len()),
+                )
+                .changed()
+            {
+                self.needs_layout = true;
+            }
         });
         if self.needs_layout {
             self.generation += 1;
@@ -142,9 +154,10 @@ impl Browser {
                 let expanded = self.expanded.clone();
                 let focus = self.focus;
                 let flagged = self.flagged_only;
+                let queued = self.queued_only;
                 let query = self.query.trim().to_lowercase();
                 match background::spawn(runtime, move || {
-                    data.visible(&expanded, focus, flagged, &query)
+                    data.visible(&expanded, focus, flagged, queued, &query)
                 }) {
                     Ok(task) => {
                         self.pending = Some((self.generation, task));
@@ -214,7 +227,11 @@ impl Browser {
 }
 
 impl BrowserData {
-    pub fn new(project: &Project, flags: &std::collections::BTreeMap<u64, ReviewFlag>) -> Self {
+    pub fn new(
+        project: &Project,
+        flags: &std::collections::BTreeMap<u64, ReviewFlag>,
+        queued: &HashMap<u64, String>,
+    ) -> Self {
         let index = catalog_index::Index::new(project);
         let mut data = Self {
             key: (project.id.clone(), project.revision),
@@ -233,6 +250,7 @@ impl BrowserData {
             .iter()
             .map(|(id, f)| (*id, f.reason.clone()))
             .collect();
+        data.queued = queued.clone();
         data.children = index.children;
         data.rows = project
             .nodes
@@ -241,9 +259,14 @@ impl BrowserData {
                 let address = n.rva.map(|r| format!(" 0x{r:08X}")).unwrap_or_default();
                 let required = index.required.contains(&n.id);
                 let label = format!(
-                    "{}{}: {}{}{}",
+                    "{}{}{}: {}{}{}",
                     if flags.contains_key(&n.id) {
                         "⚑ "
+                    } else {
+                        ""
+                    },
+                    if queued.contains_key(&n.id) {
+                        "↻ "
                     } else {
                         ""
                     },
@@ -276,16 +299,18 @@ impl BrowserData {
         expanded: &HashSet<u64>,
         focus: bool,
         flagged: bool,
+        queued: bool,
         query: &str,
     ) -> Vec<(u64, usize)> {
         let mut visible = vec![];
-        if flagged {
-            // Flagged records are listed flat so they can be found regardless of expansion.
+        if flagged || queued {
+            // Flagged and queued records are listed flat so they can be found regardless of expansion.
             visible.extend(
                 self.rows
                     .iter()
                     .filter(|r| {
-                        self.flags.contains_key(&r.id)
+                        (!flagged || self.flags.contains_key(&r.id))
+                            && (!queued || self.queued.contains_key(&r.id))
                             && (!focus || r.required)
                             && r.search.contains(query)
                     })
@@ -316,5 +341,71 @@ impl BrowserData {
     }
     pub fn node<'a>(&self, project: &'a Project, id: u64) -> Option<&'a Node> {
         self.positions.get(&id).map(|i| &project.nodes[*i])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: u64, parent: Option<u64>, kind: Kind, status: Status) -> Node {
+        Node {
+            context_only: false,
+            id,
+            parent,
+            kind,
+            name: format!("N{id}"),
+            status,
+            rva: (kind == Kind::Function).then_some(0x1000 + id as u32),
+            revision: 1,
+            accepted_hash: None,
+            accepted_prerequisites: Default::default(),
+        }
+    }
+
+    #[test]
+    fn review_queue_filter_lists_queued_records_flat() {
+        let project = Project {
+            layout_version: 5,
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            binary: "synthetic".into(),
+            research_scope: String::new(),
+            next_id: 5,
+            revision: 9,
+            structural_epoch: 0,
+            active_import: None,
+            last_import: None,
+            nodes: vec![
+                node(0, None, Kind::App, Status::InProgress),
+                node(1, Some(0), Kind::Architecture, Status::InProgress),
+                node(2, Some(1), Kind::Chunk, Status::InProgress),
+                node(3, Some(2), Kind::Function, Status::InProgress),
+                node(4, Some(2), Kind::Function, Status::Complete),
+            ],
+            dependencies: vec![],
+        };
+        let queued: HashMap<u64, String> = [(2, "moved".to_string()), (3, "moved".to_string())]
+            .into_iter()
+            .collect();
+        let flags = [(
+            3,
+            ReviewFlag {
+                reason: "check".into(),
+                flagged_at_revision: 9,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let data = BrowserData::new(&project, &flags, &queued);
+        let expanded = HashSet::new();
+        let ids = |rows: Vec<(u64, usize)>| rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(data.visible(&expanded, false, false, true, "")),
+            vec![2, 3]
+        );
+        assert_eq!(ids(data.visible(&expanded, false, true, true, "")), vec![3]);
+        assert!(data.rows[data.positions[&2]].label.starts_with("↻ "));
+        assert!(data.rows[data.positions[&3]].label.starts_with("⚑ ↻ "));
     }
 }

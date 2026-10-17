@@ -1335,6 +1335,9 @@ impl ResearchUi {
                             if ui.add_enabled(!self.has_unsaved()&&!self.flag_reason.trim().is_empty(),egui::Button::new("Flag for review")).clicked(){let reason=std::mem::take(&mut self.flag_reason);self.mutate(move |lib,p,id|{lib.set_review_flag(p,id,Some(&reason))?;Ok(id)});}}
                     }
                 });
+                if let Some(reason)=self.browser_data[self.project].queued.get(&n.id){
+                    ui.colored_label(egui::Color32::from_rgb(40,90,170),format!("↻ In review queue: {reason}. Completing it again clears the entry."));
+                }
                 if n.kind==Kind::Function && ui.button("Open this function's data folder").clicked(){
                     let path=project_dir.join(&self.browser_data[self.project].paths[&self.node]).parent().unwrap().join("data");
                     if let Err(e)=open_folder(&path){self.message=e;}
