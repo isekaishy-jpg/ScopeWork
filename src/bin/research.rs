@@ -43,6 +43,11 @@ enum Command {
     Node(NodeCommand),
     #[command(subcommand)]
     Deps(DepsCommand),
+    /// Record who is working on an architecture or chunk (advisory, optionally leased).
+    #[command(subcommand)]
+    Claim(ClaimCommand),
+    /// Completed records reopened by structural changes, waiting for their owner's review.
+    ReviewQueue { project: String },
     /// Inspect completed journal storage, or compact full history to change receipts.
     Journal {
         project: String,
@@ -296,6 +301,34 @@ enum NodeCommand {
     },
 }
 #[derive(Subcommand)]
+enum ClaimCommand {
+    /// Claim a branch; another owner's unexpired claim is refused unless --force.
+    Set {
+        project: String,
+        node: u64,
+        #[arg(long)]
+        owner: String,
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Expire the claim after this many hours.
+        #[arg(long)]
+        lease_hours: Option<u64>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Release a claim (another owner's only with --force).
+    Release {
+        project: String,
+        node: u64,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Claims currently in force.
+    List { project: String },
+}
+#[derive(Subcommand)]
 enum DepsCommand {
     Get {
         project: String,
@@ -441,6 +474,12 @@ fn run(args: Args) -> Result<Value, String> {
             | NodeCommand::Complete { project, .. }
             | NodeCommand::Reopen { project, .. },
         ) => Some(project.as_str()),
+        Command::Claim(
+            ClaimCommand::Set { project, .. }
+            | ClaimCommand::Release { project, .. }
+            | ClaimCommand::List { project },
+        )
+        | Command::ReviewQueue { project } => Some(project.as_str()),
         Command::Deps(DepsCommand::Get { project, .. } | DepsCommand::Set { project, .. })
         | Command::Journal { project, .. }
         | Command::Status { project, .. } => Some(project.as_str()),
@@ -458,6 +497,8 @@ fn run(args: Args) -> Result<Value, String> {
                     | NodeCommand::Prune { expect: None, .. }
             )
             | Command::Deps(DepsCommand::Get { .. })
+            | Command::Claim(ClaimCommand::List { .. })
+            | Command::ReviewQueue { .. }
             | Command::Status { .. }
             | Command::Journal { compact: false, .. }
     );
@@ -586,7 +627,22 @@ fn run(args: Args) -> Result<Value, String> {
                 let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?;
                 let created = lib.batch(p, &batch)?;
-                Ok(json!({"project": id, "revision":lib.projects[p].revision, "created":created}))
+                let revision = lib.projects[p].revision;
+                // Report what this batch reopened and whose claimed work that touches.
+                let states = lib.effective_all(p);
+                let claims = lib.claims(p)?;
+                let covered = lib.claim_index(p, &claims);
+                let reopened: Vec<_> = lib
+                    .review_queue(p, &states)?
+                    .into_iter()
+                    .filter(|(_, entries)| entries.iter().any(|e| e.revision == revision))
+                    .map(|(node, _)| {
+                        json!({"node": node, "claimed_by": covered.get(&node).map(|(at, owner)| json!({"node": at, "owner": owner}))})
+                    })
+                    .collect();
+                Ok(
+                    json!({"project": id, "revision":revision, "created":created, "reopened": reopened}),
+                )
             }
             NodeCommand::List {
                 project: id,
@@ -730,6 +786,9 @@ fn run(args: Args) -> Result<Value, String> {
                 deps.entry(e.dependent).or_default().push(e.prerequisite);
             }
             let flags = lib.review_flags(p)?;
+            let claims = lib.claims(p)?;
+            let covered = lib.claim_index(p, &claims);
+            let queue = lib.review_queue(p, &states)?;
             let mut counts: std::collections::BTreeMap<
                 String,
                 std::collections::BTreeMap<String, usize>,
@@ -744,7 +803,9 @@ fn run(args: Args) -> Result<Value, String> {
                 ready_count += usize::from(ready_for_review);
                 *counts.entry(format!("{:?}", n.kind)).or_default().entry(format!("{:?}", states[&n.id])).or_default() += 1;
                 (!summary).then(|| json!({"id":n.id,"name":n.name,"kind":n.kind,"status":states[&n.id],"required_research":required.contains(&n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
-                    "ready_for_review":ready_for_review,"review_flag":flags.get(&n.id)}))
+                    "ready_for_review":ready_for_review,"review_flag":flags.get(&n.id),
+                    "claimed_by":covered.get(&n.id).map(|(at, owner)| json!({"node": at, "owner": owner})),
+                    "review_queue":queue.get(&n.id)}))
             }).collect();
             let inventory = lib.projects[p]
                 .nodes
@@ -756,7 +817,7 @@ fn run(args: Args) -> Result<Value, String> {
                 .iter()
                 .filter(|n| n.kind == Kind::Function && required.contains(&n.id))
                 .count();
-            let mut out = json!({"project":id,"app_status":states[&0],"review_flags":flags.len(),"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions});
+            let mut out = json!({"project":id,"app_status":states[&0],"review_flags":flags.len(),"claims":claims.len(),"review_queue":queue.len(),"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions});
             if summary {
                 out["counts"] = json!(counts);
                 out["ready_for_review"] = json!(ready_count);
@@ -764,6 +825,59 @@ fn run(args: Args) -> Result<Value, String> {
                 out["records"] = json!(records);
             }
             Ok(out)
+        }
+        Command::Claim(command) => match command {
+            ClaimCommand::Set {
+                project: id,
+                node,
+                owner,
+                note,
+                lease_hours,
+                force,
+            } => {
+                let p = project(&lib, &id)?;
+                let claim = lib.claim(p, node, &owner, &note, lease_hours, force)?;
+                Ok(
+                    json!({"project": id, "node": node, "claim": claim, "revision": lib.projects[p].revision}),
+                )
+            }
+            ClaimCommand::Release {
+                project: id,
+                node,
+                owner,
+                force,
+            } => {
+                let p = project(&lib, &id)?;
+                let released = lib.release_claim(p, node, &owner, force)?;
+                Ok(json!({"project": id, "node": node, "released": released}))
+            }
+            ClaimCommand::List { project: id } => {
+                let p = project(&lib, &id)?;
+                let names: std::collections::HashMap<u64, &str> = lib.projects[p]
+                    .nodes
+                    .iter()
+                    .map(|n| (n.id, n.name.as_str()))
+                    .collect();
+                let claims: Vec<_> = lib
+                    .claims(p)?
+                    .into_iter()
+                    .map(|(node, c)| json!({"node": node, "name": names.get(&node), "claim": c}))
+                    .collect();
+                Ok(json!({"project": id, "claims": claims}))
+            }
+        },
+        Command::ReviewQueue { project: id } => {
+            let p = project(&lib, &id)?;
+            let states = lib.effective_all(p);
+            let claims = lib.claims(p)?;
+            let covered = lib.claim_index(p, &claims);
+            let names: std::collections::HashMap<u64, &research_dashboard::research::Node> =
+                lib.projects[p].nodes.iter().map(|n| (n.id, n)).collect();
+            let entries: Vec<_> = lib.review_queue(p, &states)?.into_iter().map(|(node, reasons)| {
+                json!({"node": node, "name": names.get(&node).map(|n| n.name.as_str()), "kind": names.get(&node).map(|n| n.kind), "status": states.get(&node), "reasons": reasons,
+                    "claimed_by": covered.get(&node).map(|(at, owner)| json!({"node": at, "owner": owner}))})
+            }).collect();
+            Ok(json!({"project": id, "count": entries.len(), "entries": entries}))
         }
         Command::Home | Command::Gui | Command::Criteria { .. } => unreachable!(),
     }

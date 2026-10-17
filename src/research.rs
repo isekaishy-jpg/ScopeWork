@@ -100,6 +100,8 @@ mod catalog_batch;
 mod catalog_browser;
 #[path = "catalog_index.rs"]
 mod catalog_index;
+#[path = "coordination.rs"]
+pub mod coordination;
 #[path = "edit_tokens.rs"]
 mod edit_tokens;
 #[path = "imports.rs"]

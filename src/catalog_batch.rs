@@ -340,6 +340,43 @@ impl Library {
         resume(&root, &mut self.projects[p])
     }
 }
+impl Library {
+    /// Replaces a journaled sidecar beside the catalog (claims, review queue) in one catalog
+    /// transaction, so it is recoverable and appears in history like a catalog change.
+    pub(super) fn write_sidecar(&mut self, p: usize, name: &str, after_text: String) -> Result<()> {
+        let root = self.dir(p);
+        let field = if name == coordination::CLAIMS {
+            "claims"
+        } else {
+            "entries"
+        };
+        let before_text = coordination::ensure(&root, name, field)?;
+        if before_text == after_text {
+            return Ok(());
+        }
+        let before = self.projects[p].clone();
+        let mut after = before.clone();
+        after.revision += 1;
+        let journal = Journal {
+            before,
+            after,
+            edits: vec![],
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![Sidecar {
+                path: name.into(),
+                before: before_text,
+                after: after_text,
+            }],
+        };
+        let folder = prepare_pending(&root)?;
+        atomic(
+            &folder.join("journal.json"),
+            &journal_history::pending_bytes(&journal)?,
+        )?;
+        resume(&root, &mut self.projects[p])
+    }
+}
 /// Return started-but-incomplete records to Not Started (for example after generated evidence was attached).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -868,6 +905,28 @@ impl Library {
         after.layout_version = before.layout_version.max(3);
         after.structural_epoch += 1;
         let mut sidecars = vec![];
+        // Completed records reopened by this change need their owner's review: queue them.
+        let reopened: Vec<u64> = before
+            .nodes
+            .iter()
+            .filter(|n| n.status == Status::Complete && invalid.contains(&n.id))
+            .map(|n| n.id)
+            .collect();
+        if !reopened.is_empty() {
+            let moved: Vec<u64> = batch
+                .update
+                .iter()
+                .filter(|u| u.parent.is_some())
+                .map(|u| u.id)
+                .collect();
+            let original = coordination::ensure(&root, coordination::REVIEW_QUEUE, "entries")?;
+            let updated = coordination::queue_reopened(&original, &after, &reopened, &moved)?;
+            sidecars.push(Sidecar {
+                path: coordination::REVIEW_QUEUE.into(),
+                before: original,
+                after: updated,
+            });
+        }
         let annotation_path = root.join("tools/profiles/annotations.json");
         if !moves.is_empty() && annotation_path.is_file() {
             let original = fs::read_to_string(&annotation_path).map_err(|e| e.to_string())?;
