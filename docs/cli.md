@@ -276,3 +276,75 @@ The first command reports completed journal bytes, potential savings, pending jo
 New pending journals and completed receipts use schema-1 deltas: project metadata excluding inventory arrays, changed node/edge records with their array positions, affected reports/sidecars, directory moves, and fingerprints of the complete before/after catalog. Recovery reconstructs and verifies the other catalog state against those fingerprints. Older full pending journals remain readable. A completed receipt cannot be replayed by renaming it to `pending`.
 
 Retention policy: retain compact completed change history indefinitely, including removed-node archives; never automatically expire evidence. This removes unchanged whole-inventory duplication per edit, while storage still grows with actual changed content. Whole-catalog reorder operations can have large deltas. The format-5 migration keeps one full pre-upgrade catalog. Import publication history and other tool workspaces are separate from catalog-journal compaction and are not included in its byte totals.
+
+## Waiting, small answers and coordination (0.8.0)
+
+### Lock waiting
+
+Every command waits for another process's project lock instead of failing at once. `--wait SECONDS` (global, or per command) sets the limit; `SCOPEWORK_LOCK_WAIT_SECS` sets the default, otherwise 120 seconds. `--wait 0` restores the immediate `busy` answer. The lock holder writes `.project-locks/<project>.holder` (process, command, start time) and each waiting process registers under `.project-locks/<project>.waiters/`; both are removed when the operation ends.
+
+```powershell
+research locks example                       # holder and waiters; takes no lock
+research wait example --idle                 # until no writer holds the lock
+research wait example --revision-above 812   # until another write has landed
+research wait example --complete 42 --timeout 300
+```
+
+`wait` exits 1 with error kind `timeout` when its limit passes. Use it instead of polling loops.
+
+### Small answers
+
+```powershell
+research project revision example                 # binary, revision, next_id; no catalog
+research status example --summary                 # counts by kind and status
+research status example --ready                   # only records ready for review
+research status example --parent 12 --kind function --status in-progress
+research node list example --parent 12
+```
+
+Filters narrow the output only; effective status is still evaluated for the whole catalog. `project revision` returns what a `node batch` request needs in a few hundred bytes instead of the whole `project.json`. Catalogs are now written as compact JSON, and orphaned `project.*.pending` temporaries from interrupted writes are removed when a project is opened for writing.
+
+### Long-lived session
+
+`research session` reads one JSON array of arguments per line from stdin and answers one JSON line per command (`{"ok": RESULT}` on success, or `{"kind": ..., "error": ...}` on failure). One process serves many commands and keeps its report-hash cache warm:
+
+```text
+["status","example","--summary"]
+["node","show","example","42"]
+```
+
+### Report hash cache
+
+`status`, completion checks and the GUI compare each accepted report's SHA-256 with its accepted hash. A hash is reused while the file's size and modification time are unchanged and that time is at least two seconds older than the moment it was hashed, so a change within the same instant is always re-read. Large evaluations stat and hash in parallel on Solworker. The GUI keeps the cache in memory (Solcache); one-shot CLI calls load and refresh `tools/workspaces/scopework-cache/report-hashes.json`. Deleting that file only costs one full rehash.
+
+### Work claims
+
+```powershell
+research claim set example 12 --owner arch-6 --note "chunk research" --lease-hours 8
+research claim list example
+research claim release example 12 --owner arch-6
+```
+
+Claims name who is working on an architecture or chunk; functions are covered by their chunk's claim. Another owner's unexpired claim is refused (`claim_conflict`) unless `--force`. Claims are advisory: they do not block writes, but `status` shows `claimed_by` on every covered record and batch results report which claimed work a change reopened. They live in the journaled `claims.json` sidecar.
+
+### Review queue
+
+When a batch move, membership, order or name change reopens a completed record, that record enters the review queue with the reason and revision. An entry stays open until its record is complete again, so completing it needs no extra step.
+
+```powershell
+research review-queue example
+research status example --summary    # includes the review_queue count
+```
+
+`node batch` results list the `reopened` records with any `claimed_by` owner. The GUI marks queued records with ↻, offers a "Review queue" browser filter and shows the reason in the editor. The queue lives in the journaled `review-queue.json` sidecar.
+
+### Project history
+
+```powershell
+research history show example --limit 20
+research history show example --node 42 --detail
+research history show example --since 800 --until 812 --only catalog
+research history append example --kind ledger-change --summary "Retyped 14 parameters" --node 42 --ref tools/annotations/ledger.json --diff-file diff.json
+```
+
+`history show` lists entries newest first. Catalog entries summarise each transaction receipt (`revision-N/journal.json`): created and removed records, status, parent, name and membership changes, reopened completions, edited reports, moves and sidecars; `--detail` adds the changed records. Tooling entries are appended by project tools to `tools/workspaces/history/tooling.jsonl` with a lowercase hyphenated kind, the nodes and paths concerned, and a diff of what changed rather than a copy of whole files. The `catalog` kind is reserved. Restoring from history remains a manual, reviewed operation.

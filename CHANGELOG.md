@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0 - 2026-10-17
+
+See [qualification and limits](docs/qualification-0.8.0.md).
+
+- Wait for another process's project lock instead of failing `busy`: global and per-command `--wait SECONDS` (default `SCOPEWORK_LOCK_WAIT_SECS`, else 120; `0` keeps the immediate answer). Lock holders and waiting processes are recorded under `.project-locks/`; `research locks` shows them without taking the lock. `research wait --idle | --revision-above N | --complete ID` blocks until a condition holds.
+- Write catalogs as compact JSON and remove orphaned `project.*.pending` temporaries when a project is opened for writing. Compute transaction deltas and pending-journal recovery on typed records (263 ms to 86 ms per write on a 30,682-function catalog).
+- Reuse report hashes for effective status: size and modification time with git's racy-timestamp rule, parallel stat and hashing on Solworker, an in-memory Solcache table in the GUI and a persisted copy for one-shot CLI calls. Warm `status` on the same catalog went from 1.94 s to about 0.43 s with identical results.
+- Add small answers: `project revision`; `--parent`, `--kind` and `--status` filters for `status` and `node list`; `status --ready` and `--summary`. Add `research session` to run many commands in one process.
+- Add advisory work claims on architectures and chunks (`claim set|release|list`, optional leases, `claimed_by` in `status`), and a review queue of completed records reopened by moves, membership, order or name changes (`review-queue`, a `review_queue` count in `status`, `reopened` with claim owners in `node batch` results). The GUI marks queued records with ↻, adds a "Review queue" filter and shows the reason in the editor. Both use journaled sidecars that older versions leave intact.
+- Add `research history show` (catalog transaction receipts summarised newest first, filtered by node, revision and kind) and `history append` for project tooling diffs in `tools/workspaces/history/tooling.jsonl`.
+- Add a tag-triggered release workflow that checks the tag against `Cargo.toml`, runs the CI checks, builds the MSI and creates a draft GitHub release with the checksum and changelog notes. Pin Solcache by Git revision.
+
 ## 0.7.0 - 2026-10-16
 
 - Add evidence-only report saves (`node save --evidence-only`, `"evidence_only": true` in `save-batch`). Generated evidence no longer marks research started, so Not Started records keep their dim red meter segments. Add `node reset-status` to return In Progress records to Not Started by ID or for every In Progress record. Meter colours are unchanged: dim red Not Started, yellow In Progress, green Complete.

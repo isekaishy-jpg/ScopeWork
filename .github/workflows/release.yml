@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build, such as v0.8.0
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+      - name: Select Rust toolchain
+        run: rustup override set 1.98.0
+      - name: Check tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ("v$version" -ne $env:TAG) { throw "Tag $env:TAG does not match Cargo.toml version $version" }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Regression tests
+        run: cargo test --locked --all-targets
+      - name: Lint without warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build Windows installer
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1
+      - name: Extract release notes
+        shell: pwsh
+        run: |
+          $lines = Get-Content CHANGELOG.md
+          $start = ($lines | Select-String -Pattern "^## $([regex]::Escape($env:VERSION)) " | Select-Object -First 1).LineNumber
+          if (-not $start) { throw "CHANGELOG.md has no section for $env:VERSION" }
+          $notes = foreach ($line in $lines[$start..($lines.Count - 1)]) { if ($line -match '^## ') { break }; $line }
+          ($notes -join "`n").Trim() | Out-File -FilePath release-notes.md -Encoding utf8
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $assets = @(Get-ChildItem dist -File | Where-Object { $_.Name -like "Scopework-$env:VERSION-x64.msi*" } | ForEach-Object FullName)
+          if ($assets.Count -lt 2) { throw "Expected the MSI and its checksum in dist/" }
+          gh release create $env:TAG @assets --draft --verify-tag --title "Scopework $env:VERSION" --notes-file release-notes.md
+      - name: Keep installer as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Scopework-${{ env.TAG }}-windows-x64
+          path: |
+            dist/*.msi
+            dist/*.sha256
+          if-no-files-found: error

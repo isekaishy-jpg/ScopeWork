@@ -92,7 +92,7 @@ enum Command {
         summary: bool,
     },
 }
-/// Narrows `status` and `node list` output; effective status is still computed for the whole catalog.
+// Narrows `status` and `node list` output; effective status is still computed for the whole catalog.
 #[derive(clap::Args, Default)]
 struct RecordFilter {
     /// Only direct children of this node.
@@ -259,6 +259,7 @@ enum NodeCommand {
         #[arg(long)]
         file: PathBuf,
     },
+    /// Records with their effective status, optionally narrowed by parent, kind or status.
     List {
         project: String,
         #[command(flatten)]

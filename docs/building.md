@@ -41,14 +41,14 @@ The Windows workflow builds the executables and MSI and retains build artifacts.
 
 ## Release preparation
 
-Increment the three-part version in `Cargo.toml`, update `CHANGELOG.md`, build the MSI, and attach the MSI and its checksum to a GitHub release. Record exactly which build, runtime, install and upgrade checks were performed. Use a draft or prerelease while release qualification is incomplete.
+Increment the three-part version in `Cargo.toml`, update `CHANGELOG.md` and build the MSI locally. Pushing a tag `vX.Y.Z` that matches the `Cargo.toml` version runs `.github/workflows/release.yml`: it repeats the format, test and Clippy checks, builds the MSI and creates a **draft** GitHub release with the MSI, its checksum and that version's changelog section. Review the draft and publish it by hand; the workflow never publishes. The workflow can also be started manually for an existing tag. Record exactly which build, runtime, install and upgrade checks were performed. Use a draft or prerelease while release qualification is incomplete.
 
 Keep the installer UpgradeCode stable. Do not rename the executable filenames or CLI command casually; scripts and installed shortcuts may depend on them.
 
 
 ## Background runtime and scale qualification
 
-Solworker is pinned to Git commit `273b45b04f8c30d5fcc6c017bdaad4eab9ff8cde`. Cargo resolves its `vendor/micropool` package from that same Git checkout; no absolute developer path or separately copied source is required. Commit `Cargo.lock` and use `--locked` in CI and packaging. A clean build needs Git/network access to that pinned repository unless Cargo's cache was populated beforehand.
+Solworker is pinned to Git commit `273b45b04f8c30d5fcc6c017bdaad4eab9ff8cde`. Cargo resolves its `vendor/micropool` package from that same Git checkout; no absolute developer path or separately copied source is required. Commit `Cargo.lock` and use `--locked` in CI and packaging. Solcache, used for the report hash cache, is pinned to Git commit `63105fecf152f4ad4e74c90fbeef24572726e0dc` the same way. A clean build needs Git/network access to those pinned repositories unless Cargo's cache was populated beforehand.
 
 The import runner uses two CPU workers and two file-provider workers, with 256-record checkpoints. These are per-runner limits, not a global host budget. The GUI keeps at most one snapshot rebuild, one report load, one mutation and one coalesced browser query in flight; it never joins them on the input thread. A bounded owner phase publishes snapshots.
 

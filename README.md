@@ -6,6 +6,7 @@
 <p align="center">A local research workbench for people and agents.</p>
 <p align="center">
   <a href="https://github.com/isekaishy-jpg/ScopeWork/actions/workflows/windows.yml"><img src="https://github.com/isekaishy-jpg/ScopeWork/actions/workflows/windows.yml/badge.svg" alt="Windows build"></a>
+  <a href="https://github.com/isekaishy-jpg/ScopeWork/releases"><img src="https://img.shields.io/github/v/release/isekaishy-jpg/ScopeWork?include_prereleases" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/platform-Windows_x64-0078D4" alt="Windows x64">
 </p>
@@ -31,6 +32,7 @@ Each task has a fixed scope. Functions establish their own behavior and connecti
 - **Whole-binary inventory:** batch enrollment and reorganization, searchable collapsed records, and explicit context membership.
 - **Visible progress:** project tabs, chunk meters, required and inventory function counts, and a short research-topic header.
 - **GUI and CLI together:** background snapshots update meters; independent draft edits can proceed during additive imports.
+- **Several agents at once:** lock waiting instead of busy failures, advisory work claims, a review queue for records reopened by moves, and a readable project history.
 - **Resumable imports:** durable reservations, preparation checkpoints, pause/resume/cancel, and catalog-last publication.
 - **Local files:** your research home stays under your control and survives uninstall.
 
@@ -61,6 +63,7 @@ Scopework is in early development. MSI packages are unsigned. Read each release'
 | [Agent CLI](docs/cli.md) | Creating records, writing reports and managing dependencies |
 | [Build guide](docs/building.md) | Source builds, MSI packaging and repository layout |
 | [Changelog](CHANGELOG.md) | Changes by version |
+| [0.8.0 qualification](docs/qualification-0.8.0.md) | Multi-agent throughput measurements, coverage and known limits |
 | [0.5.0 qualification](docs/qualification-0.5.0.md) | Recovery, concurrency, scale measurements and installer checks |
 | [Concurrent import design](docs/concurrent-import-design.md) | Storage and concurrency design for imports, edits, and responsive snapshots |
 
