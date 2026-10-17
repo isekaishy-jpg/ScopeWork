@@ -127,6 +127,24 @@ fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     drop(file);
     fs::rename(&temp, path).map_err(|e| format!("Cannot replace {}: {e}", path.display()))
 }
+/// Catalog bytes for `project.json`. Compact JSON: the catalog is rewritten on every commit,
+/// and pretty printing roughly doubled both its size and the time the write lock is held.
+pub(crate) fn catalog_bytes(project: &Project) -> Result<Vec<u8>> {
+    serde_json::to_vec(project).map_err(|e| e.to_string())
+}
+/// Removes `project.<uuid>.pending` temporaries left by interrupted catalog writes. Only call
+/// while holding the project's exclusive lock: then no writer can own one of them.
+fn remove_orphaned_catalog_temporaries(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("project.") && name.ends_with(".pending") && name.len() > 16 {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -216,6 +234,61 @@ struct OperationLocks {
     writable: bool,
     _project: Option<fs::File>,
     _gate: fs::File,
+    /// Holder record written with an exclusive project lock; removed before the lock is released.
+    holder: Option<PathBuf>,
+}
+impl Drop for OperationLocks {
+    fn drop(&mut self) {
+        if let Some(holder) = self.holder.take() {
+            let _ = fs::remove_file(holder);
+        }
+    }
+}
+fn holder_path(root: &Path, id: &str, writable: bool) -> Option<PathBuf> {
+    writable.then(|| root.join(".project-locks").join(format!("{id}.holder")))
+}
+/// Longest time a lock acquisition waits for another process before reporting `busy`, in
+/// milliseconds. Zero keeps the immediate `busy` answer the GUI relies on to retain snapshots;
+/// the CLI sets a wait so callers no longer respawn the process in a retry loop.
+static LOCK_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn set_lock_wait(wait: std::time::Duration) {
+    LOCK_WAIT_MS.store(
+        wait.as_millis().min(u64::MAX as u128) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+/// Takes `file`'s lock, waiting up to the configured lock wait with a short backoff.
+fn wait_lock(file: &fs::File, exclusive: bool) -> std::result::Result<(), ()> {
+    let wait = LOCK_WAIT_MS.load(std::sync::atomic::Ordering::Relaxed);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait);
+    let mut pause = std::time::Duration::from_millis(2);
+    loop {
+        let taken = if exclusive {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        };
+        if taken.is_ok() {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(());
+        }
+        std::thread::sleep(pause.min(deadline - now));
+        pause = (pause * 2).min(std::time::Duration::from_millis(50));
+    }
+}
+/// The writer currently holding a project's exclusive lock, as recorded by that writer.
+fn lock_holder(folder: &Path, id: &str) -> Option<String> {
+    let text = fs::read_to_string(folder.join(format!("{id}.holder"))).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(format!(
+        "held by pid {} ({}) since {}",
+        v["pid"],
+        v["command"].as_str().unwrap_or("?"),
+        v["since"].as_str().unwrap_or("?")
+    ))
 }
 fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
     let folder = root.join(".project-locks");
@@ -227,14 +300,21 @@ fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
         .truncate(false)
         .open(folder.join(format!("{id}.lock")))
         .map_err(|e| e.to_string())?;
-    (if writable {
-        file.try_lock()
-    } else {
-        file.try_lock_shared()
-    })
-    .map_err(|_| {
-        format!("Research project '{id}' is busy with another operation. Retry shortly.")
+    wait_lock(&file, writable).map_err(|_| match lock_holder(&folder, id) {
+        Some(holder) => format!(
+            "Research project '{id}' is busy with another operation ({holder}). Retry shortly."
+        ),
+        None => format!("Research project '{id}' is busy with another operation. Retry shortly."),
     })?;
+    if writable {
+        // Waiters read this to say who holds the lock; it is advisory and never trusted for safety.
+        let command: Vec<String> = std::env::args().skip(1).take(3).collect();
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let holder = serde_json::json!({"pid": std::process::id(), "command": command.join(" "), "since": format!("unix {since}")});
+        let _ = fs::write(folder.join(format!("{id}.holder")), holder.to_string());
+    }
     Ok(file)
 }
 impl Library {
@@ -242,7 +322,12 @@ impl Library {
         if !valid_id(id) {
             return Err("Invalid project ID".into());
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(
+                LOCK_WAIT_MS
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .max(5000),
+            );
         loop {
             let result: Result<OperationLocks> = (|| {
                 let gate = fs::OpenOptions::new()
@@ -259,6 +344,7 @@ impl Library {
                     writable: true,
                     _project: Some(project_lock(root, id, true)?),
                     _gate: gate,
+                    holder: holder_path(root, id, true),
                 })
             })();
             match result {
@@ -447,12 +533,7 @@ impl Library {
                 .truncate(false)
                 .open(root.join(".library.lock"))
                 .map_err(|e| e.to_string())?;
-            (if exclusive_gate {
-                gate.try_lock()
-            } else {
-                gate.try_lock_shared()
-            })
-            .map_err(|_| {
+            wait_lock(&gate, exclusive_gate).map_err(|_| {
                 "Research library is busy with another operation. Retry shortly.".to_string()
             })?;
             Ok(OperationLocks {
@@ -460,6 +541,7 @@ impl Library {
                 writable: write,
                 _project: Some(project_lock(&root, id, write)?),
                 _gate: gate,
+                holder: holder_path(&root, id, write),
             })
         };
         let mut locks = acquire(false, writable)?;
@@ -503,10 +585,7 @@ impl Library {
                     )?;
                 }
                 p.layout_version = 5;
-                atomic(
-                    &path,
-                    &serde_json::to_vec_pretty(&p).map_err(|e| e.to_string())?,
-                )?;
+                atomic(&path, &catalog_bytes(&p)?)?;
                 atomic(
                     &backup.join("migration.json"),
                     b"{\"format\":5,\"authored_reports_changed\":false}",
@@ -543,6 +622,7 @@ impl Library {
                     .map_err(|e| e.to_string())?;
             }
             if locks.writable {
+                remove_orphaned_catalog_temporaries(&dir);
                 catalog_batch::resume(&dir, p)?;
                 imports::recover(&dir, p)?;
             }
@@ -605,7 +685,7 @@ impl Library {
     fn persist(&self, p: usize) -> Result<()> {
         atomic(
             &self.dir(p).join("project.json"),
-            &serde_json::to_vec_pretty(&self.projects[p]).map_err(|e| e.to_string())?,
+            &catalog_bytes(&self.projects[p])?,
         )
     }
     pub fn create(&mut self, id: &str, name: &str, binary: &str) -> Result<()> {
@@ -661,10 +741,7 @@ impl Library {
         };
         let text = catalog_index::Index::new(&project).render(&project, 0, "", "");
         atomic(&stage.join("app.md"), text.as_bytes())?;
-        atomic(
-            &stage.join("project.json"),
-            &serde_json::to_vec_pretty(&project).map_err(|e| e.to_string())?,
-        )?;
+        atomic(&stage.join("project.json"), &catalog_bytes(&project)?)?;
         fs::rename(&stage, &dir).map_err(|e| e.to_string())?;
         self.projects.push(project);
         Ok(())

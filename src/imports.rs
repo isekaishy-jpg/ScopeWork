@@ -690,7 +690,7 @@ fn publish(
         after.structural_epoch += 1;
         after.active_import = None;
         after.last_import = Some(job.id.clone());
-        let bytes = serde_json::to_vec_pretty(&after).map_err(|e| e.to_string())?;
+        let bytes = catalog_bytes(&after)?;
         let candidate = format!("candidate-{}.json", uuid::Uuid::new_v4());
         atomic(&publication.join(&candidate), &bytes)?;
         let journal = Publication {

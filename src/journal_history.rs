@@ -186,7 +186,7 @@ impl Library {
             .truncate(false)
             .open(root.join(".library.lock"))
             .map_err(|e| e.to_string())?;
-        gate.try_lock_shared().map_err(|_| {
+        wait_lock(&gate, false).map_err(|_| {
             "Research library is busy with another operation. Retry shortly.".to_owned()
         })?;
         let lock = project_lock(&root, id, apply)?;
@@ -197,6 +197,7 @@ impl Library {
         if project.id != id || project.layout_version > 5 {
             return Err("Unsupported catalog or project identity mismatch".into());
         }
+        let holder = holder_path(&root, id, apply);
         let mut library = Library {
             root,
             projects: vec![project],
@@ -206,6 +207,7 @@ impl Library {
                 writable: apply,
                 _project: Some(lock),
                 _gate: gate,
+                holder,
             }),
         };
         library.journal_history(0, apply)

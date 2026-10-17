@@ -15,6 +15,10 @@ struct Args {
     /// Absolute research home. Overrides RESEARCH_DASHBOARD_HOME and LocalAppData.
     #[arg(long, global = true)]
     home: Option<PathBuf>,
+    /// Seconds to wait for another process's project lock before reporting `busy`
+    /// (default: SCOPEWORK_LOCK_WAIT_SECS, else 120). 0 answers `busy` immediately.
+    #[arg(long, global = true)]
+    wait: Option<u64>,
     #[command(subcommand)]
     command: Command,
 }
@@ -286,6 +290,15 @@ fn run(args: Args) -> Result<Value, String> {
             "rule":"Keep the assignment's scope fixed. Completed children enable parent synthesis; they never automatically complete it. Record missing outside knowledge as a separate task; tag a prerequisite only when necessary to establish this scope's behavior."}),
         );
     }
+    let wait = args
+        .wait
+        .or_else(|| {
+            std::env::var("SCOPEWORK_LOCK_WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(120);
+    research_dashboard::research::set_lock_wait(std::time::Duration::from_secs(wait));
     let home = paths::home(args.home)?;
     let locations =
         json!({"home":home,"projects":home.join("projects"),"complaints":home.join("complaints")});

@@ -244,10 +244,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
     if !j.dependencies.is_empty() {
         temporary.sync_dependency_subset(0, Some(&j.dependencies.iter().copied().collect()))?;
     }
-    atomic(
-        &root.join("project.json"),
-        &serde_json::to_vec_pretty(&j.after).map_err(|e| e.to_string())?,
-    )?;
+    atomic(&root.join("project.json"), &catalog_bytes(&j.after)?)?;
     *project = j.after.clone();
     fault("catalog");
     let receipt = folder.with_file_name(format!("revision-{}", project.revision));
