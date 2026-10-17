@@ -51,7 +51,50 @@ enum Command {
         compact: bool,
     },
     /// Effective progress and records ready for review (not automatic completion).
-    Status { project: String },
+    Status {
+        project: String,
+        #[command(flatten)]
+        filter: RecordFilter,
+        /// Only records ready for review (incomplete, unflagged, nothing blocking).
+        #[arg(long)]
+        ready: bool,
+        /// Counts by kind and status instead of per-record output.
+        #[arg(long)]
+        summary: bool,
+    },
+}
+/// Narrows `status` and `node list` output; effective status is still computed for the whole catalog.
+#[derive(clap::Args, Default)]
+struct RecordFilter {
+    /// Only direct children of this node.
+    #[arg(long)]
+    parent: Option<u64>,
+    /// Only records of this kind.
+    #[arg(long, value_enum)]
+    kind: Option<Scope>,
+    /// Only records with this effective status.
+    #[arg(long, value_enum)]
+    status: Option<StatusFilter>,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum StatusFilter {
+    NotStarted,
+    InProgress,
+    Complete,
+}
+impl RecordFilter {
+    fn keeps(&self, n: &research_dashboard::research::Node, status: Status) -> bool {
+        self.parent.is_none_or(|p| n.parent == Some(p))
+            && self.kind.is_none_or(|k| n.kind == k.kind())
+            && self.status.is_none_or(|s| {
+                status
+                    == match s {
+                        StatusFilter::NotStarted => Status::NotStarted,
+                        StatusFilter::InProgress => Status::InProgress,
+                        StatusFilter::Complete => Status::Complete,
+                    }
+            })
+    }
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Scope {
@@ -125,6 +168,10 @@ enum ProjectCommand {
     Show {
         project: String,
     },
+    /// Identity and revision only (what a `node batch` request needs), without the catalog.
+    Revision {
+        project: String,
+    },
     /// Set build/hash/image base before creating any functions.
     SetBinary {
         project: String,
@@ -185,6 +232,8 @@ enum NodeCommand {
     },
     List {
         project: String,
+        #[command(flatten)]
+        filter: RecordFilter,
     },
     /// Kind is inferred from the parent: app 0 -> architecture -> chunk -> function.
     Create {
@@ -197,10 +246,7 @@ enum NodeCommand {
         rva: Option<String>,
     },
     /// Read the report, scope criteria, paths and current optimistic edit token.
-    Show {
-        project: String,
-        node: u64,
-    },
+    Show { project: String, node: u64 },
     /// Save UTF-8 Markdown inputs. Always leaves the report open for review.
     Save {
         project: String,
@@ -223,14 +269,9 @@ enum NodeCommand {
         reason: String,
     },
     /// Clear a record's review flag.
-    Unflag {
-        project: String,
-        node: u64,
-    },
+    Unflag { project: String, node: u64 },
     /// List flagged records.
-    Flagged {
-        project: String,
-    },
+    Flagged { project: String },
     /// Return In Progress records to Not Started from a JSON request (ids or all_in_progress).
     ResetStatus {
         project: String,
@@ -378,11 +419,12 @@ fn run(args: Args) -> Result<Value, String> {
     let selected = match &args.command {
         Command::Project(
             ProjectCommand::Show { project }
+            | ProjectCommand::Revision { project }
             | ProjectCommand::SetBinary { project, .. }
             | ProjectCommand::SetScope { project, .. },
         ) => Some(project.as_str()),
         Command::Node(
-            NodeCommand::List { project }
+            NodeCommand::List { project, .. }
             | NodeCommand::Delete { project, .. }
             | NodeCommand::Prune { project, .. }
             | NodeCommand::ReadBatch { project, .. }
@@ -401,12 +443,12 @@ fn run(args: Args) -> Result<Value, String> {
         ) => Some(project.as_str()),
         Command::Deps(DepsCommand::Get { project, .. } | DepsCommand::Set { project, .. })
         | Command::Journal { project, .. }
-        | Command::Status { project } => Some(project.as_str()),
+        | Command::Status { project, .. } => Some(project.as_str()),
         _ => None,
     };
     let read_only = matches!(
         &args.command,
-        Command::Project(ProjectCommand::Show { .. })
+        Command::Project(ProjectCommand::Show { .. } | ProjectCommand::Revision { .. })
             | Command::Node(
                 NodeCommand::Show { .. }
                     | NodeCommand::List { .. }
@@ -467,6 +509,13 @@ fn run(args: Args) -> Result<Value, String> {
                     lib.set_scope(p, &scope, 0)?;
                 }
                 Ok(json!({"created":id,"app_node":0}))
+            }
+            ProjectCommand::Revision { project: id } => {
+                let p = project(&lib, &id)?;
+                let pr = &lib.projects[p];
+                Ok(
+                    json!({"project":pr.id,"binary":pr.binary,"revision":pr.revision,"next_id":pr.next_id,"structural_epoch":pr.structural_epoch,"layout_version":pr.layout_version,"active_import":pr.active_import}),
+                )
             }
             ProjectCommand::Show { project: id } => {
                 let p = project(&lib, &id)?;
@@ -539,12 +588,15 @@ fn run(args: Args) -> Result<Value, String> {
                 let created = lib.batch(p, &batch)?;
                 Ok(json!({"project": id, "revision":lib.projects[p].revision, "created":created}))
             }
-            NodeCommand::List { project: id } => {
+            NodeCommand::List {
+                project: id,
+                filter,
+            } => {
                 let p = project(&lib, &id)?;
                 let states = lib.effective_all(p);
                 let paths = lib.report_paths(p);
                 let required = lib.required_nodes(p);
-                Ok(json!(lib.projects[p].nodes.iter().map(|n| json!({"node":n,"effective_status":states[&n.id],"required_research":required.contains(&n.id),"report":paths[&n.id]})).collect::<Vec<_>>()))
+                Ok(json!(lib.projects[p].nodes.iter().filter(|n| filter.keeps(n, states[&n.id])).map(|n| json!({"node":n,"effective_status":states[&n.id],"required_research":required.contains(&n.id),"report":paths[&n.id]})).collect::<Vec<_>>()))
             }
             NodeCommand::Create {
                 project: id,
@@ -656,7 +708,12 @@ fn run(args: Args) -> Result<Value, String> {
                 node_view(&lib, p, node)
             }
         },
-        Command::Status { project: id } => {
+        Command::Status {
+            project: id,
+            filter,
+            ready,
+            summary,
+        } => {
             let p = project(&lib, &id)?;
             let states = lib.effective_all(p);
             let required = lib.required_nodes(p);
@@ -673,12 +730,21 @@ fn run(args: Args) -> Result<Value, String> {
                 deps.entry(e.dependent).or_default().push(e.prerequisite);
             }
             let flags = lib.review_flags(p)?;
-            let records:Vec<_>=lib.projects[p].nodes.iter().map(|n|{
+            let mut counts: std::collections::BTreeMap<
+                String,
+                std::collections::BTreeMap<String, usize>,
+            > = Default::default();
+            let mut ready_count = 0usize;
+            let records:Vec<_>=lib.projects[p].nodes.iter().filter(|n| filter.keeps(n, states[&n.id])).filter_map(|n|{
                 let children = kids.get(&n.id).cloned().unwrap_or_default();
                 let blocked_children:Vec<_>=children.iter().copied().filter(|id|states[id]!=Status::Complete).collect();
                 let blocked_prerequisites:Vec<_>=deps.get(&n.id).into_iter().flatten().copied().filter(|id|states[id]!=Status::Complete).collect();
-                json!({"id":n.id,"name":n.name,"kind":n.kind,"status":states[&n.id],"required_research":required.contains(&n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
-                    "ready_for_review":states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty()),"review_flag":flags.get(&n.id)})
+                let ready_for_review = states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty());
+                if ready && !ready_for_review { return None; }
+                ready_count += usize::from(ready_for_review);
+                *counts.entry(format!("{:?}", n.kind)).or_default().entry(format!("{:?}", states[&n.id])).or_default() += 1;
+                (!summary).then(|| json!({"id":n.id,"name":n.name,"kind":n.kind,"status":states[&n.id],"required_research":required.contains(&n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
+                    "ready_for_review":ready_for_review,"review_flag":flags.get(&n.id)}))
             }).collect();
             let inventory = lib.projects[p]
                 .nodes
@@ -690,9 +756,14 @@ fn run(args: Args) -> Result<Value, String> {
                 .iter()
                 .filter(|n| n.kind == Kind::Function && required.contains(&n.id))
                 .count();
-            Ok(
-                json!({"project":id,"app_status":states[&0],"review_flags":flags.len(),"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions,"records":records}),
-            )
+            let mut out = json!({"project":id,"app_status":states[&0],"review_flags":flags.len(),"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions});
+            if summary {
+                out["counts"] = json!(counts);
+                out["ready_for_review"] = json!(ready_count);
+            } else {
+                out["records"] = json!(records);
+            }
+            Ok(out)
         }
         Command::Home | Command::Gui | Command::Criteria { .. } => unreachable!(),
     }
