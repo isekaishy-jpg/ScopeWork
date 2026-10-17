@@ -53,7 +53,7 @@ pub enum Status {
     InProgress,
     Complete,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Node {
     #[serde(default)]
     pub context_only: bool,

@@ -2,72 +2,84 @@
 use super::*;
 use serde_json::{Value, json};
 
-fn delta(j: &Journal) -> Result<Value> {
-    let mut before = serde_json::to_value(&j.before).map_err(|e| e.to_string())?;
-    let mut after = serde_json::to_value(&j.after).map_err(|e| e.to_string())?;
-    let mut changes = serde_json::Map::new();
-    for (field, identity) in [("nodes", "id"), ("dependencies", "")] {
-        let a = before.as_object_mut().unwrap().remove(field).unwrap();
-        let b = after.as_object_mut().unwrap().remove(field).unwrap();
-        let key = |v: &Value| {
-            if identity.is_empty() {
-                v.to_string()
-            } else {
-                v[identity].to_string()
-            }
-        };
-        let aa: HashMap<_, _> = a
-            .as_array()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (key(v), (i, v)))
-            .collect();
-        let bb: HashMap<_, _> = b
-            .as_array()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (key(v), (i, v)))
-            .collect();
-        let common_before: Vec<_> = a
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(&key)
-            .filter(|k| bb.contains_key(k))
-            .collect();
-        let common_after: Vec<_> = b
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(&key)
-            .filter(|k| aa.contains_key(k))
-            .collect();
-        let reordered = common_before != common_after;
-        let changed = |own: &(usize, &Value), other: Option<&(usize, &Value)>| {
-            other.is_none_or(|other| own.1 != other.1 || (reordered && own.0 != other.0))
-        };
-        let removed: Vec<_> = a
-            .as_array()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .filter(|(i, v)| changed(&(*i, *v), bb.get(&key(v))))
-            .map(|(i, v)| json!({"index":i,"record":v}))
-            .collect();
-        let added: Vec<_> = b
-            .as_array()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .filter(|(i, v)| changed(&(*i, *v), aa.get(&key(v))))
-            .map(|(i, v)| json!({"index":i,"record":v}))
-            .collect();
-        changes.insert(field.into(), json!({"before":removed,"after":added}));
+/// Catalog fields other than the record arrays, serialized as the receipt's `before`/`after`.
+fn header(p: &Project) -> Result<Value> {
+    let mut v = serde_json::to_value(Project {
+        nodes: vec![],
+        dependencies: vec![],
+        layout_version: p.layout_version,
+        id: p.id.clone(),
+        name: p.name.clone(),
+        binary: p.binary.clone(),
+        research_scope: p.research_scope.clone(),
+        next_id: p.next_id,
+        revision: p.revision,
+        structural_epoch: p.structural_epoch,
+        active_import: p.active_import.clone(),
+        last_import: p.last_import.clone(),
+    })
+    .map_err(|e| e.to_string())?;
+    let object = v.as_object_mut().ok_or("Invalid catalog")?;
+    object.remove("nodes");
+    object.remove("dependencies");
+    Ok(v)
+}
+/// Changed records between two arrays keyed by identity, comparing typed records so only the
+/// changes are serialized. A record counts as changed when it is new, gone, different, or moved
+/// while the surviving records were reordered.
+fn record_changes<T: PartialEq + Serialize, K: Eq + std::hash::Hash>(
+    a: &[T],
+    b: &[T],
+    key: impl Fn(&T) -> K,
+) -> Result<Value> {
+    let aa: HashMap<K, (usize, &T)> = a
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (key(v), (i, v)))
+        .collect();
+    let bb: HashMap<K, (usize, &T)> = b
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (key(v), (i, v)))
+        .collect();
+    let common_before: Vec<K> = a.iter().map(&key).filter(|k| bb.contains_key(k)).collect();
+    let common_after: Vec<K> = b.iter().map(&key).filter(|k| aa.contains_key(k)).collect();
+    let reordered = common_before != common_after;
+    let changed = |own: (usize, &T), other: Option<&(usize, &T)>| {
+        other.is_none_or(|other| own.1 != other.1 || (reordered && own.0 != other.0))
+    };
+    let mut removed = vec![];
+    for (i, v) in a.iter().enumerate() {
+        if changed((i, v), bb.get(&key(v))) {
+            removed.push(
+                json!({"index": i, "record": serde_json::to_value(v).map_err(|e| e.to_string())?}),
+            );
+        }
     }
+    let mut added = vec![];
+    for (i, v) in b.iter().enumerate() {
+        if changed((i, v), aa.get(&key(v))) {
+            added.push(
+                json!({"index": i, "record": serde_json::to_value(v).map_err(|e| e.to_string())?}),
+            );
+        }
+    }
+    Ok(json!({"before": removed, "after": added}))
+}
+fn delta(j: &Journal) -> Result<Value> {
+    let mut changes = serde_json::Map::new();
+    changes.insert(
+        "nodes".into(),
+        record_changes(&j.before.nodes, &j.after.nodes, |n| n.id)?,
+    );
+    changes.insert(
+        "dependencies".into(),
+        record_changes(&j.before.dependencies, &j.after.dependencies, |d| {
+            (d.dependent, d.prerequisite)
+        })?,
+    );
     Ok(
-        json!({"schema":1,"kind":"completed-catalog-delta","before":before,"after":after,"changes":changes,
+        json!({"schema":1,"kind":"completed-catalog-delta","before":header(&j.before)?,"after":header(&j.after)?,"changes":changes,
         "before_hash":hash(&serde_json::to_string(&j.before).map_err(|e|e.to_string())?),
         "after_hash":hash(&serde_json::to_string(&j.after).map_err(|e|e.to_string())?),
         "edits":j.edits,"moves":j.moves,"dependencies":j.dependencies,"sidecars":j.sidecars}),
@@ -101,15 +113,15 @@ pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {
             "Catalog changed during batch transaction; preserve the pending journal.".into(),
         );
     };
-    let base = serde_json::to_value(current).map_err(|e| e.to_string())?;
-    let mut other = value[target].clone();
-    for field in ["nodes", "dependencies"] {
-        let mut records = base[field]
-            .as_array()
-            .ok_or("Invalid catalog array")?
-            .clone();
-        let changes = &value["changes"][field];
-        let mut remove: Vec<_> = changes[source]
+    // Apply the delta to typed records; only changed records are converted from JSON.
+    fn apply<T: PartialEq + Clone + serde::de::DeserializeOwned>(
+        records: &[T],
+        changes: &Value,
+        source: &str,
+        target: &str,
+    ) -> Result<Vec<T>> {
+        let mut records = records.to_vec();
+        let mut remove: Vec<&Value> = changes[source]
             .as_array()
             .ok_or("Invalid journal delta")?
             .iter()
@@ -117,12 +129,14 @@ pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {
         remove.sort_by_key(|r| std::cmp::Reverse(r["index"].as_u64().unwrap_or(u64::MAX)));
         for row in remove {
             let index = row["index"].as_u64().ok_or("Invalid delta index")? as usize;
-            if records.get(index) != Some(&row["record"]) {
+            let record: T =
+                serde_json::from_value(row["record"].clone()).map_err(|e| e.to_string())?;
+            if records.get(index) != Some(&record) {
                 return Err("Journal delta input mismatch".into());
             }
             records.remove(index);
         }
-        let mut insert: Vec<_> = changes[target]
+        let mut insert: Vec<&Value> = changes[target]
             .as_array()
             .ok_or("Invalid journal delta")?
             .iter()
@@ -133,11 +147,25 @@ pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {
             if index > records.len() {
                 return Err("Journal delta index outside catalog".into());
             }
-            records.insert(index, row["record"].clone());
+            records.insert(
+                index,
+                serde_json::from_value(row["record"].clone()).map_err(|e| e.to_string())?,
+            );
         }
-        other[field] = records.into();
+        Ok(records)
     }
-    let other: Project = serde_json::from_value(other).map_err(|e| e.to_string())?;
+    let mut other = value[target].clone();
+    let object = other.as_object_mut().ok_or("Invalid journal header")?;
+    object.insert("nodes".into(), Value::Array(vec![]));
+    object.insert("dependencies".into(), Value::Array(vec![]));
+    let mut other: Project = serde_json::from_value(other).map_err(|e| e.to_string())?;
+    other.nodes = apply(&current.nodes, &value["changes"]["nodes"], source, target)?;
+    other.dependencies = apply(
+        &current.dependencies,
+        &value["changes"]["dependencies"],
+        source,
+        target,
+    )?;
     if value[format!("{target}_hash")]
         != hash(&serde_json::to_string(&other).map_err(|e| e.to_string())?)
     {
