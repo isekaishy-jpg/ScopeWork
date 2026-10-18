@@ -70,11 +70,11 @@ Solworker schedules work inside one process. Every agent command is its own `res
 
 | Option | Isolation | Cost |
 | --- | --- | --- |
-| Windows named pipe | The pipe's access list limits it to the user; no port, no firewall. | A small FFI module over `windows-sys`, which is already in the build graph through eframe. |
+| Windows named pipe | Default security lets Everyone and Anonymous read (fourth pass); an explicit owner-only descriptor limits it to the user. No port, no firewall. | A small FFI module over `windows-sys`, which is already in the build graph through eframe. |
 | Loopback TCP | Any local process can connect; needs a token file. | Standard library only. |
 | Spool folder of request files | Filesystem permissions. | Polling latency; many small files. |
 
-Named pipes are selected. They are the platform's intended local IPC, carry the user's identity, and add no new crate.
+Named pipes are selected. They are the platform's intended local IPC, can be restricted to the user with an explicit security descriptor, and add no new crate.
 
 ### Closing the research gaps (2026-10-18, second pass)
 
@@ -213,7 +213,81 @@ Outside the coordinator, those are direct-mode commands, older Scopework version
 
 **6. Python as a pipe client.** Verified with the spike server: a plain `open(r'\\.\pipe\…', 'r+b', buffering=0)` in Python made 500 JSON-line round trips with a median of 25 µs (p99 169 µs), and the server saw a clean end when the client closed. A pipe-speaking `catalog.py` needs only the standard library.
 
-**Status.** The research needed for the design stage is complete. The read-during-write rate stays unmeasurable without a read log, which phase 1 adds.
+**Status.** Five assumptions remained after this pass; the fourth pass below tests them.
+
+### Assumptions tested (2026-10-18, fourth pass)
+
+The third pass left five design assumptions untested. Each is now tested; one earlier claim was wrong and is corrected above.
+
+**1. Named-pipe security (earlier claim corrected).** The spike read the security descriptor of a pipe created with default security. It grants full access to SYSTEM, Administrators and the creating user, and read access to Everyone (`WD`) and Anonymous (`AN`):
+
+```text
+D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;<user>)(A;;FR;;;WD)(A;;FR;;;AN)
+```
+
+The earlier statement that a pipe's access list "limits it to the user" was therefore wrong. A pipe created with the explicit, protected descriptor `D:P(A;;GA;;;OW)` has only an owner entry, and the owner can still connect. Requirements for the design:
+- an explicit owner-only descriptor;
+- remote clients rejected (`PIPE_REJECT_REMOTE_CLIENTS`, already used in the spike);
+- protection against another process creating the pipe name first: `FILE_FLAG_FIRST_PIPE_INSTANCE` on the server, and a client check that the server process belongs to the same user. Not tested: these two (only the owner-only descriptor was).
+
+**2. Restart Manager with a windowless coordinator.** A copy of `research.exe` was started with `CREATE_NO_WINDOW`, the way Scopework launches background runners, and registered with Restart Manager as an installer would:
+
+| Step | Result |
+| --- | --- |
+| Classification | `RmConsole`, not restartable |
+| Graceful shutdown (`RmShutdown` without force) | Failed with error 351 after about 30 s; the process kept running |
+| Forced shutdown | Terminated it (exit code 1) |
+
+The standard files-in-use path therefore cannot stop a windowless coordinator gracefully. It ends in a forced kill or a reboot prompt. The kill is crash-safe because of the journal, but it is not an acceptable upgrade path. Phase 1 needs one of:
+- an installer custom action that runs a stop command, which drains and exits, before files are replaced;
+- a hidden top-level window that answers Windows' shutdown messages, so Restart Manager can close the coordinator gracefully. Not tested.
+
+The version handshake from the third pass stays necessary either way.
+
+**3. Snapshot memory.** Private memory sampled while a temporary, uncommitted test loaded a copy of the live 7.8 MB catalog:
+
+| State | Private memory |
+| --- | --- |
+| Catalog parsed | about 8 MB (including a small process baseline) |
+| Catalog and index | about 15 MB |
+| A second catalog generation, as during a snapshot swap | about 22 MB |
+
+A snapshot of the 31,603-record project is therefore about 14 MB, and about 21 MB at the moment of a swap.
+
+Report working set (sizes of the reports of records changed by commits):
+- last 10 minutes: 268 records, 1.0 MB;
+- last 60 minutes: 787 records, 3.0 MB;
+- all 31,603 reports: 100 MB (median 2.8 KB, p99 8.7 KB, largest 219 KB).
+
+A report cache of a few tens of MB covers the active set many times over. The earlier "tens of megabytes per open project" holds.
+
+**4. Solcache for the report cache: a partial fit.** In Solcache's documentation at the pinned revision:
+- `SCCache` has no internal lock and needs `&mut` to change;
+- `SCCleanupContext` is neither `Send` nor `Sync`, so deferred releases drain on the thread that created it;
+- retention works by byte budget (`maintain` with `SCByteLimit`) and keeps entries that callers still share.
+
+That suits retention owned by one thread, such as the writer. It does not suit reads from many pipe threads without sending each read through that thread. That would make reads wait behind commits again, which the requirements rule out. The snapshot's report texts therefore need their own concurrent structure, with Solcache used at most for retention on the writer's side.
+
+The same check exposed a correctness hazard. **Commits modify report files in place.** A reader holding an older snapshot that misses its in-memory text and falls back to reading the file could read text written by a newer commit: a torn answer. The design needs an ordering rule. Before a commit touches any report, the writer records that report's previous text in the outgoing snapshot, under a lock that also covers the snapshot's own file reads. A reader of the old snapshot then gets either the recorded text or a file read completed before the commit began, never the new text. This is a correctness requirement for snapshot reads, not an optimisation.
+
+**5. Drift-audit feasibility.** A read-only probe parsed all 1,386 Python tool scripts with Python's syntax-tree module (`ast`):
+
+| Finding | Count |
+| --- | --- |
+| Scripts that both call the shared modules and write files directly | 1,292 |
+| Scripts using only the shared modules | 74 |
+| Scripts writing only directly | 17 |
+| Scripts launching subprocesses | 314 |
+| Direct file writes found | 10,745 |
+| Writes whose target is not a literal or a module constant | 9,518 (89%) |
+
+Many unresolvable targets are per-run output folders, but static analysis cannot tell those apart from shared resources. So:
+- **Static analysis can report reliably** which shared modules, CLI commands and subprocesses a tool uses.
+- **It cannot report** which files a tool writes.
+
+Drift detection for shared resources (catalog, ledger, sidecars, reports, the Ghidra project) must be runtime: the coordinator records any change to them made outside a declared operation or held lease, with the lease holders at that time. The static audit stays an advisory report of module and command usage.
+
+**Status.** Research for the design stage is complete. The rate of reads that land on a record during a write cannot be measured without a read log, which phase 1 adds. Two items stay assumptions until implementation: the pipe first-instance and same-user client check, and the hidden-window shutdown alternative.
 
 ## Design
 
@@ -231,7 +305,7 @@ For each open project, the coordinator holds a **snapshot**: an immutable value 
 - an answer always comes from exactly one committed revision; there is no window and no retry;
 - `status`, `node show`, `read-batch` and the GUI stop re-parsing the catalog on every call.
 
-Report texts are cached per revision and evicted by a byte budget (Solcache). A commit replaces only the entries it changed. Report files edited outside Scopework are noticed through the existing size-and-modification-time stamps before the coordinator serves their text.
+Report texts are cached per revision and evicted by a byte budget. The fourth pass found Solcache suits only writer-side retention, and that in-place report writes need a before-text ordering rule. A commit replaces only the entries it changed. Report files edited outside Scopework are noticed through the existing size-and-modification-time stamps before the coordinator serves their text.
 
 ### Pending-write context on reads
 
@@ -282,7 +356,7 @@ A tool declares itself in a manifest in the project's `tools/` folder, or with f
 
 An undeclared tool still works. It can take a plain named lease and gets no merging. Nothing breaks when a tool changes or a new one appears.
 
-**Drift audit.** `research tools audit PROJECT` reads the current scripts and reports, per tool:
+**Drift audit.** (The fourth pass found static analysis cannot tell which files a tool writes; drift on shared resources must be detected at runtime, with this static audit only advisory.) `research tools audit PROJECT` reads the current scripts and reports, per tool:
 
 - the files and resources it writes;
 - the CLI commands it calls;
