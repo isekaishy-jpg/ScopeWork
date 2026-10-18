@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+See [the proposal](docs/proposal-2026-10-18.md) for measured causes and acceptance criteria.
+
+- Moves and deletions no longer rewrite unrelated reports. A reference changes only when it names a moved folder, or when its report moved and the named project file exists; quoted source strings such as `.\Movement_C.cpp` and `..\src\x.cpp` keep their bytes, so other sessions' completed work is not reopened. Moves read only the reports that mention a moved folder, through a persisted reference index, instead of every report under the lock.
+- The annotation ledger is repathed in place when the catalog commits: only outdated `"report"` values change; formatting and line endings stay. Journals no longer copy the ledger, a tool's concurrent write can no longer block a project, older journals with ledger copies resume the same way, and rows written back with an old path are repaired by the next move. Ledger rows no longer get a `catalog_move` note.
+- Read-only commands answer from the committed catalog while a pending transaction is blocked (`recovery_blocked` warning on stderr); write and recovery errors name the file and the journal. File and folder renames retry Windows sharing violations.
+- Project locks queue fairly in arrival order; later readers no longer overtake a waiting writer, dead waiters are skipped and `research locks` shows queue positions. GUI actions wait up to 60 s for the lock; the GUI refresh releases its lock before building meters. `research wait` re-reads the catalog only when it changes.
+- Batch schema 2 checks each updated record's `expect_node_revision` instead of the project revision. `node batch` reports `moved` report paths and `ledger_rows_repathed`. New `node resolve` maps old report or data paths to current ones.
+- `research journal PROJECT --compact-sidecars` replaces large sidecar copies in completed receipts with their changed JSON values and hashes (opt-in, irreversible for those bytes); `journal` reports `large_sidecar_bytes`.
+- Deletion queues the completed records it reopens and drops claims and queue entries of deleted records; previews write nothing. Completion evaluates only its own children and prerequisites; history summaries skip report and sidecar text.
+- Secondary windows, dialogs and menus use the dashboard's Windows 95 Task Manager style (`src/classic.rs`). Research records follows the dashboard's project tab, with a records list, Report / Organize / Project tabs and a status bar. **Mark complete...** is a separate, confirmed action that says what blocks it. New project moves to **File > New project...**.
+- CONTRIBUTING.md states the testing rule: research does not get tests; this software does.
+
 ## 0.8.0 - 2026-10-17
 
 See [qualification and limits](docs/qualification-0.8.0.md).

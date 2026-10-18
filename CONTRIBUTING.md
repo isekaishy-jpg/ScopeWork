@@ -16,7 +16,7 @@ For bugs, include the Scopework version, Windows version, reproduction steps, ex
 
 For feature requests, explain the research task and the specific obstacle. Small concrete proposals are easier to discuss and maintain.
 
-Pull requests should describe what changed and the validation actually performed. Do not claim installation, upgrade or runtime behavior was checked when only a build was run. For agent work, follow the repository rule against adding or running tests without a user request.
+Pull requests should describe what changed and the validation actually performed. Do not claim installation, upgrade or runtime behavior was checked when only a build was run. Research does not get tests; this software does: add focused regression tests for meaningful behavior changes, using small self-cleaning fixtures (see AGENTS.md).
 
 ## Research and local files
 
