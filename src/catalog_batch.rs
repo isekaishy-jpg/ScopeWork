@@ -127,6 +127,10 @@ fn parts(text: &str) -> Result<(&str, &str)> {
 fn same(a: &Project, b: &Project) -> bool {
     a == b
 }
+/// An I/O error naming the file it concerns, so a locked or missing file can be found.
+fn at(path: &Path, e: std::io::Error) -> String {
+    format!("{}: {e}", path.display())
+}
 /// Recovery guidance appended to every conflict that stops a pending transaction.
 fn blocked(root: &Path, what: String) -> String {
     format!(
@@ -165,7 +169,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
         return Ok(0);
     }
     contained(root, &path)?;
-    let j = journal_history::read_pending(&fs::read(&path).map_err(|e| e.to_string())?, project)
+    let j = journal_history::read_pending(&fs::read(&path).map_err(|e| at(&path, e))?, project)
         .map_err(|e| blocked(root, e))?;
     fault("journal");
     if !same(project, &j.before) && !same(project, &j.after) {
@@ -184,7 +188,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
         for candidate in candidates.into_iter().flatten() {
             contained(root, &candidate)?;
             if candidate.is_file() {
-                let text = fs::read_to_string(&candidate).map_err(|e| e.to_string())?;
+                let text = fs::read_to_string(&candidate).map_err(|e| at(&candidate, e))?;
                 if Some(&text) != edit.before.as_ref() && text != edit.after {
                     return Err(blocked(
                         root,
@@ -214,7 +218,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
             repath_ledger = true;
             continue;
         }
-        let current = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let current = fs::read_to_string(&path).map_err(|e| at(&path, e))?;
         if current != file.before && current != file.after {
             return Err(blocked(
                 root,
@@ -240,7 +244,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
                 ));
             }
             fs::create_dir_all(stage.parent().unwrap()).map_err(|e| e.to_string())?;
-            fs::rename(from, stage).map_err(|e| e.to_string())?;
+            rename_retrying(&from, &stage).map_err(|e| at(&from, e))?;
         }
     }
     moves.sort_by_key(|m| m.new.matches('/').count());
@@ -252,7 +256,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
                 return Err(format!("Refusing to overwrite {}", to.display()));
             }
             fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
-            fs::rename(stage, to).map_err(|e| e.to_string())?;
+            rename_retrying(&stage, &to).map_err(|e| at(&stage, e))?;
         }
     }
     fault("moves");
@@ -304,7 +308,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
     if receipt.exists() {
         return Err("Batch receipt already exists; preserve the pending journal.".into());
     }
-    fs::rename(folder, &receipt).map_err(|e| e.to_string())?;
+    rename_retrying(&folder, &receipt).map_err(|e| at(&folder, e))?;
     journal_history::compact(&receipt.join("journal.json"), &j)?;
     Ok(ledger_rows)
 }

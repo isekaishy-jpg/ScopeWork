@@ -133,15 +133,16 @@ fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
-    replace_retrying(&temp, path).map_err(|e| {
+    rename_retrying(&temp, path).map_err(|e| {
         let _ = fs::remove_file(&temp);
         format!("Cannot replace {}: {e}", path.display())
     })
 }
-/// Renames `from` over `to`. On Windows a replacement fails while any other process (an
-/// indexer, antivirus, a tool reading the file) has the target open; those holds are brief,
-/// so sharing, lock and access violations are retried for a few seconds.
-fn replace_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Renames `from` to `to` (replacing a file). On Windows a rename fails while any other
+/// process (an indexer, antivirus, a tool reading a file inside) has the file or folder open;
+/// those holds are usually brief, so sharing, lock and access violations are retried for a few
+/// seconds before the error is returned.
+fn rename_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let mut pause = std::time::Duration::from_millis(5);
     loop {
