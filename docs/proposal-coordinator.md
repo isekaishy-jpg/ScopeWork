@@ -131,9 +131,89 @@ Measuring it directly needs a read log, which phase 1 should add (counts only).
 
 So the per-project writer fits an owner thread. Owner callbacks run in arrival order, though, so priority classes and merging must be the writer's own queue state, with posted callbacks only enqueueing. That matches Solworker's guidance: application order lives in the application, CPU work goes on lanes. Batched validation needs the inputs owned, which an `Arc` snapshot provides.
 
-**Named pipes, proven in a spike.** A throwaway program in the scratchpad (not the repository) built offline against `windows-sys` 0.61.2, the version already in `Cargo.lock`. One server thread per connection, four concurrent clients and 8,000 JSON-line round trips gave a median of 11 µs (p99 24 µs, max 166 µs). Clients opened the pipe with plain `std::fs::OpenOptions`, so the CLI side needs no foreign API. The server side is about 40 lines of FFI: `CreateNamedPipeW` with remote clients rejected, then `ConnectNamedPipe`. Transport cost is negligible next to a process start (about 11 ms) or a commit (about 300 ms). Not verified: opening the pipe from Python, which Windows supports as an ordinary file open; this matters only for a later pipe-speaking `catalog.py`.
+**Named pipes, proven in a spike.** A throwaway program in the scratchpad (not the repository) built offline against `windows-sys` 0.61.2, the version already in `Cargo.lock`. One server thread per connection, four concurrent clients and 8,000 JSON-line round trips gave a median of 11 µs (p99 24 µs, max 166 µs). Clients opened the pipe with plain `std::fs::OpenOptions`, so the CLI side needs no foreign API. The server side is about 40 lines of FFI: `CreateNamedPipeW` with remote clients rejected, then `ConnectNamedPipe`. Transport cost is negligible next to a process start (about 11 ms) or a commit (about 300 ms). Opening the pipe from Python was verified in the third pass below.
 
-**Status of this document.** The research is now complete. The design stage, which evaluates the alternatives for each major decision against explicit criteria, has not been done. Until it is, the selections under Design below are a draft.
+**Status of this document.** The design stage, which evaluates the alternatives for each major decision against explicit criteria, has not been done. Until it is, the selections under Design below are a draft.
+
+### Remaining research questions (2026-10-18, third pass)
+
+**1. Are ancestor revision bumps needed?** I traced every reader of a record's own revision (`node.revision`) in the source:
+
+| Reader | Uses |
+| --- | --- |
+| Completion tokens (`edit_tokens::completion`) | The revision, status, effective state and accepted hash of every record in the closure: required descendants plus prerequisites. |
+| Prerequisite stamps (`dependency_stamps`, `catalog_index::state`) | `revision:hash` of each prerequisite; prerequisites are always functions. |
+| Schema-2 batch preconditions and the GUI's context-only toggle | The updated record's revision. |
+
+Draft tokens hash the lineage (identity, parent, kind, name, RVA, membership), prerequisites and text, not revisions. Structural tokens use the project-wide `structural_epoch`.
+
+When a child changes, every completion token above it already changes, through the child's own revision and status. Bumping the revision of an ancestor that is not complete therefore protects nothing. It does three things:
+- it makes 85% of commits touch the App, an architecture and a chunk;
+- it inflates journals;
+- it makes schema-2 preconditions on chunks and architectures conflict with any work beneath them.
+
+Ancestors that are complete must still be reopened, with a bumped revision and cleared acceptance. Prerequisite consumers must still be reopened through their stamps.
+
+Conclusion: invalidation can be limited to complete ancestors and prerequisite consumers, without weakening any token or check. The same applies to the copies of this logic in report saves, batches, deletion and import publication. This is a behaviour change that needs its own tests (stale completion tokens must still be rejected).
+
+**2. What do the commit fingerprints protect?** Each pending journal records SHA-256 fingerprints of the whole serialised catalog before and after. They exist for crash recovery: on the next open, recovery must prove that `project.json` is exactly the before or the after state, and must refuse a catalog changed by anything else meanwhile. That guarantee is needed and stays.
+
+The cost comes from how it is obtained. One commit serialises and hashes the catalog four times:
+- before and after, when the journal is written;
+- again in `resume`, which re-reads the journal it has just written and reconstructs and re-hashes both states;
+- once more to write the catalog.
+
+Most of that is redundant when the same process wrote the journal. The SHA-256 rate here is about 280 MB/s, because this CPU (Core i5-9600K) has no SHA instructions, so each hash of the 7.8 MB catalog costs 28 ms.
+
+Options for the design stage:
+- serialise the after-state once, hashing and writing the same bytes;
+- reuse the hash of the bytes read at open for the before-state;
+- skip the re-verification when committing in-process, keeping it for recovery after a crash;
+- optionally, switch the fingerprint to a fast non-cryptographic 128-bit hash in a new journal schema. It is an identity check, not a security boundary.
+
+The first three cut roughly 190 ms to about 40 ms per commit, with no format change.
+
+**3. Which merged operations stay correct?** Token inputs:
+
+| Token | Changes when |
+| --- | --- |
+| Draft (`d4`) | The record's lineage, prerequisites or text change. Unaffected by siblings or children; their renaming re-renders the report header but not the body or evidence the token hashes. |
+| Completion (`c4`) | The draft token changes, or anything in the closure changes. |
+| Structural (`s4`) | The project-wide `structural_epoch` changes. Every batch, move, prerequisite change or deletion advances it, so it is as coarse as the old global revision. |
+| Unprefixed (legacy) | The project revision changes. |
+
+**Merge rule.** In a merged commit, each operation is validated against the in-memory state left by the operations before it, in queue order. A merged batch therefore accepts and rejects exactly what the same operations would run one at a time in that order; tokens prevent any interleaving that serial execution would refuse. Priority classes change only which order is chosen, never what an order may do.
+
+**What can merge:**
+- **Completions and report saves** of any records.
+- **Flags, claims and review-queue changes.** These are sidecar edits, applied in order.
+- **Ledger row edits.**
+
+**What should commit alone:** operations that relocate reports or change hierarchy (moves, deletions, link repair). Later operations in the same batch would otherwise need a virtual file layout to read reports at their new paths.
+
+**Failure handling.** All validation happens before anything is written. An I/O failure during the commit fails every operation in the batch with the same error. Each merged operation keeps its own submitter and result in history.
+
+The coarse structural epoch is a separate conflict source, worth narrowing to the records a change touches.
+
+**4. Upgrades with a running coordinator.** I tested a running copy of `research.exe` in the scratchpad: it **cannot be overwritten or deleted**, but **can be renamed**, after which a new file can take its name.
+
+Windows Installer does not use renaming. Scopework's package (`installer/Wizard.wxs`) relies on the standard files-in-use and Restart Manager dialogs, and `docs/installation.md` tells users to close Scopework and agent jobs before upgrading.
+
+A coordinator that is started without a window gives those dialogs nothing to close gracefully. The installer would end up asking to reboot or terminating it. Termination is crash-safe thanks to the journal, but it is a poor upgrade path. The design therefore needs:
+- **a stop command** that drains the queue, finishes the commit in progress and exits;
+- **an installer custom action** that runs it for every coordinator of the user before files are replaced;
+- **a short idle exit**;
+- **a version handshake:** a client of version X that finds a coordinator of version Y asks it to drain and exit, then starts its own, so mixed versions never share a project for long.
+
+The installer action and the handshake are new installer work, so they belong in phase 1. Otherwise the first release containing a coordinator cannot be upgraded cleanly.
+
+**5. How often does the catalog change outside the coordinator?** In the live project, all of the last 20,000 revisions have a journal receipt. The 731 revisions without one (1.66% of all) are from an early period: catalog creation and settings written without a journal. In steady state, then, every catalog change is a journaled commit by some Scopework process.
+
+Outside the coordinator, those are direct-mode commands, older Scopework versions and the GUI if it writes directly. The coordinator notices each before its next commit by the catalog's size and time. Reloading costs about 50 ms (parse 21 ms, index 30 ms) plus a snapshot rebuild. While agents are still on 0.8.0, a reload per agent commit (about 14 a minute here) is affordable. Once every client uses the coordinator, reloads stop.
+
+**6. Python as a pipe client.** Verified with the spike server: a plain `open(r'\\.\pipe\…', 'r+b', buffering=0)` in Python made 500 JSON-line round trips with a median of 25 µs (p99 169 µs), and the server saw a clean end when the client closed. A pipe-speaking `catalog.py` needs only the standard library.
+
+**Status.** The research needed for the design stage is complete. The read-during-write rate stays unmeasurable without a read log, which phase 1 adds.
 
 ## Design
 
