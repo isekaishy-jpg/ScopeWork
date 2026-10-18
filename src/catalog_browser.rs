@@ -54,6 +54,7 @@ impl Browser {
         data: &std::sync::Arc<BrowserData>,
         selected: u64,
         dirty: bool,
+        list_height: f32,
     ) -> Option<u64> {
         if self.data.key != data.key {
             if self.data.key.0 != data.key.0 {
@@ -79,46 +80,31 @@ impl Browser {
             }
             self.needs_layout = true;
         }
+        let dark = ui.visuals().dark_mode;
         ui.horizontal(|ui| {
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.query)
-                        .hint_text("Find name or RVA")
-                        .desired_width(200.0),
-                )
-                .changed()
-            {
+            if crate::classic::field(ui, &mut self.query, 170.0, "Find name or RVA").changed() {
                 self.needs_layout = true;
             }
-            if ui.button("Clear").clicked() {
+            if crate::classic::button(ui, !self.query.is_empty(), "Clear").clicked() {
                 self.query.clear();
                 self.needs_layout = true;
             }
         });
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(&mut self.focus, "Required research only")
-                .changed()
-            {
-                self.needs_layout = true;
-            }
-            if ui
-                .checkbox(
+        ui.horizontal_wrapped(|ui| {
+            for (value, text) in [
+                (&mut self.focus, "Required only".to_string()),
+                (
                     &mut self.flagged_only,
-                    format!("Flagged for review ({})", self.data.flags.len()),
-                )
-                .changed()
-            {
-                self.needs_layout = true;
-            }
-            if ui
-                .checkbox(
+                    format!("Flagged ({})", self.data.flags.len()),
+                ),
+                (
                     &mut self.queued_only,
                     format!("Review queue ({})", self.data.queued.len()),
-                )
-                .changed()
-            {
-                self.needs_layout = true;
+                ),
+            ] {
+                if crate::classic::check(ui, true, value, &text).changed() {
+                    self.needs_layout = true;
+                }
             }
         });
         if self.needs_layout {
@@ -170,58 +156,69 @@ impl Browser {
             }
         }
         if let Some(error) = &self.error {
-            ui.label(error);
-            if ui.button("Retry search").clicked() {
+            crate::classic::label(ui, error.clone(), Some(crate::classic::alert(dark)));
+            if crate::classic::button(ui, true, "Retry search").clicked() {
                 self.needs_layout = true;
             }
         }
         if self.pending.is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(16));
-            ui.label("Updating results...");
         }
-        ui.label(format!(
-            "{} visible / {} catalog records",
-            self.visible.len(),
-            self.data.rows.len()
-        ));
         let mut navigate = None;
-        egui::ScrollArea::vertical()
-            .id_salt("recordtree")
-            .max_height(240.0)
-            .show_rows(ui, 22.0, self.visible.len(), |ui, range| {
-                for i in range {
-                    let (id, depth) = self.visible[i];
-                    let row = &self.data.rows[self.data.positions[&id]];
-                    ui.horizontal(|ui| {
-                        ui.add_space(depth as f32 * 12.0);
-                        if row.kind != Kind::Function
-                            && self.query.trim().is_empty()
-                            && ui
-                                .small_button(if self.expanded.contains(&id) {
-                                    "−"
-                                } else {
-                                    "+"
-                                })
-                                .clicked()
-                        {
-                            if !self.expanded.remove(&id) {
-                                self.expanded.insert(id);
-                            }
-                            self.needs_layout = true;
-                        }
-                        if ui
-                            .add_enabled(
-                                !dirty,
-                                egui::Button::new(&row.label).selected(id == selected),
-                            )
-                            .clicked()
-                        {
+        crate::classic::sunken(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::vertical()
+                .id_salt("recordtree")
+                .max_height(list_height)
+                .min_scrolled_height(list_height)
+                .auto_shrink([false, false])
+                .show_rows(ui, 18.0, self.visible.len(), |ui, range| {
+                    for i in range {
+                        let (id, depth) = self.visible[i];
+                        let row = &self.data.rows[self.data.positions[&id]];
+                        let indent = 18.0 + depth as f32 * 14.0;
+                        let response = crate::classic::list_row(
+                            ui,
+                            !dirty,
+                            id == selected,
+                            indent,
+                            &row.label,
+                        );
+                        if response.clicked() {
                             navigate = Some(id);
                         }
-                    });
-                }
-            });
+                        if row.kind != Kind::Function && self.query.trim().is_empty() {
+                            let at = egui::pos2(
+                                response.rect.left() + indent - 9.0,
+                                response.rect.center().y,
+                            );
+                            if crate::classic::expander(ui, at, self.expanded.contains(&id))
+                                .clicked()
+                            {
+                                if !self.expanded.remove(&id) {
+                                    self.expanded.insert(id);
+                                }
+                                self.needs_layout = true;
+                            }
+                        }
+                    }
+                });
+        });
+        crate::classic::label(
+            ui,
+            if self.pending.is_some() {
+                "Updating results...".to_string()
+            } else {
+                format!(
+                    "{} shown of {} records",
+                    self.visible.len(),
+                    self.data.rows.len()
+                )
+            },
+            None,
+        );
         navigate
     }
 }

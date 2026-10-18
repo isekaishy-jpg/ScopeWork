@@ -63,6 +63,8 @@ pub(super) struct Loaded {
     pub scope: String,
     pub revision: u64,
     pub dependencies: String,
+    pub status: Status,
+    pub blockers: Vec<String>,
 }
 pub(super) fn load(project: &str, id: u64) -> Result<Loaded> {
     let root = crate::paths::home(None)?.join("projects");
@@ -83,6 +85,8 @@ pub(super) fn load(project: &str, id: u64) -> Result<Loaded> {
         scope: record.research_scope,
         revision: record.revision,
         dependencies: record.dependency_rvas,
+        status: record.effective_status,
+        blockers: lib.completion_blockers(0, id)?,
     })
 }
 

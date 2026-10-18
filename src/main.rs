@@ -40,122 +40,14 @@ impl Default for Dashboard {
         }
     }
 }
+use research_dashboard::classic::{self, bevel, group_box};
 fn background(dark: bool) -> Color32 {
-    if dark {
-        Color32::from_rgb(27, 30, 36)
-    } else {
-        BG
-    }
+    classic::face(dark)
 }
 fn foreground(dark: bool) -> Color32 {
-    if dark {
-        Color32::from_rgb(221, 226, 234)
-    } else {
-        Color32::BLACK
-    }
+    classic::ink(dark)
 }
 
-/// Windows 95 Task Manager styling for every egui surface (secondary windows, menus, popups, fields),
-/// matching the custom-painted dashboard: square corners, no shadows, grey faces, thin dark borders.
-fn classic_visuals(dark: bool) -> egui::Visuals {
-    let mut visuals = if dark {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
-    };
-    let face = background(dark);
-    let ink = foreground(dark);
-    let edge = if dark {
-        Color32::from_gray(90)
-    } else {
-        Color32::from_gray(100)
-    };
-    visuals.override_text_color = Some(ink);
-    visuals.panel_fill = face;
-    visuals.window_fill = face;
-    visuals.faint_bg_color = face;
-    visuals.extreme_bg_color = if dark {
-        Color32::from_rgb(15, 18, 23)
-    } else {
-        Color32::WHITE
-    };
-    visuals.window_stroke = egui::Stroke::new(1.0_f32, edge);
-    visuals.window_corner_radius = egui::CornerRadius::ZERO;
-    visuals.menu_corner_radius = egui::CornerRadius::ZERO;
-    visuals.window_shadow = egui::Shadow::NONE;
-    visuals.popup_shadow = egui::Shadow::NONE;
-    visuals.selection.bg_fill = if dark {
-        Color32::from_rgb(37, 48, 66)
-    } else {
-        Color32::from_rgb(0, 0, 128)
-    };
-    visuals.selection.stroke = egui::Stroke::new(1.0_f32, if dark { ink } else { Color32::WHITE });
-    for (widget, fill) in [
-        (&mut visuals.widgets.noninteractive, face),
-        (&mut visuals.widgets.inactive, face),
-        (
-            &mut visuals.widgets.hovered,
-            if dark {
-                Color32::from_rgb(45, 50, 60)
-            } else {
-                Color32::from_rgb(212, 208, 200)
-            },
-        ),
-        (
-            &mut visuals.widgets.active,
-            if dark {
-                Color32::from_rgb(20, 23, 28)
-            } else {
-                Color32::from_rgb(170, 170, 170)
-            },
-        ),
-        (&mut visuals.widgets.open, face),
-    ] {
-        widget.corner_radius = egui::CornerRadius::ZERO;
-        widget.bg_fill = fill;
-        widget.weak_bg_fill = fill;
-        widget.bg_stroke = egui::Stroke::new(1.0_f32, edge);
-        widget.fg_stroke = egui::Stroke::new(1.0_f32, ink);
-        widget.expansion = 0.0;
-    }
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, edge);
-    visuals
-}
-
-fn bevel(p: &egui::Painter, r: egui::Rect, inset: bool) {
-    let dark_mode = p.ctx().style().visuals.dark_mode;
-    let highlight = if dark_mode {
-        Color32::from_rgb(58, 64, 75)
-    } else {
-        Color32::WHITE
-    };
-    let shadow = if dark_mode {
-        Color32::from_rgb(15, 18, 23)
-    } else {
-        Color32::from_gray(110)
-    };
-    let (light, dark) = if inset {
-        (shadow, highlight)
-    } else {
-        (highlight, shadow)
-    };
-    p.line_segment(
-        [r.left_bottom(), r.left_top()],
-        egui::Stroke::new(1.0_f32, light),
-    );
-    p.line_segment(
-        [r.left_top(), r.right_top()],
-        egui::Stroke::new(1.0_f32, light),
-    );
-    p.line_segment(
-        [r.right_top(), r.right_bottom()],
-        egui::Stroke::new(1.0_f32, dark),
-    );
-    p.line_segment(
-        [r.right_bottom(), r.left_bottom()],
-        egui::Stroke::new(1.0_f32, dark),
-    );
-}
 fn text(p: &egui::Painter, x: f32, y: f32, s: impl ToString, color: Color32) {
     let color = if p.ctx().style().visuals.dark_mode
         && (color == Color32::BLACK || color == Color32::from_gray(65))
@@ -170,28 +62,6 @@ fn text(p: &egui::Painter, x: f32, y: f32, s: impl ToString, color: Color32) {
         s,
         egui::FontId::proportional(11.0),
         color,
-    );
-}
-const BG: Color32 = Color32::from_rgb(212, 208, 200);
-fn group_box(p: &egui::Painter, r: egui::Rect, title: &str) {
-    bevel(p, r, true);
-    let galley = p.layout_no_wrap(
-        title.into(),
-        egui::FontId::proportional(11.0),
-        foreground(p.ctx().style().visuals.dark_mode),
-    );
-    p.rect_filled(
-        egui::Rect::from_min_size(
-            r.min + Vec2::new(7.0, -6.0),
-            galley.size() + Vec2::new(6.0, 0.0),
-        ),
-        0.0,
-        background(p.ctx().style().visuals.dark_mode),
-    );
-    p.galley(
-        r.min + Vec2::new(10.0, -6.0),
-        galley,
-        foreground(p.ctx().style().visuals.dark_mode),
     );
 }
 const METER_HEIGHT: f32 = 46.0;
@@ -317,7 +187,7 @@ impl eframe::App for Dashboard {
             self.selection = None;
         }
         if ctx.style().visuals.dark_mode != self.dark {
-            ctx.set_visuals(classic_visuals(self.dark));
+            ctx.set_visuals(classic::visuals(self.dark));
         }
         let bg = background(self.dark);
         let ink = foreground(self.dark);
@@ -675,111 +545,84 @@ impl eframe::App for Dashboard {
             });
         if let Some(menu) = self.menu {
             let x = [8.0, 42.0, 98.0, 136.0][menu];
-            let mut action = false;
-            let mut toggle_theme = false;
+            let mut chosen = None;
             let popup = egui::Area::new(egui::Id::new("classic menu"))
                 .fixed_pos(egui::pos2(x, 44.0))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
-                    egui::Frame::new()
-                        .fill(bg)
-                        .stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(100)))
-                        .inner_margin(3.0)
-                        .show(ui, |ui| {
-                            if menu == 1
-                                && ui
-                                    .add_sized(
-                                        [185.0, 23.0],
-                                        egui::Button::new(if self.dark {
-                                            "✓ Dark mode"
-                                        } else {
-                                            "Dark mode"
-                                        })
-                                        .frame(false),
-                                    )
-                                    .clicked()
-                            {
-                                toggle_theme = true;
+                    classic::menu_frame(self.dark).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        let items: &[(&str, bool)] = match menu {
+                            0 => &[("New project...", false), ("Exit", false)],
+                            1 => &[("Dark mode", self.dark), ("Always on top", self.on_top)],
+                            2 => &[
+                                ("Research records...", false),
+                                ("Refresh research progress", false),
+                                ("Clear chunk selection", false),
+                            ],
+                            _ => &[("About Scopework", false)],
+                        };
+                        for (i, (label, checked)) in items.iter().enumerate() {
+                            if classic::menu_item(ui, label, *checked).clicked() {
+                                chosen = Some(i);
                             }
-                            if menu == 2
-                                && ui
-                                    .add_sized(
-                                        [185.0, 23.0],
-                                        egui::Button::new("Research records...").frame(false),
-                                    )
-                                    .clicked()
-                            {
-                                self.research.open = true;
-                                self.menu = None;
-                            }
-                            if menu == 2
-                                && ui
-                                    .add_sized(
-                                        [185.0, 23.0],
-                                        egui::Button::new("Refresh research progress").frame(false),
-                                    )
-                                    .clicked()
-                            {
-                                self.research.refresh_library();
-                                self.menu = None;
-                            }
-                            let label = match menu {
-                                0 => "Exit",
-                                1 => {
-                                    if self.on_top {
-                                        "✓ Always on top"
-                                    } else {
-                                        "Always on top"
-                                    }
-                                }
-                                2 => "Clear chunk selection",
-                                _ => "About Scopework",
-                            };
-                            if ui
-                                .add_sized([185.0, 23.0], egui::Button::new(label).frame(false))
-                                .clicked()
-                            {
-                                action = true;
-                            }
-                        });
+                        }
+                    });
                 });
-            if toggle_theme {
-                self.dark = !self.dark;
-                self.menu = None;
-                ctx.request_repaint();
-            } else if action {
-                match menu {
-                    0 => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                    1 => {
-                        self.on_top = !self.on_top;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.on_top {
-                            egui::WindowLevel::AlwaysOnTop
-                        } else {
-                            egui::WindowLevel::Normal
-                        }));
-                    }
-                    2 => self.selection = None,
-                    _ => self.about = true,
+            match (menu, chosen) {
+                (0, Some(0)) => self.research.new_project(),
+                (0, Some(_)) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                (1, Some(0)) => {
+                    self.dark = !self.dark;
+                    ctx.request_repaint();
                 }
-                self.menu = None;
-            } else if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                (1, Some(_)) => {
+                    self.on_top = !self.on_top;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if self.on_top {
+                        egui::WindowLevel::AlwaysOnTop
+                    } else {
+                        egui::WindowLevel::Normal
+                    }));
+                }
+                (2, Some(0)) => self.research.open = true,
+                (2, Some(1)) => self.research.refresh_library(),
+                (2, Some(_)) => self.selection = None,
+                (_, Some(_)) => self.about = true,
+                (_, None) => {}
+            }
+            if chosen.is_some()
+                || ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 || (ctx.input(|i| i.pointer.any_pressed()) && !popup.response.contains_pointer())
             {
                 self.menu = None;
             }
         }
-        self.research.show(ctx);
-        if self.about {
-            egui::Window::new("About Scopework")
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut self.about)
-                .show(ctx, |ui| {
-                    ui.label(format!("Scopework {}", env!("CARGO_PKG_VERSION")));
-                    ui.label("A workbench for bounded research projects.");
-                    ui.label("Research records drive progress. Create a project to begin.");
-                });
+        // Research records follow the dashboard's selected project tab.
+        if let Some(project) = self.projects.get(self.project) {
+            self.research.follow_project(&project.id);
         }
+        self.research.show(ctx);
+        let mut about = self.about;
+        classic::Window::new("about", "About Scopework")
+            .modal(true)
+            .default_size([300.0, 120.0])
+            .show(ctx, &mut about, |ui| {
+                ui.add_space(6.0);
+                classic::label(ui, format!("Scopework {}", env!("CARGO_PKG_VERSION")), None);
+                classic::label(ui, "A workbench for bounded research projects.", None);
+                classic::label(
+                    ui,
+                    "Research records drive progress. Create a project to begin.",
+                    None,
+                );
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if classic::button(ui, true, "OK").clicked() {
+                        self.about = false;
+                    }
+                });
+            });
+        self.about &= about;
     }
 }
 
@@ -818,7 +661,7 @@ fn main() -> eframe::Result {
                     .insert(0, "Tahoma".into());
                 cc.egui_ctx.set_fonts(fonts);
             }
-            cc.egui_ctx.set_visuals(classic_visuals(false));
+            cc.egui_ctx.set_visuals(classic::visuals(false));
             cc.egui_ctx.style_mut(|s| {
                 s.spacing.item_spacing = Vec2::new(8.0, 4.0);
             });

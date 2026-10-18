@@ -48,7 +48,7 @@ research home
 research project list
 ```
 
-In the app, use **View > Research records** to create a project and its research hierarchy. Set **Research scope** to a few words such as *Rendering* or *Asset platform*.
+In the app, use **File > New project...** to create a project and **View > Research records** to build and research its hierarchy. Set **Research scope** (Project tab) to a few words such as *Rendering* or *Asset platform*.
 
 ## Status
 

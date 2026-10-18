@@ -154,7 +154,7 @@ Current operations use catalog format 4. Upgrade the GUI and all CLI workers tog
 
 Catalog the whole binary even for a smaller research subject. Use coherent semantic chunks for established or provisional ownership. An unresolved queue denotes uncertainty, not subsystem ownership; navigation address pages are not semantic chunks.
 
-Every node defaults to required child membership (`context_only: false`). Set `context_only: true` in a batch or with the editor's **Context-only child membership** checkbox to exclude that branch from its parent's required synthesis. Its report, data, progress and canonical identity remain intact. Explicit function prerequisites remain required even when their canonical owner is contextual. Context records are never automatically completed.
+Every node defaults to required child membership (`context_only: false`). Set `context_only: true` in a batch or with the **Context only** check box on the Research records **Organize** tab to exclude that branch from its parent's required synthesis. Its report, data, progress and canonical identity remain intact. Explicit function prerequisites remain required even when their canonical owner is contextual. Context records are never automatically completed.
 
 Membership is separate from the short Research Scope label. The label never silently excludes nodes. For a whole-client recreation, leave all inventoried functions required. CLI `status` exposes `inventory_functions`, `required_functions`, `context_functions` and per-record `required_research`. Meters count required work; the status line retains the full inventory count.
 
@@ -230,7 +230,7 @@ Durable jobs live under `tools/workspaces/import-jobs/<UUID>`. `status` reports 
 
 Cancellation deletes only owned outputs whose bytes still match the manifest. Changed reports and additional data are retained and reported in `warnings`. Preserve job journals and receipts when investigating errors. Publication recovery covers process termination, including catalog replacement before the receipt; power-loss ordering and storage-controller failures are not guaranteed.
 
-In **Research records > Inventory import**, enter the request file path and start a hidden CLI runner. Pause, resume and cancel operate on its durable job. Closing the dashboard leaves that runner independent. If launch fails, the reserved job can be resumed from the CLI.
+In **Research records > Project > Inventory import**, enter the request file path and start a hidden CLI runner. Pause, resume and cancel operate on its durable job. Closing the dashboard leaves that runner independent. If launch fails, the reserved job can be resumed from the CLI.
 
 ## Independent batch draft saves
 

@@ -112,6 +112,8 @@ pub mod imports;
 mod layout;
 #[path = "ledger.rs"]
 mod ledger;
+#[path = "records_ui.rs"]
+mod records_ui;
 #[path = "report_hashes.rs"]
 mod report_hashes;
 pub use catalog_batch::Batch;
@@ -1061,6 +1063,53 @@ impl Library {
             .copied()
             .unwrap_or(Status::NotStarted)
     }
+    /// What keeps `id` from being completed, apart from its own report text: a review flag,
+    /// incomplete required children and incomplete prerequisites. Empty when nothing blocks it.
+    pub fn completion_blockers(&self, p: usize, id: u64) -> Result<Vec<String>> {
+        let project = &self.projects[p];
+        let node = project
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .ok_or("Unknown node")?;
+        let states = self.completion_states(p, id);
+        let mut blockers = vec![];
+        if self.review_flags(p)?.contains_key(&id) {
+            blockers.push("Flagged for review: clear the flag first.".to_string());
+        }
+        if let Some(kind) = node.kind.child() {
+            let kids: Vec<_> = project
+                .nodes
+                .iter()
+                .filter(|k| k.parent == Some(id) && !k.context_only)
+                .collect();
+            let open = kids
+                .iter()
+                .filter(|k| states.get(&k.id) != Some(&Status::Complete))
+                .count();
+            let noun = kind.label().to_lowercase();
+            if kids.is_empty() {
+                blockers.push(format!("No required {noun} records yet."));
+            } else if open > 0 {
+                blockers.push(format!(
+                    "{open} of {} required {noun} records not complete.",
+                    kids.len()
+                ));
+            }
+        }
+        let prerequisites = project
+            .dependencies
+            .iter()
+            .filter(|e| e.dependent == id)
+            .filter(|e| states.get(&e.prerequisite) != Some(&Status::Complete))
+            .count();
+        if prerequisites > 0 {
+            blockers.push(format!(
+                "{prerequisites} prerequisite function(s) not complete."
+            ));
+        }
+        Ok(blockers)
+    }
     /// Effective status of `id` and everything its completion depends on: required children
     /// and tagged prerequisites. Evaluates only that closure, not the whole project.
     fn completion_states(&self, p: usize, id: u64) -> std::collections::HashMap<u64, Status> {
@@ -1324,6 +1373,15 @@ pub struct ResearchUi {
     scope_revision: u64,
     complete: bool,
     flag_reason: String,
+    /// The loaded record's effective status and what blocks its completion.
+    status: Status,
+    blockers: Vec<String>,
+    /// Message styling: errors in the alert colour.
+    message_error: bool,
+    tab: usize,
+    confirm_complete: bool,
+    reviewed: bool,
+    new_project_open: bool,
 }
 impl Default for ResearchUi {
     fn default() -> Self {
@@ -1372,6 +1430,13 @@ impl ResearchUi {
             scope_revision: 0,
             complete: false,
             flag_reason: String::new(),
+            status: Status::NotStarted,
+            blockers: vec![],
+            message_error: false,
+            tab: 0,
+            confirm_complete: false,
+            reviewed: false,
+            new_project_open: false,
         }
     }
     fn load(&mut self, p: usize, id: u64) {
@@ -1414,166 +1479,6 @@ impl ResearchUi {
             Ok(Some((project, id)))
         });
     }
-    pub fn show(&mut self, ctx: &egui::Context) {
-        if !self.open {
-            return;
-        }
-        let mut open = self.open;
-        let mut nav = None;
-        let navigation_ids: Vec<_> = self.ui_projects.iter().map(|p| p.id.clone()).collect();
-        egui::Window::new("Research records").open(&mut open).default_size([950.0,700.0]).vscroll(true).show(ctx,|ui| {
-            if !self.message.is_empty(){ui.colored_label(egui::Color32::from_rgb(230,170,80),&self.message);}
-            if self.root.is_none() {ui.label("Loading research library...");return;}
-            let working=self.action_task.is_some() || self.load_task.is_some() || self.requested.is_some();
-            if working {ui.label("Working...");ui.disable();}
-            let projects=self.ui_projects.clone();
-            egui::CollapsingHeader::new("New project").default_open(projects.is_empty()).show(ui,|ui|{
-                ui.horizontal(|ui|{ui.label("ID");ui.text_edit_singleline(&mut self.new_project_id);ui.label("Name");ui.text_edit_singleline(&mut self.new_project_name);});
-                if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Create isolated project")).clicked(){let id=self.new_project_id.clone();let name=self.new_project_name.clone();self.action(move |root|{let mut lib=Library::open(root)?;lib.create(&id,&name,"")?;Ok(Some((id,0)))})}
-            });
-            let found = projects.iter().position(|p| p.id == self.project_id);
-            if let Some(p) = found { self.project = p; }
-            let orphan = found.is_none() || self.browser_data[self.project].node(&projects[self.project],self.node).is_none();
-            if orphan && self.has_unsaved() {
-                ui.label("The project or report was removed. Your unsaved draft is retained here.");
-                if ui.button("Copy draft").clicked() { ui.ctx().copy_text(format!("Scope: {}\n\n{}\n\n{}",self.scope,self.body,self.evidence)); }
-                ui.add(egui::TextEdit::multiline(&mut self.body).desired_rows(12));
-                ui.add(egui::TextEdit::multiline(&mut self.evidence).desired_rows(4));
-                if ui.button("Discard removed report draft").clicked() { self.dirty=false; self.scope_dirty=false; self.project_id.clear(); self.project=0; self.node=0; if !projects.is_empty() { nav=Some((0,0)); } }
-                return;
-            }
-            if orphan && !projects.is_empty() { nav=Some((found.unwrap_or(0),0)); return; }
-            let Some(project)=projects.get(self.project) else {
-                ui.label("Create a project above to start researching.");
-                return;
-            };
-            let project_dir=self.root.as_ref().unwrap().join(&project.id);
-            ui.horizontal_wrapped(|ui|{for (i,p) in projects.iter().enumerate(){if ui.add_enabled(!self.has_unsaved(),egui::Button::new(&p.name).selected(i==self.project)).clicked(){nav=Some((i,0));}}});
-            ui.label(format!("Isolated project: {}",project_dir.display()));
-
-            // Settings and tools stay collapsed so the record browser and editor are the first thing shown.
-            egui::CollapsingHeader::new("Project settings, tools and import").default_open(false).show(ui,|ui|{
-             egui::CollapsingHeader::new("Project tools and data folders").show(ui,|ui|{
-                 ui.horizontal_wrapped(|ui|{
-                     for (label,folder) in [("Tools","tools"),("Profiles","tools/profiles"),("Shared analysis","tools/workspaces"),("Tool logs","tools/logs")] {
-                         if ui.button(label).clicked()&& let Err(e)=open_folder(&project_dir.join(folder)){self.message=e;}
-                     }
-                 });
-                 ui.label("Each function owns research.md and data/ in its function folder. Only shared tool workspaces, logs and scratch stay under tools/.");
-             });
-             egui::CollapsingHeader::new("Inventory import").show(ui,|ui|{
-                 ui.label("Creation-only JSON batch (exact binary identity and project revision)");
-                 ui.text_edit_singleline(&mut self.import_file);
-                 if ui.button("Start background import").clicked() {
-                     let file=self.import_file.clone();let project=project.id.clone();
-                     self.action(move |root|{let batch:Batch=serde_json::from_slice(&fs::read(file).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;let job=imports::reserve(&root,&project,&batch)?;background::launch_import(&root,&project,&job.id)?;Ok(None)});
-                 }
-                 if let Some(job)=self.jobs.get(&project.id).cloned() {
-                     ui.label(format!("{:?}: {} / {} prepared; committed inventory remains separate",job.state,job.prepared,job.total));
-                     if job.state==imports::JobState::Verifying {ui.label(format!("{} / {} records verified",job.verified,job.total));}
-                     if let Some(error)=&job.error {ui.colored_label(egui::Color32::YELLOW,error);}
-                     ui.label(format!("Job {}",job.id));
-                     if !matches!(job.state,imports::JobState::Committed|imports::JobState::Cancelled) {
-                         ui.horizontal(|ui|{
-                             if ui.button("Pause").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{imports::request(&root,&project,&id,false)?;Ok(None)});}
-                             if ui.button("Resume").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{background::launch_import(&root,&project,&id)?;Ok(None)});}
-                             if ui.button("Cancel import").clicked(){let project=project.id.clone();let id=job.id.clone();self.action(move |root|{imports::request(&root,&project,&id,true)?;Ok(None)});}
-                         });
-                     }
-                 }
-             });
-             egui::CollapsingHeader::new("Research scope").default_open(true).show(ui,|ui|{
-                 ui.label("A few words describing what is being researched, e.g. Rendering or Asset platform.");
-                 if ui.add(egui::TextEdit::singleline(&mut self.scope).desired_width(f32::INFINITY)).changed(){self.scope_dirty=true;}
-                 ui.horizontal(|ui|{
-                     if ui.add_enabled(!self.dirty,egui::Button::new("Save research scope")).clicked(){
-                         let scope=self.scope.clone();let revision=self.scope_revision;self.mutate(move |lib,p,id|{lib.set_scope(p,&scope,revision)?;Ok(id)});
-                     }
-                     if ui.button("Discard scope edits").clicked(){self.scope=project.research_scope.clone();self.scope_revision=project.revision;self.scope_dirty=false;}
-                 });
-             });
-             egui::CollapsingHeader::new("Binary identity").show(ui,|ui|{
-                 ui.label("Build, SHA-256, image base. Use another project for a different binary.");
-                 let locked=project.nodes.iter().any(|n|n.kind==Kind::Function);
-                 ui.add_enabled(!locked,egui::TextEdit::singleline(&mut self.binary).desired_width(f32::INFINITY));
-                 if ui.add_enabled(!locked&&!self.has_unsaved(),egui::Button::new("Save binary identity")).clicked(){
-                     let binary=self.binary.clone();self.mutate(move |lib,p,id|{lib.set_binary(p,&binary)?;Ok(id)});
-                 }
-             });
-            });
-            ui.separator();
-            ui.columns(2,|columns| {
-                let dirty = self.has_unsaved();
-                if let Some(id) = self.browser.show(&mut columns[0], &self.browser_data[self.project], self.node, dirty) { nav = Some((self.project, id)); }
-                let n=self.browser_data[self.project].node(project,self.node).unwrap();
-                let ui=&mut columns[1];ui.strong(format!("{} — {}",n.kind.label(),n.name));
-                ui.label(project_dir.join(&self.browser_data[self.project].paths[&self.node]).display().to_string());
-                ui.label(if self.browser.required(n.id) { "Required research (including explicit prerequisites)" } else { "Context inventory; preserved outside required progress" });
-                let mut context_only = n.context_only;
-                if n.kind != Kind::App && ui.add_enabled(!self.has_unsaved(), egui::Checkbox::new(&mut context_only, "Context-only child membership")).changed() {
-                    let batch = Batch { schema: 2, repair_legacy_links: false, binary: project.binary.clone(), expect_revision: None, create: vec![], update: vec![catalog_batch::Update { id: n.id, parent: None, name: None, context_only: Some(context_only), expect_node_revision: Some(n.revision) }], reorder: vec![] };
-                    self.mutate(move |lib,p,id|{lib.batch(p,&batch)?;Ok(id)});
-                }
-                let flag=self.browser_data[self.project].flags.get(&n.id).cloned();
-                ui.horizontal(|ui|{
-                    match &flag {
-                        Some(reason)=>{ui.colored_label(egui::Color32::from_rgb(170,90,0),format!("⚑ Flagged for review: {reason}"));
-                            if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Clear flag")).clicked(){self.mutate(move |lib,p,id|{lib.set_review_flag(p,id,None)?;Ok(id)});}}
-                        None=>{ui.add(egui::TextEdit::singleline(&mut self.flag_reason).hint_text("Reason to review").desired_width(220.0));
-                            if ui.add_enabled(!self.has_unsaved()&&!self.flag_reason.trim().is_empty(),egui::Button::new("Flag for review")).clicked(){let reason=std::mem::take(&mut self.flag_reason);self.mutate(move |lib,p,id|{lib.set_review_flag(p,id,Some(&reason))?;Ok(id)});}}
-                    }
-                });
-                if let Some(reason)=self.browser_data[self.project].queued.get(&n.id){
-                    ui.colored_label(egui::Color32::from_rgb(40,90,170),format!("↻ In review queue: {reason}. Completing it again clears the entry."));
-                }
-                if n.kind==Kind::Function && ui.button("Open this function's data folder").clicked(){
-                    let path=project_dir.join(&self.browser_data[self.project].paths[&self.node]).parent().unwrap().join("data");
-                    if let Err(e)=open_folder(&path){self.message=e;}
-                }
-
-                if let Some(kind)=n.kind.child() {
-                    ui.label(format!("Add {} here",kind.label()));ui.text_edit_singleline(&mut self.new_name);
-                    if kind==Kind::Function {ui.horizontal(|ui|{ui.label("RVA (hex)");ui.text_edit_singleline(&mut self.rva);});}
-                    if ui.add_enabled(!self.has_unsaved(),egui::Button::new(format!("Create {} file",kind.label()))).clicked(){let name=self.new_name.clone();let rva=self.rva.clone();self.mutate(move |lib,p,id|lib.add(p,id,&name,&rva));}
-                }
-                if n.kind==Kind::Function {
-                    ui.separator();ui.label("Prerequisites (function RVAs, comma separated)");
-                    ui.text_edit_singleline(&mut self.dependency_rvas);
-                    if ui.add_enabled(!self.has_unsaved(),egui::Button::new("Save prerequisite tags")).clicked(){
-                        let rvas=self.dependency_rvas.clone();self.mutate(move |lib,p,id|{lib.set_dependencies(p,id,&rvas)?;Ok(id)});
-                    }
-                    let inbound:Vec<_>=project.dependencies.iter().filter(|e|e.prerequisite==self.node).filter_map(|e|self.browser_data[self.project].node(project,e.dependent)).map(|n|format!("{} (0x{:08X})",n.name,n.rva.unwrap())).collect();
-                    ui.label(format!("Required by: {}",if inbound.is_empty(){"none".into()}else{inbound.join(", ")}));
-                    ui.label("dep.toml lists prerequisites; prereq.toml lists dependents. Managed together by the app.");
-                }
-                ui.label("Save or discard edits before changing records. Parent reports link their direct source reports; evidence remains in the original function files.");
-            });
-            ui.separator();ui.label("Research and understanding — Markdown");
-            if ui.add(egui::TextEdit::multiline(&mut self.body).desired_width(f32::INFINITY).desired_rows(12).code_editor()).changed(){self.dirty=true;}
-            ui.label("Evidence — cite source/build, VA/RVA, artifact or capture; label observed / specification-defined / inferred");
-            if ui.add(egui::TextEdit::multiline(&mut self.evidence).desired_width(f32::INFINITY).desired_rows(4).code_editor()).changed(){self.dirty=true;}
-            let kind=self.browser_data[self.project].node(project,self.node).unwrap().kind;
-            egui::CollapsingHeader::new("Completion criteria for this scope").show(ui,|ui|{
-                ui.label(kind.completion_criteria());
-                ui.label("Completed children make a parent ready for synthesis; the parent's own understanding must be reviewed separately.");
-                ui.label("Keep this assignment's scope fixed. Record missing knowledge outside it as a separate task; tag it as a prerequisite only when needed to establish this scope's behavior. A connection alone does not expand the assignment.");
-            });
-            if ui.checkbox(&mut self.complete,"Mark complete (I reviewed the scope criteria, understanding and evidence)").changed(){self.dirty=true;}
-            ui.horizontal(|ui|{
-                if ui.add_enabled(!self.scope_dirty,egui::Button::new("Save canonical report")).clicked(){let body=self.body.clone();let evidence=self.evidence.clone();let complete=self.complete;let token=if complete{self.completion_hash.clone()}else{self.loaded_hash.clone()};self.mutate(move |lib,p,id|{lib.save_report(p,id,&body,&evidence,complete,&token)?;Ok(id)});}
-                if ui.button("Discard / reload").clicked(){nav=Some((self.project,self.node));}
-                if self.has_unsaved(){ui.label("Unsaved edits");}
-            });
-        });
-        if let Some((p, id)) = nav
-            && let Some(current) = navigation_ids
-                .get(p)
-                .and_then(|id| self.ui_projects.iter().position(|v| &v.id == id))
-        {
-            self.load(current, id);
-        }
-        self.open = open;
-    }
 }
 
 #[derive(Clone)]
@@ -1604,7 +1509,8 @@ impl ResearchUi {
                     self.action_task = None;
                     match result {
                         Ok(target) => {
-                            self.message = "Operation finished. Refreshing...".into();
+                            self.message = "Saved. Refreshing...".into();
+                            self.message_error = false;
                             if let Some(target) = target {
                                 self.generation += 1;
                                 self.requested = Some(target);
@@ -1613,13 +1519,17 @@ impl ResearchUi {
                             }
                             self.refresh_library();
                         }
-                        Err(e) => self.message = e,
+                        Err(e) => {
+                            self.message = e;
+                            self.message_error = true;
+                        }
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.action_task = None;
                     self.message =
                         "Background operation failed; reload to inspect committed state.".into();
+                    self.message_error = true;
                 }
                 Err(TryRecvError::Empty) => {}
             }
@@ -1643,11 +1553,17 @@ impl ResearchUi {
                                 self.scope = v.scope;
                                 self.scope_revision = v.revision;
                                 self.dependency_rvas = v.dependencies;
+                                self.status = v.status;
+                                self.blockers = v.blockers;
                                 self.dirty = false;
                                 self.scope_dirty = false;
+                                self.confirm_complete = false;
                                 self.message.clear();
                             }
-                            Err(e) => self.message = e,
+                            Err(e) => {
+                                self.message = e;
+                                self.message_error = true;
+                            }
                         }
                     }
                 }
@@ -1730,6 +1646,7 @@ impl ResearchUi {
                 Ok(Err(e)) => {
                     self.refresh_task = None;
                     self.message = e;
+                    self.message_error = true;
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.refresh_task = None;
@@ -1746,6 +1663,7 @@ impl ResearchUi {
                     Ok(inbox) => self.snapshot_inbox = Some(inbox),
                     Err(e) => {
                         self.message = e;
+                        self.message_error = true;
                         return;
                     }
                 }
@@ -2192,7 +2110,64 @@ mod background_ui_tests {
             scope: String::new(),
             revision: 1,
             dependencies: String::new(),
+            status: Status::NotStarted,
+            blockers: vec![],
         }
+    }
+    fn fixture_project(id: &str) -> std::sync::Arc<Project> {
+        std::sync::Arc::new(Project {
+            layout_version: 5,
+            id: id.into(),
+            name: id.into(),
+            binary: "synthetic".into(),
+            research_scope: String::new(),
+            next_id: 1,
+            revision: 1,
+            structural_epoch: 0,
+            active_import: None,
+            last_import: None,
+            nodes: vec![Node {
+                context_only: false,
+                id: 0,
+                parent: None,
+                kind: Kind::App,
+                name: "App".into(),
+                status: Status::NotStarted,
+                rva: None,
+                revision: 0,
+                accepted_hash: None,
+                accepted_prerequisites: Default::default(),
+            }],
+            dependencies: vec![],
+        })
+    }
+    #[test]
+    fn the_records_window_follows_the_dashboard_project_unless_edits_are_unsaved() {
+        let mut ui = isolated_ui();
+        ui.ui_projects = vec![fixture_project("alpha"), fixture_project("beta")];
+        ui.project_id = "alpha".into();
+        ui.follow_project("beta");
+        assert_eq!(ui.requested, Some(("beta".to_string(), 0)));
+        let mut ui = isolated_ui();
+        ui.ui_projects = vec![fixture_project("alpha"), fixture_project("beta")];
+        ui.project_id = "alpha".into();
+        ui.dirty = true;
+        ui.open = true;
+        ui.follow_project("beta");
+        assert!(ui.requested.is_none(), "unsaved edits keep their project");
+        assert!(ui.message.contains("Save or discard"));
+    }
+    #[test]
+    fn the_records_window_renders_its_empty_state_and_dialogs_headless() {
+        let mut ui = isolated_ui();
+        ui.open = true;
+        ui.new_project();
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let _ = ctx.run(Default::default(), |ctx| ui.show(ctx));
+        }
+        assert!(ui.new_project_open, "the dialog stays open until closed");
+        assert!(ui.open);
     }
     #[test]
     fn obsolete_report_load_cannot_replace_current_selection_or_draft() {

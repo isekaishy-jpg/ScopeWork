@@ -2,7 +2,7 @@
 
 ## Research records
 
-Open **View > Research records...**. Create your first project in this window. New homes contain no preset projects.
+Create a project with **File > New project...** and open **View > Research records...** to work on it. New homes contain no preset projects. The window follows the project tab selected on the dashboard. The records list is on the left. The selected record is on the right, with three tabs: **Report** (the understanding and evidence editors, **Save**, **Mark complete...**, **Discard changes**, and **Reopen** once complete), **Organize** (add children, prerequisites, context-only membership, review flag, files) and **Project** (research scope, binary identity, folders, inventory import). The status bar shows messages, background work and unsaved edits.
 
 Each project owns a complete hierarchy:
 
@@ -36,7 +36,7 @@ The editor updates each canonical Markdown file in place. Parent reports link th
 
 ### Project research scope
 
-Research Scope is a short topic label: for example, **Rendering** or **Asset platform**. Set it in **View > Research records > Research scope**. It appears in the header above the selected project's meters, and in CLI output so agents know what is being researched.
+Research Scope is a short topic label: for example, **Rendering** or **Asset platform**. Set it on the **Project** tab of **View > Research records**. It appears in the header above the selected project's meters, and in CLI output so agents know what is being researched.
 
 The inventory covers the whole binary even when the label describes a selected research subject. Explicit context-only membership controls required children; the label does not. Editing the label does not change completion or assignments. Detailed understanding and completion criteria remain in the research reports and hierarchy.
 
@@ -53,7 +53,7 @@ Completed children make a parent ready for synthesis; they do not automatically 
 
 Keep each assignment's scope fixed. Record missing knowledge outside it as a separate research task, and make it a prerequisite only when necessary to establish the current scope's behavior. A connection or call edge alone does not expand the assignment into the entire reachable graph. Known shared behavior is referenced through its canonical function report.
 
-Use the completion checkbox only after reviewing the report. Completion requires a written report, function evidence where applicable, and every required child complete. Empty parent reports and parents without children cannot be completed. Changing a child or adding a child reopens completed ancestors. SHA-256 checks detect externally changed completed files, and the editor rejects saves over a concurrently changed file. Use View > Refresh research progress after external edits. Completion is a human attestation supported by these structural checks, not automated judgment of research quality.
+Use **Mark complete...** only after reviewing the report; it asks you to confirm against the scope's completion criteria. The button is enabled only when nothing blocks completion, and the Report tab lists what does (a review flag, incomplete required children or prerequisites, missing report or evidence). Completion requires a written report, function evidence where applicable, and every required child complete. Empty parent reports and parents without children cannot be completed. Changing a child or adding a child reopens completed ancestors. SHA-256 checks detect externally changed completed files, and the editor rejects saves over a concurrently changed file. Use View > Refresh research progress after external edits. Completion is a human attestation supported by these structural checks, not automated judgment of research quality.
 
 Save or discard edits before navigating. Unsaved report edits prevent closing the app. GUI and CLI share short exclusive write operations. The GUI can stay open while agents work; use View > Refresh research progress to display their changes. Stale report or project revisions require reloading and review before saving.
 
@@ -77,7 +77,7 @@ cargo run --release
 
 Windows executable: `target/release/research-dashboard.exe`.
 
-Options > Dark mode switches palettes and saves the choice. Other menus provide Exit, Always on top, research records, progress refresh, Clear chunk selection, and About. The custom title bar supports dragging, minimizing, maximizing, and closing; the bottom-right grip resizes the window.
+Options > Dark mode switches palettes and saves the choice. Other menus provide New project, Exit, Always on top, research records, progress refresh, Clear chunk selection, and About. Secondary windows, dialogs and menus use the same Windows 95 Task Manager style as the dashboard. The custom title bar supports dragging, minimizing, maximizing, and closing; the bottom-right grip resizes the window.
 
 ## Supporting data
 
