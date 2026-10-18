@@ -188,7 +188,7 @@ fn addition(project: &Project, batch: &Batch, first: u64) -> Result<Vec<Node>> {
 pub fn plan(root: &Path, project: &str, batch: &Batch) -> Result<serde_json::Value> {
     let lib = Library::open_mode(root.into(), Some(project), false, false)?;
     let p = lib.projects.first().ok_or("Unknown project")?;
-    if p.revision != batch.expect_revision {
+    if Some(p.revision) != batch.expect_revision {
         return Err("revision_conflict: reload project show before admission".into());
     }
     lib.ensure_structural(0)?;
@@ -210,7 +210,7 @@ pub fn reserve(root: &Path, project: &str, batch: &Batch) -> Result<Job> {
     let mut lib = library_project(root, project, true)?;
     lib.ensure_structural(0)?;
     let before = &lib.projects[0];
-    if batch.expect_revision != before.revision {
+    if batch.expect_revision != Some(before.revision) {
         return Err("revision_conflict: reload project show before admission".into());
     }
     let first = before.next_id;

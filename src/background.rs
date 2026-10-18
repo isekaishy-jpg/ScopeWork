@@ -145,6 +145,7 @@ pub(super) fn snapshot(
         projects: vec![],
         busy_projects: vec![],
         _lock: None,
+        recovery_blocked: None,
     };
     let mut views = vec![];
     let mut ids = fs::read_dir(&root)
@@ -157,6 +158,9 @@ pub(super) fn snapshot(
     for id in ids {
         match Library::read_project(root.clone(), &id) {
             Ok(mut lib) => {
+                // Meters hash reports and walk the tree; do that without holding the lock,
+                // which would otherwise delay agents' writes on every refresh.
+                lib.release();
                 views.extend(lib.views());
                 library.projects.append(&mut lib.projects);
             }

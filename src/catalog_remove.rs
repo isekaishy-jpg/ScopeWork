@@ -169,8 +169,32 @@ impl Library {
         let mut edits = vec![];
         let mut changed = removed.clone();
         if !removed.is_empty() {
+            // Removed reports move to the archive; other reports change only if they mention a
+            // removed folder or are a removed record's parent (its source list changes).
+            let folders: HashSet<String> = moves
+                .iter()
+                .filter_map(|m| m.old.rsplit('/').next())
+                .map(str::to_uppercase)
+                .collect();
+            let parents: HashSet<u64> = removed
+                .iter()
+                .filter_map(|id| old.nodes[id].parent)
+                .collect();
+            let others: Vec<&str> = before
+                .nodes
+                .iter()
+                .filter(|n| !removed.contains(&n.id) && !parents.contains(&n.id))
+                .map(|n| old.paths[&n.id].as_str())
+                .collect();
+            let mentioning = report_hashes::mentioning(&root, &others, &folders);
             for n in &before.nodes {
                 let path = &old.paths[&n.id];
+                if !removed.contains(&n.id)
+                    && !parents.contains(&n.id)
+                    && !mentioning.contains(path)
+                {
+                    continue;
+                }
                 contained(&root, &root.join(path))?;
                 let original = fs::read_to_string(root.join(path)).map_err(|e| e.to_string())?;
                 let destination = if removed.contains(&n.id) {
@@ -239,42 +263,7 @@ impl Library {
             .collect();
         dependencies.sort_unstable();
         dependencies.dedup();
-        let annotation_path = root.join("tools/profiles/annotations.json");
         let mut sidecars = vec![];
-        if !removed.is_empty() && annotation_path.is_file() {
-            contained(&root, &annotation_path)?;
-            let original = fs::read_to_string(&annotation_path).map_err(|e| e.to_string())?;
-            let mut ledger: Value = serde_json::from_str(&original).map_err(|e| e.to_string())?;
-            if ledger["schema"] != 1 {
-                return Err(
-                    "Unknown annotation schema; removal cannot safely update provenance.".into(),
-                );
-            }
-            let mut modified = false;
-            let archived_reports: HashMap<_, _> = removed
-                .iter()
-                .map(|id| (old.paths[id].as_str(), *id))
-                .collect();
-            if let Some(rows) = ledger["annotations"].as_array_mut() {
-                for row in rows {
-                    if let Some(id) = row["report"]
-                        .as_str()
-                        .and_then(|path| archived_reports.get(path).copied())
-                    {
-                        row["report"] = format!("{archive}/{id}/research.md").into();
-                        row["catalog_move"] = "Source report archived after explicit node removal; original review hash retained. Re-review before applying.".into();
-                        modified = true;
-                    }
-                }
-            }
-            if modified {
-                sidecars.push(Sidecar {
-                    path: "tools/profiles/annotations.json".into(),
-                    before: original,
-                    after: serde_json::to_string_pretty(&ledger).map_err(|e| e.to_string())?,
-                });
-            }
-        }
         let flag_path = root.join(super::REVIEW_FLAGS);
         if !removed.is_empty() && flag_path.is_file() {
             let original = fs::read_to_string(&flag_path).map_err(|e| e.to_string())?;
@@ -293,11 +282,54 @@ impl Library {
         if !removed.is_empty() {
             after.revision += 1;
             after.structural_epoch += 1;
+            // Completed records this removal reopens wait for review like those a move reopens;
+            // claims and queue entries of removed records go with them.
+            let reopened: Vec<u64> = before
+                .nodes
+                .iter()
+                .filter(|n| {
+                    n.status == Status::Complete
+                        && invalid.contains(&n.id)
+                        && !removed.contains(&n.id)
+                })
+                .map(|n| n.id)
+                .collect();
+            let queue_path = root.join(coordination::REVIEW_QUEUE);
+            if !reopened.is_empty() || queue_path.is_file() {
+                let original =
+                    coordination::current_or_empty(&root, coordination::REVIEW_QUEUE, "entries")?;
+                let updated = coordination::queue_reopened(
+                    &original,
+                    &after,
+                    &reopened,
+                    "Reopened by removing records it summarised or depended on",
+                )?;
+                if updated != original {
+                    sidecars.push(Sidecar {
+                        path: coordination::REVIEW_QUEUE.into(),
+                        before: original,
+                        after: updated,
+                    });
+                }
+            }
+            if root.join(coordination::CLAIMS).is_file() {
+                let original = fs::read_to_string(root.join(coordination::CLAIMS))
+                    .map_err(|e| e.to_string())?;
+                let updated = coordination::without_nodes(&original, "claims", &removed)?;
+                if updated != original {
+                    sidecars.push(Sidecar {
+                        path: coordination::CLAIMS.into(),
+                        before: original,
+                        after: updated,
+                    });
+                }
+            }
         }
         let j = Journal {
             before,
             after,
             edits,
+            ledger: !removed.is_empty(),
             moves,
             dependencies,
             sidecars,
@@ -318,6 +350,12 @@ impl Library {
                 );
             }
             if !removed.is_empty() {
+                if j.sidecars
+                    .iter()
+                    .any(|s| s.path == coordination::REVIEW_QUEUE)
+                {
+                    coordination::ensure(&root, coordination::REVIEW_QUEUE, "entries")?;
+                }
                 let folder = prepare_pending(&root)?;
                 atomic(&folder.join("journal.json"), &bytes)?;
                 resume(&root, &mut self.projects[p])?;

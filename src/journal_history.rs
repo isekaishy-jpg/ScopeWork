@@ -82,7 +82,7 @@ fn delta(j: &Journal) -> Result<Value> {
         json!({"schema":1,"kind":"completed-catalog-delta","before":header(&j.before)?,"after":header(&j.after)?,"changes":changes,
         "before_hash":hash(&serde_json::to_string(&j.before).map_err(|e|e.to_string())?),
         "after_hash":hash(&serde_json::to_string(&j.after).map_err(|e|e.to_string())?),
-        "edits":j.edits,"moves":j.moves,"dependencies":j.dependencies,"sidecars":j.sidecars}),
+        "edits":j.edits,"moves":j.moves,"dependencies":j.dependencies,"sidecars":j.sidecars,"ledger":j.ledger}),
     )
 }
 
@@ -184,6 +184,7 @@ pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {
         dependencies: serde_json::from_value(value["dependencies"].clone())
             .map_err(|e| e.to_string())?,
         sidecars: serde_json::from_value(value["sidecars"].clone()).map_err(|e| e.to_string())?,
+        ledger: value["ledger"].as_bool().unwrap_or(false),
     })
 }
 
@@ -199,9 +200,81 @@ pub(super) fn compact(path: &Path, journal: &Journal) -> Result<()> {
     atomic(path, &bytes)
 }
 
+/// Sidecar texts at least this large are reported, and replaced by `--compact-sidecars`.
+const LARGE_SIDECAR: usize = 1 << 20;
+/// Changed values between two JSON documents, each with its JSON-pointer path. Arrays of
+/// different lengths are recorded whole; a missing side is omitted from the entry.
+fn json_changes(path: &mut String, a: Option<&Value>, b: Option<&Value>, out: &mut Vec<Value>) {
+    match (a, b) {
+        (Some(Value::Object(x)), Some(Value::Object(y))) => {
+            let keys: std::collections::BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+            for key in keys {
+                let len = path.len();
+                path.push('/');
+                path.push_str(&key.replace('~', "~0").replace('/', "~1"));
+                json_changes(path, x.get(key), y.get(key), out);
+                path.truncate(len);
+            }
+        }
+        (Some(Value::Array(x)), Some(Value::Array(y))) if x.len() == y.len() => {
+            for (i, (u, v)) in x.iter().zip(y).enumerate() {
+                let len = path.len();
+                path.push_str(&format!("/{i}"));
+                json_changes(path, Some(u), Some(v), out);
+                path.truncate(len);
+            }
+        }
+        _ if a == b => {}
+        _ => {
+            let mut entry = json!({"path": path.clone()});
+            if let Some(a) = a {
+                entry["before"] = a.clone();
+            }
+            if let Some(b) = b {
+                entry["after"] = b.clone();
+            }
+            out.push(entry);
+        }
+    }
+}
+/// A compact record of a large sidecar change: hashes, sizes and the changed JSON values.
+/// `None` when either text is not JSON (it is then kept as it is).
+fn compact_sidecar(sidecar: &Value) -> Option<Value> {
+    let before = sidecar["before"].as_str()?;
+    let after = sidecar["after"].as_str()?;
+    let a: Value = serde_json::from_str(before).ok()?;
+    let b: Value = serde_json::from_str(after).ok()?;
+    let mut changes = vec![];
+    json_changes(&mut String::new(), Some(&a), Some(&b), &mut changes);
+    Some(json!({
+        "path": sidecar["path"],
+        "compacted": "Whole texts replaced by their changed JSON values (research journal --compact-sidecars)",
+        "before_sha256": hash(before),
+        "after_sha256": hash(after),
+        "before_bytes": before.len(),
+        "after_bytes": after.len(),
+        "changes": changes,
+    }))
+}
+fn large_sidecar(sidecar: &Value) -> Option<usize> {
+    let size = sidecar["before"].as_str().map_or(0, str::len)
+        + sidecar["after"].as_str().map_or(0, str::len);
+    (size >= LARGE_SIDECAR).then_some(size)
+}
+
 impl Library {
     /// History maintenance deliberately bypasses project migration and pending recovery.
     pub fn inspect_journals(root: PathBuf, id: &str, apply: bool) -> Result<Value> {
+        Self::maintain_journals(root, id, apply, false)
+    }
+    /// Like [`Self::inspect_journals`]; with `sidecars`, also replaces large sidecar texts in
+    /// completed receipts by their changed values. That drops the exact historical bytes.
+    pub fn maintain_journals(
+        root: PathBuf,
+        id: &str,
+        apply: bool,
+        sidecars: bool,
+    ) -> Result<Value> {
         if !valid_id(id) {
             return Err("Invalid project identity".into());
         }
@@ -230,6 +303,7 @@ impl Library {
             root,
             projects: vec![project],
             busy_projects: vec![],
+            recovery_blocked: None,
             _lock: Some(OperationLocks {
                 project: Some(id.into()),
                 writable: apply,
@@ -238,19 +312,25 @@ impl Library {
                 holder,
             }),
         };
-        library.journal_history(0, apply)
+        library.journal_maintenance(0, apply, sidecars)
     }
 
     /// Inspect/compact only completed revision directories. Pending is never modified here.
     pub fn journal_history(&mut self, p: usize, apply: bool) -> Result<Value> {
+        self.journal_maintenance(p, apply, false)
+    }
+    /// [`Self::journal_history`], optionally also replacing large sidecar texts (see
+    /// [`Self::maintain_journals`]).
+    pub fn journal_maintenance(&mut self, p: usize, apply: bool, sidecars: bool) -> Result<Value> {
         if apply && !self.writable(p) {
-            return self.write_project(p, |l, p| l.journal_history(p, true));
+            return self.write_project(p, |l, p| l.journal_maintenance(p, true, sidecars));
         }
         let root = self.dir(p);
         let mut rows = vec![];
         let mut total = 0u64;
         let mut reclaimed = 0u64;
         let mut pending_bytes = 0u64;
+        let mut large_sidecars = 0u64;
         for directory in ["catalog-transactions", "catalog-transactions-v4"] {
             let folder = root.join("tools/workspaces").join(directory);
             if !folder.exists() {
@@ -281,8 +361,8 @@ impl Library {
                 };
                 let bytes = fs::read(&path).map_err(|e| e.to_string())?;
                 let value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-                let mut retained = size;
-                let format = if (value["kind"] == "completed-catalog-delta"
+                // What this receipt would be written as, if anything changes.
+                let (format, mut output) = if (value["kind"] == "completed-catalog-delta"
                     || value["kind"] == "pending-catalog-delta")
                     && value["schema"] == 1
                 {
@@ -291,15 +371,10 @@ impl Library {
                     {
                         return Err(format!("History identity mismatch: {}", path.display()));
                     }
-                    if apply && value["kind"] == "pending-catalog-delta" {
-                        let mut completed = value;
-                        completed["kind"] = "completed-catalog-delta".into();
-                        atomic(
-                            &path,
-                            &serde_json::to_vec(&completed).map_err(|e| e.to_string())?,
-                        )?;
-                    }
-                    "delta"
+                    let mut completed = value;
+                    let renamed = completed["kind"] == "pending-catalog-delta";
+                    completed["kind"] = "completed-catalog-delta".into();
+                    ("delta", (renamed, completed))
                 } else {
                     let j: Journal = serde_json::from_value(value)
                         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -309,23 +384,45 @@ impl Library {
                     {
                         return Err(format!("History identity mismatch: {}", path.display()));
                     }
-                    let compacted = serde_json::to_vec(&delta(&j)?).map_err(|e| e.to_string())?;
-                    retained = compacted.len() as u64;
-                    if apply {
-                        atomic(&path, &compacted)?;
-                    }
-                    "full"
+                    let mut compacted = delta(&j)?;
+                    compacted["kind"] = "completed-catalog-delta".into();
+                    ("full", (true, compacted))
                 };
+                let large: Vec<(usize, usize)> = output.1["sidecars"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .filter_map(|(i, s)| Some((i, large_sidecar(s)?)))
+                    .collect();
+                let sidecar_size: usize = large.iter().map(|(_, size)| size).sum();
+                if sidecars {
+                    for (i, _) in &large {
+                        if let Some(compact) = compact_sidecar(&output.1["sidecars"][*i]) {
+                            output.1["sidecars"][*i] = compact;
+                            output.0 = true;
+                        }
+                    }
+                }
+                let mut retained = size;
+                if output.0 {
+                    let bytes = serde_json::to_vec(&output.1).map_err(|e| e.to_string())?;
+                    retained = bytes.len() as u64;
+                    if apply {
+                        atomic(&path, &bytes)?;
+                    }
+                }
                 total += size;
                 reclaimed += size.saturating_sub(retained);
+                large_sidecars += sidecar_size as u64;
                 rows.push(
-                    json!({"path":path,"format":format,"bytes":size,"compacted_bytes":retained}),
+                    json!({"path":path,"format":format,"bytes":size,"compacted_bytes":retained,"large_sidecar_bytes":sidecar_size}),
                 );
             }
         }
         rows.sort_by_key(|r| r["path"].as_str().unwrap_or_default().to_owned());
         Ok(
-            json!({"project":self.projects[p].id,"applied":apply,"completed_bytes":total,"reclaimable_bytes":reclaimed,"pending_bytes":pending_bytes,"journals":rows}),
+            json!({"project":self.projects[p].id,"applied":apply,"compact_sidecars":sidecars,"completed_bytes":total,"reclaimable_bytes":reclaimed,"large_sidecar_bytes":large_sidecars,"pending_bytes":pending_bytes,"journals":rows}),
         )
     }
 }

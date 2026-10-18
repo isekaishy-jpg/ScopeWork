@@ -78,6 +78,11 @@ enum Command {
         /// Apply compaction; without this flag only report usage and reclaimable bytes.
         #[arg(long)]
         compact: bool,
+        /// Also replace sidecar texts of 1 MB or more in completed receipts (such as annotation
+        /// ledger copies) by their changed JSON values and hashes. Irreversible for those exact
+        /// historical bytes; pending journals are never touched.
+        #[arg(long)]
+        compact_sidecars: bool,
     },
     /// Effective progress and records ready for review (not automatic completion).
     Status {
@@ -252,6 +257,12 @@ enum NodeCommand {
         project: String,
         #[arg(long)]
         expect_revision: u64,
+    },
+    /// Map report or data paths (old or current) to their record and current location.
+    Resolve {
+        project: String,
+        #[arg(required = true)]
+        paths: Vec<String>,
     },
     /// Transactionally create, move, rename, classify membership and reorder nodes from JSON.
     Batch {
@@ -520,26 +531,46 @@ fn run(args: Args) -> Result<Value, String> {
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(*timeout);
         let started = std::time::Instant::now();
+        // The catalog is parsed only when it changes; completion is evaluated only after a
+        // change, and at most every two seconds otherwise (reports can change on their own).
+        #[derive(serde::Deserialize)]
+        struct Revision {
+            revision: u64,
+        }
+        let catalog = root.join(id).join("project.json");
+        let mut seen: Option<(u64, Option<std::time::SystemTime>)> = None;
+        let mut revision = 0;
+        let mut complete_ok = complete.is_none();
+        let mut evaluated: Option<std::time::Instant> = None;
         loop {
             let status = research_dashboard::research::lock_status(&root, id)?;
             let idle_ok = !idle || status["writer_active"] == false;
-            let revision = fs::read(root.join(id).join("project.json"))
+            let stamp = fs::metadata(&catalog)
                 .ok()
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-                .and_then(|v| v["revision"].as_u64())
-                .unwrap_or(0);
+                .map(|m| (m.len(), m.modified().ok()));
+            let changed = stamp != seen;
+            if changed
+                && let Some(parsed) = fs::read(&catalog)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Revision>(&b).ok())
+            {
+                revision = parsed.revision;
+                seen = stamp;
+            }
             let revision_ok = revision_above.is_none_or(|r| revision > r);
-            let complete_ok = match complete {
-                None => true,
-                Some(node) => match Library::read_project(root.clone(), id) {
+            if let Some(node) = complete
+                && (changed || evaluated.is_none_or(|t| t.elapsed().as_secs() >= 2))
+            {
+                complete_ok = match Library::read_project(root.clone(), id) {
                     Ok(lib) => lib
                         .projects
                         .first()
-                        .is_some_and(|_| lib.effective_all(0).get(node) == Some(&Status::Complete)),
+                        .is_some_and(|_| lib.effective(0, *node) == Status::Complete),
                     Err(e) if e.contains("is busy") => false,
                     Err(e) => return Err(e),
-                },
-            };
+                };
+                evaluated = Some(std::time::Instant::now());
+            }
             if idle_ok && revision_ok && complete_ok {
                 return Ok(
                     json!({"project": id, "revision": revision, "waited_ms": started.elapsed().as_millis() as u64}),
@@ -551,13 +582,24 @@ fn run(args: Args) -> Result<Value, String> {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     }
-    if let Command::Journal { project, compact } = &args.command {
-        return Library::inspect_journals(root, project, *compact);
+    if let Command::Journal {
+        project,
+        compact,
+        compact_sidecars,
+    } = &args.command
+    {
+        return Library::maintain_journals(
+            root,
+            project,
+            *compact || *compact_sidecars,
+            *compact_sidecars,
+        );
     }
     if let Command::Node(NodeCommand::Batch { project, file }) = &args.command {
         let batch: Batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-        if !batch.create.is_empty()
+        if batch.schema == 1
+            && !batch.create.is_empty()
             && batch.update.is_empty()
             && batch.reorder.is_empty()
             && !batch.repair_legacy_links
@@ -587,6 +629,7 @@ fn run(args: Args) -> Result<Value, String> {
             | NodeCommand::ReadBatch { project, .. }
             | NodeCommand::SaveBatch { project, .. }
             | NodeCommand::Batch { project, .. }
+            | NodeCommand::Resolve { project, .. }
             | NodeCommand::RepairLinks { project, .. }
             | NodeCommand::Create { project, .. }
             | NodeCommand::Show { project, .. }
@@ -619,6 +662,7 @@ fn run(args: Args) -> Result<Value, String> {
                 NodeCommand::Show { .. }
                     | NodeCommand::List { .. }
                     | NodeCommand::ReadBatch { .. }
+                    | NodeCommand::Resolve { .. }
                     | NodeCommand::Flagged { .. }
                     | NodeCommand::Delete { expect: None, .. }
                     | NodeCommand::Prune { expect: None, .. }
@@ -635,13 +679,20 @@ fn run(args: Args) -> Result<Value, String> {
     } else {
         Library::open_project(home.join("projects"), selected)?
     };
+    if let Some(reason) = &lib.recovery_blocked {
+        eprintln!(
+            "{}",
+            json!({"warning": "recovery_blocked", "detail": reason, "answer": "from the committed catalog"})
+        );
+    }
     match args.command {
         Command::Journal {
             project: id,
             compact,
+            compact_sidecars,
         } => {
             let p = project(&lib, &id)?;
-            lib.journal_history(p, compact)
+            lib.journal_maintenance(p, compact || compact_sidecars, compact_sidecars)
         }
         Command::Import(_) => unreachable!("import commands handled before opening a library"),
         Command::Init => Ok(locations),
@@ -754,7 +805,7 @@ fn run(args: Args) -> Result<Value, String> {
                 let p = project(&lib, &id)?;
                 let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?;
-                let created = lib.batch(p, &batch)?;
+                let outcome = lib.apply_batch(p, &batch)?;
                 let revision = lib.projects[p].revision;
                 // Report what this batch reopened and whose claimed work that touches.
                 let states = lib.effective_all(p);
@@ -768,9 +819,18 @@ fn run(args: Args) -> Result<Value, String> {
                         json!({"node": node, "claimed_by": covered.get(&node).map(|(at, owner)| json!({"node": at, "owner": owner}))})
                     })
                     .collect();
+                let moved: Vec<_> = outcome
+                    .moved
+                    .iter()
+                    .map(|(node, from, to)| json!({"node": node, "from": from, "to": to}))
+                    .collect();
                 Ok(
-                    json!({"project": id, "revision":revision, "created":created, "reopened": reopened}),
+                    json!({"project": id, "revision":revision, "created":outcome.created, "reopened": reopened, "moved": moved, "ledger_rows_repathed": outcome.ledger_rows_repathed}),
                 )
+            }
+            NodeCommand::Resolve { project: id, paths } => {
+                let p = project(&lib, &id)?;
+                Ok(lib.resolve_paths(p, &paths))
             }
             NodeCommand::List {
                 project: id,

@@ -46,6 +46,17 @@ fn write_map<T: Serialize>(field: &str, map: &BTreeMap<u64, T>) -> Result<String
     serde_json::to_string_pretty(&serde_json::json!({"schema":1, field: map}))
         .map_err(|e| e.to_string())
 }
+/// Current text of a sidecar, or the text `ensure` would create for it; never writes, so a
+/// preview stays free of side effects. Call `ensure` before journaling a change to it.
+pub(super) fn current_or_empty(root: &Path, name: &str, field: &str) -> Result<String> {
+    match fs::read_to_string(root.join(name)) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            write_map::<serde_json::Value>(field, &BTreeMap::new())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
 /// Current text of a sidecar, creating an empty one first so its transaction has a `before`.
 pub(super) fn ensure(root: &Path, name: &str, field: &str) -> Result<String> {
     let path = root.join(name);
@@ -57,23 +68,10 @@ pub(super) fn ensure(root: &Path, name: &str, field: &str) -> Result<String> {
     }
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
-/// Adds review-queue entries for `reopened` records and drops entries whose record is complete.
-pub(super) fn queue_reopened(
-    original: &str,
-    after: &Project,
-    reopened: &[u64],
-    moved: &[u64],
-) -> Result<String> {
-    let mut queue: BTreeMap<u64, Vec<QueueEntry>> = read_map(original, "entries")?;
-    let complete: std::collections::HashSet<u64> = after
-        .nodes
-        .iter()
-        .filter(|n| n.status == Status::Complete)
-        .map(|n| n.id)
-        .collect();
-    queue.retain(|id, _| !complete.contains(id));
+/// Why a batch reopened records: the moved nodes it names, or a structural change.
+pub(super) fn batch_reason(moved: &[u64]) -> String {
     let shown: Vec<String> = moved.iter().take(12).map(u64::to_string).collect();
-    let reason = if moved.is_empty() {
+    if moved.is_empty() {
         "Reopened by a membership, order or name change".to_string()
     } else {
         format!(
@@ -85,14 +83,45 @@ pub(super) fn queue_reopened(
                 String::new()
             }
         )
-    };
+    }
+}
+/// Adds review-queue entries for `reopened` records, and drops entries whose record is
+/// complete or no longer exists.
+pub(super) fn queue_reopened(
+    original: &str,
+    after: &Project,
+    reopened: &[u64],
+    reason: &str,
+) -> Result<String> {
+    let mut queue: BTreeMap<u64, Vec<QueueEntry>> = read_map(original, "entries")?;
+    let open: std::collections::HashSet<u64> = after
+        .nodes
+        .iter()
+        .filter(|n| n.status != Status::Complete)
+        .map(|n| n.id)
+        .collect();
+    queue.retain(|id, _| open.contains(id));
     for id in reopened {
         queue.entry(*id).or_default().push(QueueEntry {
-            reason: reason.clone(),
+            reason: reason.into(),
             revision: after.revision,
         });
     }
     write_map("entries", &queue)
+}
+/// The sidecar text without entries for `removed` nodes.
+pub(super) fn without_nodes(
+    original: &str,
+    field: &str,
+    removed: &std::collections::HashSet<u64>,
+) -> Result<String> {
+    let mut map: BTreeMap<u64, serde_json::Value> = read_map(original, field)?;
+    let count = map.len();
+    map.retain(|id, _| !removed.contains(id));
+    if map.len() == count {
+        return Ok(original.into());
+    }
+    write_map(field, &map)
 }
 
 /// Queue entries whose record is not complete (by the catalog's recorded status), latest reason each.

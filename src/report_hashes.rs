@@ -106,15 +106,60 @@ fn hash_file(path: &Path) -> Option<String> {
     Some(format!("{:x}", Sha256::digest(&bytes)))
 }
 
+fn bulk_runtime() -> Option<solworker::SWRuntime> {
+    background::runtime(
+        std::thread::available_parallelism()
+            .map_or(2, |n| n.get())
+            .clamp(2, 8),
+    )
+    .ok()
+}
+/// Runs `work` over every item, in parallel chunks when a runtime is given and serially
+/// otherwise or after a failed chunk (a panicking chunk leaves its items unprocessed).
+fn for_each<T: Send>(
+    items: &mut [T],
+    runtime: Option<&solworker::SWRuntime>,
+    chunk: usize,
+    work: impl Fn(&mut T) + Sync,
+) {
+    let parallel = runtime.is_some_and(|runtime| {
+        runtime
+            .lane(solworker::SWExecutionClass::Low)
+            .for_each_chunk(
+                items,
+                NonZeroUsize::new(chunk).unwrap(),
+                |_, part: &mut [T]| part.iter_mut().for_each(&work),
+            )
+            .ok()
+            .and_then(|outcome| outcome.ok())
+            .is_some()
+    });
+    if !parallel {
+        items.iter_mut().for_each(work);
+    }
+}
+fn load_persisted<T: serde::de::DeserializeOwned>(path: &Path) -> HashMap<String, T> {
+    fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+/// Best effort: the copy only saves work, so a failed or concurrent write loses nothing.
+fn store_persisted<T: serde::Serialize>(path: &Path, value: &HashMap<String, T>) {
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_ok()
+        && let Ok(bytes) = serde_json::to_vec(value)
+    {
+        let _ = atomic(path, &bytes);
+    }
+}
+
 /// SHA-256 of each report (relative to `dir`), or `None` when missing or not UTF-8.
 pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<String>> {
     let bulk = reports.len() >= BULK;
     let persisted_path = dir.join(PERSISTED);
     let persisted: HashMap<String, Stamp> = if bulk {
-        fs::read(&persisted_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        load_persisted(&persisted_path)
     } else {
         HashMap::new()
     };
@@ -122,37 +167,10 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
     let mut misses: Vec<(String, u64, u64, Option<String>)> = vec![];
     // Metadata calls dominate a warm evaluation on Windows, so bulk evaluations stat in parallel.
     let mut stats: Vec<(&str, Option<(u64, u64)>)> = reports.iter().map(|r| (*r, None)).collect();
-    let runtime = bulk
-        .then(|| {
-            background::runtime(
-                std::thread::available_parallelism()
-                    .map_or(2, |n| n.get())
-                    .clamp(2, 8),
-            )
-            .ok()
-        })
-        .flatten();
-    let parallel_stats = runtime.as_ref().is_some_and(|runtime| {
-        runtime
-            .lane(solworker::SWExecutionClass::Low)
-            .for_each_chunk(
-                &mut stats,
-                NonZeroUsize::new(64).unwrap(),
-                |_, chunk: &mut [(&str, Option<(u64, u64)>)]| {
-                    for entry in chunk {
-                        entry.1 = metadata(&dir.join(entry.0));
-                    }
-                },
-            )
-            .ok()
-            .and_then(|outcome| outcome.ok())
-            .is_some()
+    let runtime = bulk.then(bulk_runtime).flatten();
+    for_each(&mut stats, runtime.as_ref(), 64, |entry| {
+        entry.1 = metadata(&dir.join(entry.0))
     });
-    if !parallel_stats {
-        for entry in &mut stats {
-            entry.1 = metadata(&dir.join(entry.0));
-        }
-    }
     for (rel, meta) in stats {
         let path = dir.join(rel);
         let Some((size, mtime)) = meta else {
@@ -172,31 +190,10 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
         return out;
     }
     let hashed_ns = now_ns();
-    let parallel = misses.len() >= BULK
-        && runtime
-            .as_ref()
-            .and_then(|runtime| {
-                runtime
-                    .lane(solworker::SWExecutionClass::Low)
-                    .for_each_chunk(
-                        &mut misses,
-                        NonZeroUsize::new(32).unwrap(),
-                        |_, chunk: &mut [(String, u64, u64, Option<String>)]| {
-                            for miss in chunk {
-                                miss.3 = hash_file(&dir.join(&miss.0));
-                            }
-                        },
-                    )
-                    .ok()
-                    // A panicking chunk leaves hashes unset; fall back to hashing serially.
-                    .and_then(|outcome| outcome.ok())
-            })
-            .is_some();
-    if !parallel {
-        for miss in &mut misses {
-            miss.3 = hash_file(&dir.join(&miss.0));
-        }
-    }
+    let parallel = runtime.as_ref().filter(|_| misses.len() >= BULK);
+    for_each(&mut misses, parallel, 32, |miss| {
+        miss.3 = hash_file(&dir.join(&miss.0))
+    });
     let mut updated = persisted;
     for (rel, size, mtime, hash) in misses {
         let stamp = Stamp {
@@ -212,15 +209,97 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
         out.insert(rel, hash);
     }
     if bulk {
-        // Best effort: the copy only saves work, so a failed or concurrent write loses nothing.
-        if let Some(parent) = persisted_path.parent()
-            && fs::create_dir_all(parent).is_ok()
-            && let Ok(bytes) = serde_json::to_vec(&updated)
-        {
-            let _ = atomic(&persisted_path, &bytes);
-        }
+        store_persisted(&persisted_path, &updated);
     }
     out
+}
+
+const REFERENCES: &str = "tools/workspaces/scopework-cache/report-references.json";
+/// The canonical folder names a report mentions, under the same reuse rule as hashes.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Mentions {
+    size: u64,
+    mtime_ns: u64,
+    read_ns: u64,
+    folders: Vec<String>,
+}
+/// Canonical folder names in `text`: 6-digit node IDs and 8-digit hexadecimal RVAs, uppercase.
+fn folder_names(text: &str) -> Vec<String> {
+    static NAMES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let names =
+        NAMES.get_or_init(|| regex::Regex::new(r"(?i)\b(?:[0-9a-f]{8}|[0-9]{6})\b").unwrap());
+    let mut found: Vec<String> = names
+        .find_iter(text)
+        .map(|m| m.as_str().to_uppercase())
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+/// The reports among `reports` that mention any of `folders` (canonical folder names). Only
+/// these can hold a reference into a moved or removed folder, so a structural change reads
+/// them instead of every report. Unchanged reports are only statted; their names come from a
+/// persisted index. Missing or unreadable reports are never returned.
+pub(super) fn mentioning(
+    dir: &Path,
+    reports: &[&str],
+    folders: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let persisted_path = dir.join(REFERENCES);
+    let persisted: HashMap<String, Mentions> = load_persisted(&persisted_path);
+    let runtime = (reports.len() >= BULK).then(bulk_runtime).flatten();
+    let mut stats: Vec<(&str, Option<(u64, u64)>)> = reports.iter().map(|r| (*r, None)).collect();
+    for_each(&mut stats, runtime.as_ref(), 64, |entry| {
+        entry.1 = metadata(&dir.join(entry.0))
+    });
+    let mut known: Vec<(String, Mentions)> = vec![];
+    let mut misses: Vec<(String, u64, u64, Option<Vec<String>>)> = vec![];
+    for (rel, meta) in stats {
+        let Some((size, mtime)) = meta else { continue };
+        match persisted.get(rel) {
+            Some(m)
+                if m.size == size
+                    && m.mtime_ns == mtime
+                    && mtime.saturating_add(RACY_NS) <= m.read_ns =>
+            {
+                known.push((rel.to_string(), m.clone()))
+            }
+            _ => misses.push((rel.to_string(), size, mtime, None)),
+        }
+    }
+    let read_ns = now_ns();
+    for_each(&mut misses, runtime.as_ref(), 32, |miss| {
+        miss.3 = fs::read(dir.join(&miss.0))
+            .ok()
+            .map(|bytes| folder_names(&String::from_utf8_lossy(&bytes)))
+    });
+    let fresh: Vec<(String, Mentions)> = misses
+        .into_iter()
+        .filter_map(|(rel, size, mtime_ns, names)| {
+            Some((
+                rel,
+                Mentions {
+                    size,
+                    mtime_ns,
+                    read_ns,
+                    folders: names?,
+                },
+            ))
+        })
+        .collect();
+    let found = known
+        .iter()
+        .chain(&fresh)
+        .filter(|(_, m)| m.folders.iter().any(|f| folders.contains(f)))
+        .map(|(rel, _)| rel.clone())
+        .collect();
+    if !fresh.is_empty() {
+        // Entries for reports outside this request stay: another call may ask for them.
+        let mut all = persisted;
+        all.extend(fresh);
+        store_persisted(&persisted_path, &all);
+    }
+    found
 }
 
 #[cfg(test)]
@@ -281,6 +360,29 @@ mod tests {
         fs::write(&path, "bbbb").unwrap();
         set_mtime(&path, mtime);
         assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("bbbb")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn folder_mentions_come_from_the_index_until_a_report_changes() {
+        let dir = workspace();
+        let old = SystemTime::now() - Duration::from_secs(60);
+        for (name, text) in [
+            ("a.md", "see ../000184/003f4930/research.md"),
+            ("b.md", "count 1234567 and 0x10, nothing canonical"),
+        ] {
+            fs::write(dir.join(name), text).unwrap();
+            set_mtime(&dir.join(name), old);
+        }
+        let wanted: std::collections::HashSet<String> = ["003F4930".to_string()].into();
+        let found = mentioning(&dir, &["a.md", "b.md", "gone.md"], &wanted);
+        assert_eq!(found, ["a.md".to_string()].into());
+        // Same size and old timestamp: the persisted index answers without reading the file.
+        fs::write(dir.join("a.md"), "see ../000184/00000000/research.md").unwrap();
+        set_mtime(&dir.join("a.md"), old);
+        assert_eq!(mentioning(&dir, &["a.md"], &wanted), found);
+        fs::write(dir.join("a.md"), "moved elsewhere entirely").unwrap();
+        assert!(mentioning(&dir, &["a.md"], &wanted).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 

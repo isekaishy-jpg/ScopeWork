@@ -68,7 +68,7 @@ pub struct Node {
     #[serde(default)]
     pub accepted_prerequisites: std::collections::BTreeMap<u64, String>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Project {
     #[serde(default = "legacy_layout")]
     pub layout_version: u32,
@@ -110,6 +110,8 @@ pub mod history;
 pub mod imports;
 #[path = "layout.rs"]
 mod layout;
+#[path = "ledger.rs"]
+mod ledger;
 #[path = "report_hashes.rs"]
 mod report_hashes;
 pub use catalog_batch::Batch;
@@ -131,7 +133,30 @@ fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes).map_err(|e| e.to_string())?;
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
-    fs::rename(&temp, path).map_err(|e| format!("Cannot replace {}: {e}", path.display()))
+    replace_retrying(&temp, path).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        format!("Cannot replace {}: {e}", path.display())
+    })
+}
+/// Renames `from` over `to`. On Windows a replacement fails while any other process (an
+/// indexer, antivirus, a tool reading the file) has the target open; those holds are brief,
+/// so sharing, lock and access violations are retried for a few seconds.
+fn replace_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut pause = std::time::Duration::from_millis(5);
+    loop {
+        match fs::rename(from, to) {
+            Err(e)
+                if cfg!(windows)
+                    && matches!(e.raw_os_error(), Some(5 | 32 | 33))
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(std::time::Duration::from_millis(200));
+            }
+            other => return other,
+        }
+    }
 }
 /// Catalog bytes for `project.json`. Compact JSON: the catalog is rewritten on every commit,
 /// and pretty printing roughly doubled both its size and the time the write lock is held.
@@ -231,6 +256,9 @@ pub struct Library {
     pub root: PathBuf,
     pub projects: Vec<Project>,
     pub busy_projects: Vec<String>,
+    /// Why a pending transaction could not resume when this read-only view was opened; the
+    /// view shows the committed catalog. Writes stay blocked until recovery succeeds.
+    pub recovery_blocked: Option<String>,
     _lock: Option<OperationLocks>,
 }
 // Keep the legacy gate shared for the lifetime of every project operation. Older
@@ -254,19 +282,36 @@ fn holder_path(root: &Path, id: &str, writable: bool) -> Option<PathBuf> {
     writable.then(|| root.join(".project-locks").join(format!("{id}.holder")))
 }
 /// Longest time a lock acquisition waits for another process before reporting `busy`, in
-/// milliseconds. Zero keeps the immediate `busy` answer the GUI relies on to retain snapshots;
-/// the CLI sets a wait so callers no longer respawn the process in a retry loop.
+/// milliseconds. Zero keeps the immediate `busy` answer the GUI refresh relies on to retain
+/// snapshots; the CLI sets a wait so callers no longer respawn the process in a retry loop.
 static LOCK_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// A per-thread wait, so GUI actions can wait while its refresh keeps answering at once.
+    static THREAD_LOCK_WAIT_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
 pub fn set_lock_wait(wait: std::time::Duration) {
     LOCK_WAIT_MS.store(
         wait.as_millis().min(u64::MAX as u128) as u64,
         std::sync::atomic::Ordering::Relaxed,
     );
 }
-/// Takes `file`'s lock, waiting up to the configured lock wait with a short backoff.
+/// Runs `work` with its own lock wait on this thread.
+pub fn with_lock_wait<T>(wait: std::time::Duration, work: impl FnOnce() -> T) -> T {
+    let previous = THREAD_LOCK_WAIT_MS
+        .with(|w| w.replace(Some(wait.as_millis().min(u64::MAX as u128) as u64)));
+    let result = work();
+    THREAD_LOCK_WAIT_MS.with(|w| w.set(previous));
+    result
+}
+fn lock_wait_ms() -> u64 {
+    THREAD_LOCK_WAIT_MS
+        .with(|w| w.get())
+        .unwrap_or_else(|| LOCK_WAIT_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+/// Takes `file`'s lock, waiting up to the configured lock wait with a short backoff. Used for
+/// the library gate, which only legacy writers take exclusively.
 fn wait_lock(file: &fs::File, exclusive: bool) -> std::result::Result<(), ()> {
-    let wait = LOCK_WAIT_MS.load(std::sync::atomic::Ordering::Relaxed);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(lock_wait_ms());
     let mut pause = std::time::Duration::from_millis(2);
     loop {
         let taken = if exclusive {
@@ -296,28 +341,119 @@ fn lock_holder(folder: &Path, id: &str) -> Option<String> {
         v["since"].as_str().unwrap_or("?")
     ))
 }
-/// While a process waits for a project lock it registers here, so `research locks` can list it.
-struct WaiterRecord(PathBuf);
-impl Drop for WaiterRecord {
+
+// The project lock queue. A process that cannot take a project lock at once registers a ticket
+// in `<id>.waiters/`: `<nanoseconds>-<pid>-<w|r>-<unique>.lock`, which it keeps locked while it
+// waits, plus a `.json` record for `research locks`. Tickets order the waiters. A writer goes
+// when no older live ticket exists; a reader goes when no older live writer ticket exists, so
+// readers share a turn and a waiting writer is never overtaken by new readers. A ticket whose
+// lock can be taken belongs to a process that died; it is removed. Older Scopework versions do
+// not queue but still exclude correctly through the project lock itself.
+struct Ticket {
+    name: String,
+    lock: PathBuf,
+    record: PathBuf,
+    _held: fs::File,
+}
+impl Drop for Ticket {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        let _ = fs::remove_file(&self.record);
+        let _ = self._held.unlock();
+        let _ = fs::remove_file(&self.lock);
     }
 }
-fn register_waiter(folder: &Path, id: &str, writable: bool) -> Option<WaiterRecord> {
+fn take_ticket(folder: &Path, id: &str, writable: bool) -> Option<Ticket> {
     let waiters = folder.join(format!("{id}.waiters"));
     fs::create_dir_all(&waiters).ok()?;
-    let path = waiters.join(format!(
-        "{}-{}.json",
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let name = format!(
+        "{nanos:020}-{}-{}-{}",
         std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
+        if writable { 'w' } else { 'r' },
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
+    let lock = waiters.join(format!("{name}.lock"));
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+        .ok()?;
+    held.try_lock().ok()?;
+    let record = waiters.join(format!("{name}.json"));
     let command: Vec<String> = std::env::args().skip(1).take(3).collect();
     let since = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let record = serde_json::json!({"pid": std::process::id(), "command": command.join(" "), "since_unix": since, "write": writable});
-    fs::write(&path, record.to_string()).ok()?;
-    Some(WaiterRecord(path))
+    let info = serde_json::json!({"pid": std::process::id(), "command": command.join(" "), "since_unix": since, "write": writable});
+    let _ = fs::write(&record, info.to_string());
+    Some(Ticket {
+        name,
+        lock,
+        record,
+        _held: held,
+    })
+}
+/// Live tickets in queue order as (name, writer). Dead tickets are removed on the way.
+fn live_tickets(folder: &Path, id: &str) -> Vec<(String, bool)> {
+    let waiters = folder.join(format!("{id}.waiters"));
+    let mut names: Vec<String> = fs::read_dir(&waiters)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .strip_suffix(".lock")
+                .map(String::from)
+        })
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .filter(|name| {
+            let path = waiters.join(format!("{name}.lock"));
+            let Ok(file) = fs::OpenOptions::new().read(true).write(true).open(&path) else {
+                return false;
+            };
+            if file.try_lock_shared().is_err() {
+                return true;
+            }
+            // Nobody holds it, so its waiter died, unless it was created a moment ago and is
+            // about to be locked: give a fresh ticket a second.
+            let _ = file.unlock();
+            drop(file);
+            let young = name
+                .split('-')
+                .next()
+                .and_then(|n| n.parse::<u128>().ok())
+                .is_some_and(|n| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos())
+                        .saturating_sub(n)
+                        < 1_000_000_000
+                });
+            if !young {
+                let _ = fs::remove_file(&path);
+                let _ = fs::remove_file(waiters.join(format!("{name}.json")));
+            }
+            young
+        })
+        .map(|name| {
+            let writer = name.split('-').nth(2) == Some("w");
+            (name, writer)
+        })
+        .collect()
+}
+/// Whether a live ticket ahead of `me` (all tickets when `me` is `None`) must go first.
+fn queued_ahead(tickets: &[(String, bool)], me: Option<&str>, writable: bool) -> bool {
+    tickets
+        .iter()
+        .filter(|(name, _)| me.is_none_or(|me| name.as_str() < me))
+        .any(|(_, writer)| writable || *writer)
 }
 /// Who holds and who waits for a project's lock, without taking it.
 pub fn lock_status(projects: &Path, id: &str) -> Result<serde_json::Value> {
@@ -344,16 +480,21 @@ pub fn lock_status(projects: &Path, id: &str) -> Result<serde_json::Value> {
         .then(|| fs::read_to_string(folder.join(format!("{id}.holder"))).ok())
         .flatten()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    let mut waiters: Vec<serde_json::Value> = fs::read_dir(folder.join(format!("{id}.waiters")))
+    let waiters = folder.join(format!("{id}.waiters"));
+    let waiting: Vec<serde_json::Value> = live_tickets(&folder, id)
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| fs::read_to_string(e.path()).ok())
-        .filter_map(|t| serde_json::from_str(&t).ok())
+        .enumerate()
+        .filter_map(|(position, (name, _))| {
+            let mut v: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(waiters.join(format!("{name}.json"))).ok()?,
+            )
+            .ok()?;
+            v["position"] = (position + 1).into();
+            Some(v)
+        })
         .collect();
-    waiters.sort_by_key(|w: &serde_json::Value| w["since_unix"].as_u64().unwrap_or(0));
     Ok(
-        serde_json::json!({"project": id, "writer_active": writer, "readers_active": readers, "writer": holder, "waiting": waiters}),
+        serde_json::json!({"project": id, "writer_active": writer, "readers_active": readers, "writer": holder, "waiting": waiting}),
     )
 }
 fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
@@ -366,26 +507,39 @@ fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
         .truncate(false)
         .open(folder.join(format!("{id}.lock")))
         .map_err(|e| e.to_string())?;
-    let immediate = if writable {
-        file.try_lock()
-    } else {
-        file.try_lock_shared()
+    let take = |file: &fs::File| {
+        if writable {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        }
+        .is_ok()
     };
-    let _waiting = (immediate.is_err()
-        && LOCK_WAIT_MS.load(std::sync::atomic::Ordering::Relaxed) > 0)
-        .then(|| register_waiter(&folder, id, writable))
-        .flatten();
-    if immediate.is_ok() {
-        Ok(())
-    } else {
-        wait_lock(&file, writable)
+    let wait = lock_wait_ms();
+    let mut taken = !queued_ahead(&live_tickets(&folder, id), None, writable) && take(&file);
+    if !taken && wait > 0 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait);
+        let ticket = take_ticket(&folder, id, writable);
+        let mut pause = std::time::Duration::from_millis(2);
+        while !taken && std::time::Instant::now() < deadline {
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(std::time::Duration::from_millis(50));
+            let tickets = live_tickets(&folder, id);
+            let me = ticket.as_ref().map(|t| t.name.as_str());
+            // Without a ticket (unwritable lock folder) fall back to plain polling.
+            taken = (me.is_none() || !queued_ahead(&tickets, me, writable)) && take(&file);
+        }
     }
-    .map_err(|_| match lock_holder(&folder, id) {
-        Some(holder) => format!(
-            "Research project '{id}' is busy with another operation ({holder}). Retry shortly."
-        ),
-        None => format!("Research project '{id}' is busy with another operation. Retry shortly."),
-    })?;
+    if !taken {
+        return Err(match lock_holder(&folder, id) {
+            Some(holder) => format!(
+                "Research project '{id}' is busy with another operation ({holder}). Retry shortly."
+            ),
+            None => {
+                format!("Research project '{id}' is busy with another operation. Retry shortly.")
+            }
+        });
+    }
     if writable {
         // Waiters read this to say who holds the lock; it is advisory and never trusted for safety.
         let command: Vec<String> = std::env::args().skip(1).take(3).collect();
@@ -402,12 +556,8 @@ impl Library {
         if !valid_id(id) {
             return Err("Invalid project ID".into());
         }
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(
-                LOCK_WAIT_MS
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    .max(5000),
-            );
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(lock_wait_ms().max(5000));
         loop {
             let result: Result<OperationLocks> = (|| {
                 let gate = fs::OpenOptions::new()
@@ -584,6 +734,7 @@ impl Library {
                 projects: vec![],
                 busy_projects: vec![],
                 _lock: None,
+                recovery_blocked: None,
             };
             for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
                 let entry = entry.map_err(|e| e.to_string())?;
@@ -678,6 +829,7 @@ impl Library {
                     .map_err(|e| e.to_string())?,
             );
         }
+        let mut recovery_blocked = None;
         if let Some(p) = &mut project {
             if p.layout_version != 5 {
                 return Err("Unsupported catalog format; upgrade Scopework.".into());
@@ -703,8 +855,20 @@ impl Library {
             }
             if locks.writable {
                 remove_orphaned_catalog_temporaries(&dir);
-                catalog_batch::resume(&dir, p)?;
-                imports::recover(&dir, p)?;
+                let recovered =
+                    catalog_batch::resume(&dir, p).and_then(|_| imports::recover(&dir, p));
+                match recovered {
+                    Ok(()) => {}
+                    Err(e) if writable => return Err(e),
+                    // A blocked recovery must not stop reads: answer from the committed catalog.
+                    Err(e) => {
+                        drop(locks);
+                        locks = acquire(false, false)?;
+                        *p = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                            .map_err(|e| e.to_string())?;
+                        recovery_blocked = Some(e);
+                    }
+                }
             }
             Self::validate_project(p, id)?;
             if !dir.join("app.md").is_file() {
@@ -715,6 +879,7 @@ impl Library {
             root,
             projects: project.into_iter().collect(),
             busy_projects: vec![],
+            recovery_blocked,
             _lock: Some(locks),
         })
     }
@@ -756,6 +921,7 @@ impl Library {
             projects: vec![p.clone()],
             busy_projects: vec![],
             _lock: None,
+            recovery_blocked: None,
         };
         validation.validate_dependencies(0, &p.dependencies)
     }
@@ -888,10 +1054,30 @@ impl Library {
         if n.kind == Kind::Function && n.status != Status::Complete {
             return n.status;
         }
-        self.effective_all(p)
+        catalog_index::Index::new(&self.projects[p])
+            .states_for(&self.dir(p), [id])
             .get(&id)
             .copied()
             .unwrap_or(Status::NotStarted)
+    }
+    /// Effective status of `id` and everything its completion depends on: required children
+    /// and tagged prerequisites. Evaluates only that closure, not the whole project.
+    fn completion_states(&self, p: usize, id: u64) -> std::collections::HashMap<u64, Status> {
+        let project = &self.projects[p];
+        let inputs = project
+            .nodes
+            .iter()
+            .filter(|n| n.parent == Some(id))
+            .map(|n| n.id)
+            .chain(
+                project
+                    .dependencies
+                    .iter()
+                    .filter(|e| e.dependent == id)
+                    .map(|e| e.prerequisite),
+            )
+            .chain([id]);
+        catalog_index::Index::new(project).states_for(&self.dir(p), inputs)
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
         if !self.writable(p) {
@@ -928,7 +1114,7 @@ impl Library {
         let batch = Batch {
             schema: 1,
             binary: self.projects[p].binary.clone(),
-            expect_revision: self.projects[p].revision,
+            expect_revision: Some(self.projects[p].revision),
             create: vec![catalog_batch::Create {
                 parent,
                 name: name.trim().into(),
@@ -985,12 +1171,12 @@ impl Library {
         if old_body == body
             && old_evidence == evidence
             && complete == (n.status == Status::Complete)
-            && self.effective(p, id) == n.status
+            && self.completion_states(p, id)[&id] == n.status
         {
             return Ok(());
         }
         let states = if complete {
-            self.effective_all(p)
+            self.completion_states(p, id)
         } else {
             Default::default()
         };
@@ -1205,9 +1391,10 @@ impl ResearchUi {
         let (send, recv) = std::sync::mpsc::sync_channel(1);
         self.action_task = Some(recv);
         std::thread::spawn(move || {
+            // Human actions wait for agents' operations instead of failing `busy`.
             let result = crate::paths::home(None)
                 .map(|h| h.join("projects"))
-                .and_then(work);
+                .and_then(|root| with_lock_wait(std::time::Duration::from_secs(60), || work(root)));
             let _ = send.send(result);
         });
     }
@@ -1323,7 +1510,7 @@ impl ResearchUi {
                 ui.label(if self.browser.required(n.id) { "Required research (including explicit prerequisites)" } else { "Context inventory; preserved outside required progress" });
                 let mut context_only = n.context_only;
                 if n.kind != Kind::App && ui.add_enabled(!self.has_unsaved(), egui::Checkbox::new(&mut context_only, "Context-only child membership")).changed() {
-                    let batch = Batch { schema: 1, repair_legacy_links: false, binary: project.binary.clone(), expect_revision: project.revision, create: vec![], update: vec![catalog_batch::Update { id: n.id, parent: None, name: None, context_only: Some(context_only) }], reorder: vec![] };
+                    let batch = Batch { schema: 2, repair_legacy_links: false, binary: project.binary.clone(), expect_revision: None, create: vec![], update: vec![catalog_batch::Update { id: n.id, parent: None, name: None, context_only: Some(context_only), expect_node_revision: Some(n.revision) }], reorder: vec![] };
                     self.mutate(move |lib,p,id|{lib.batch(p,&batch)?;Ok(id)});
                 }
                 let flag=self.browser_data[self.project].flags.get(&n.id).cloned();
@@ -1476,7 +1663,10 @@ impl ResearchUi {
             let (send, recv) = std::sync::mpsc::sync_channel(1);
             self.load_task = Some((self.generation, recv));
             std::thread::spawn(move || {
-                let _ = send.send(background::load(&project, id));
+                let loaded = with_lock_wait(std::time::Duration::from_secs(30), || {
+                    background::load(&project, id)
+                });
+                let _ = send.send(loaded);
             });
         }
         let delivered = self

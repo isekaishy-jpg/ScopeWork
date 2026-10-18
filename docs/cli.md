@@ -128,7 +128,25 @@ These IDs are illustrative; referenced nodes must exist. JSON RVAs are unsigned 
 
 Mixed batches containing updates/reordering/link repair hold the project write lock, record a recoverable catalog delta and affected reports under `tools/workspaces/catalog-transactions-v4/pending`, stages moved folders, updates reports and affected dependency views, and commits the catalog last. The next CLI/GUI open resumes interrupted work after checking recorded inputs. Completed journals remain under `revision-N`; preserve them if recovery reports a conflict. Do not manually edit files during a pending transaction. The journal does not back up arbitrary supporting data; maintain ordinary backups separately.
 
-Ownership, membership, name, order and report changes reopen affected accepted reports and their consumers/ancestors for review. Recognized internal Markdown and prose paths are rebased; external URLs and paths outside the project are retained. Schema-1 annotation-ledger report paths follow moves while original review hashes remain pinned, requiring review of changed evidence.
+Ownership, membership, name, order and report changes reopen affected accepted reports and their consumers/ancestors for review. A reference in a report is rebased only when it must change: the project path it names lies under a moved folder, or the report holding a relative reference moved and the named project file exists. Every other text keeps its exact bytes, including quoted source strings such as `.\Movement_C.cpp` or `..\src\file.cpp`, so moves never reopen unrelated reports. Besides the moved records, a move reads only the reports that mention a moved folder name; a persisted index (`tools/workspaces/scopework-cache/report-references.json`, rebuilt on demand) tells which, so unchanged reports are only statted.
+
+Annotation-ledger report paths follow moves: when the catalog commits, the `"report"` values in `tools/profiles/annotations.json` (schema 1) that name a canonical report or data path at an outdated location are replaced in the existing text. Formatting, key order and line endings stay as written; original review hashes stay pinned, requiring review of changed evidence. The same pass repairs any row a tool wrote back with an old path. The journal records the move, never ledger copies, so a tool writing the ledger during a move can no longer block the project. Results list `moved` records (`node`, old `from` and new `to` report paths) and `ledger_rows_repathed`.
+
+### Record-level preconditions (schema 2)
+
+Schema-1 batches require the exact project revision, which every save anywhere advances. Schema 2 instead checks each updated record: omit `expect_revision` and give every `update` the record's current `expect_node_revision` (the `node.revision` of `node show`). Unrelated commits no longer conflict; a changed record fails with `record_conflict`. Creations still check their parents and reorders still list every child. Creation-only schema-2 batches run as one transaction rather than as a background import.
+
+```json
+{"schema": 2, "binary": "EXACT binary identity", "update": [{"id": 9, "parent": 8, "expect_node_revision": 14}]}
+```
+
+### Finding moved reports
+
+```powershell
+research node resolve PROJECT architectures/000015/000184/003F4930/research.md
+```
+
+Maps report or data paths, old or current, project-relative or absolute, to their record and current location (`node`, `kind`, `name`, `current`, `absolute`, `moved`). Tools that keep report paths can repair them after other sessions' moves.
 
 Current operations use catalog format 4. Upgrade the GUI and all CLI workers together to 0.5.0. First open migrates under exclusive compatibility access, retaining metadata under `tools/workspaces/layout-migration-v4`. Earlier versions refuse the new format; do not manually lower its version to downgrade.
 
@@ -260,7 +278,7 @@ research node prune PROJECT --file prune.json --expect PREVIEW_TOKEN
 
 An empty organization node is an Architecture or Chunk with no remaining child nodes. Functions are never prune candidates. By default, authored body/evidence or extra supporting files also protect a childless scope. `include_authored:true` explicitly permits their archival. `ids` limits eligible IDs (empty means all); `keep` always protects listed nodes. `name_prefix` and `context_only` further restrict candidates. `recursive:true` considers ancestors that become empty, but **all filters still apply to ancestors**. Without it, only nodes that were already childless are selected. Intentionally open source scopes can be retained with `keep`, selection filters, or the default authored-content protection.
 
-Removed node directories are moved, not destroyed, to `tools/workspaces/deleted-nodes/revision-N/ID/`. Supporting files retain their bytes. Recognized links in canonical reports and schema-1 annotation report references follow the archive; original annotation review hashes are retained and require review before reapplication. Opaque paths in custom scripts or supporting files are not rewritten. Archived generated dependency files are historical snapshots. Live dependency edges involving deleted nodes are removed, surviving generated dependency views are synchronized, and affected consumers/ancestors are reopened. Active imports block structural removal.
+Removed node directories are moved, not destroyed, to `tools/workspaces/deleted-nodes/revision-N/ID/`. Supporting files retain their bytes. Links in canonical reports that point into removed folders, and schema-1 annotation report references, follow the archive (other report text is untouched); original annotation review hashes are retained and require review before reapplication. Completed records the removal reopens enter the review queue; review flags, claims and queue entries of removed records are dropped in the same transaction. Opaque paths in custom scripts or supporting files are not rewritten. Archived generated dependency files are historical snapshots. Live dependency edges involving deleted nodes are removed, surviving generated dependency views are synchronized, and affected consumers/ancestors are reopened. Active imports block structural removal.
 
 The standard pending journal recovers interrupted moves, report updates and catalog publication. Completed receipts retain before/after metadata, report text and old/new paths; the archive retains supporting data. There is no automatic undelete command. Recovery from a completed deletion requires restoring the intended records and files using its receipt under controlled maintenance, accounting for later edits; do not copy an old catalog over a live one.
 
@@ -271,9 +289,11 @@ research journal PROJECT
 research journal PROJECT --compact
 ```
 
-The first command reports completed journal bytes, potential savings, pending journal bytes, and per-journal formats/paths. The second atomically converts completed full journals to change receipts. It does not remove history, reports, data, or pending/incomplete transactions. These history commands bypass project migration and recovery, so pending journals remain untouched even when they need conflict resolution. Interrupted compaction is repeatable; already compacted entries are retained. Only recognized `revision-N/journal.json` records in the catalog transaction directories are eligible.
+The first command reports completed journal bytes, potential savings, pending journal bytes, bytes held in large sidecar texts (`large_sidecar_bytes`), and per-journal formats/paths. The second atomically converts completed full journals to change receipts. It does not remove history, reports, data, or pending/incomplete transactions. These history commands bypass project migration and recovery, so pending journals remain untouched even when they need conflict resolution. Interrupted compaction is repeatable; already compacted entries are retained. Only recognized `revision-N/journal.json` records in the catalog transaction directories are eligible.
 
 New pending journals and completed receipts use schema-1 deltas: project metadata excluding inventory arrays, changed node/edge records with their array positions, affected reports/sidecars, directory moves, and fingerprints of the complete before/after catalog. Recovery reconstructs and verifies the other catalog state against those fingerprints. Older full pending journals remain readable. A completed receipt cannot be replayed by renaming it to `pending`.
+
+Receipts written by 0.8.0 and earlier copy the whole annotation ledger twice per move; on large projects these copies are most of the transaction history. `research journal PROJECT --compact-sidecars` replaces every sidecar text of 1 MB or more in completed receipts with its changed JSON values (each with its JSON-pointer path), both texts' SHA-256 and sizes. This is irreversible for those exact historical bytes, so it never runs automatically; pending journals are never touched.
 
 Retention policy: retain compact completed change history indefinitely, including removed-node archives; never automatically expire evidence. This removes unchanged whole-inventory duplication per edit, while storage still grows with actual changed content. Whole-catalog reorder operations can have large deltas. The format-5 migration keeps one full pre-upgrade catalog. Import publication history and other tool workspaces are separate from catalog-journal compaction and are not included in its byte totals.
 
@@ -281,7 +301,9 @@ Retention policy: retain compact completed change history indefinitely, includin
 
 ### Lock waiting
 
-Every command waits for another process's project lock instead of failing at once. `--wait SECONDS` (global, or per command) sets the limit; `SCOPEWORK_LOCK_WAIT_SECS` sets the default, otherwise 120 seconds. `--wait 0` restores the immediate `busy` answer. The lock holder writes `.project-locks/<project>.holder` (process, command, start time) and each waiting process registers under `.project-locks/<project>.waiters/`; both are removed when the operation ends.
+Every command waits for another process's project lock instead of failing at once. `--wait SECONDS` (global, or per command) sets the limit; `SCOPEWORK_LOCK_WAIT_SECS` sets the default, otherwise 120 seconds. `--wait 0` restores the immediate `busy` answer. GUI actions wait up to 60 seconds. The lock holder writes `.project-locks/<project>.holder` (process, command, start time).
+
+Waiting processes form a queue under `.project-locks/<project>.waiters/`, ordered by arrival: a writer goes when everyone ahead of it has gone; readers go together when no writer is ahead of them, so a waiting writer is never overtaken by later readers. A waiter that died is detected and skipped. `research locks` lists the queue with each waiter's `position`. Scopework 0.8.0 and earlier do not queue but still exclude correctly.
 
 ```powershell
 research locks example                       # holder and waiters; takes no lock
@@ -290,7 +312,13 @@ research wait example --revision-above 812   # until another write has landed
 research wait example --complete 42 --timeout 300
 ```
 
-`wait` exits 1 with error kind `timeout` when its limit passes. Use it instead of polling loops.
+`wait` exits 1 with error kind `timeout` when its limit passes. Use it instead of polling loops. It re-reads the catalog only when it changes, and evaluates `--complete` after each change and at most every two seconds otherwise.
+
+### Blocked recovery
+
+If an interrupted transaction cannot resume (a report or sidecar it changes was edited outside the app), read-only commands still answer from the committed catalog and print a `recovery_blocked` warning on stderr. Writes fail with a message naming the file, the pending journal and the way out: restore that file to the text the journal records, then run any command.
+
+On Windows, a file replacement that collides with another process briefly holding the target open (an indexer, antivirus or a tool) is retried for a few seconds instead of failing with `os error 32`.
 
 ### Small answers
 

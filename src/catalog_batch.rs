@@ -13,7 +13,10 @@ pub use catalog_remove::Removal;
 pub struct Batch {
     pub schema: u32,
     pub binary: String,
-    pub expect_revision: u64,
+    /// Required (and exact) for schema 1; optional for schema 2, which checks each updated
+    /// record's `expect_node_revision` instead.
+    #[serde(default)]
+    pub expect_revision: Option<u64>,
     #[serde(default)]
     pub repair_legacy_links: bool,
     #[serde(default)]
@@ -39,6 +42,18 @@ pub struct Update {
     pub parent: Option<u64>,
     pub name: Option<String>,
     pub context_only: Option<bool>,
+    /// The record's revision as last read; required by schema 2.
+    #[serde(default)]
+    pub expect_node_revision: Option<u64>,
+}
+/// What a catalog batch changed.
+#[derive(Serialize)]
+pub struct BatchOutcome {
+    pub created: Vec<u64>,
+    /// Report paths of moved records: (node, old path, new path).
+    pub moved: Vec<(u64, String, String)>,
+    /// Annotation-ledger report paths that now follow their records.
+    pub ledger_rows_repathed: usize,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +110,10 @@ struct Journal {
     moves: Vec<Move>,
     dependencies: Vec<u64>,
     sidecars: Vec<Sidecar>,
+    /// Repath the annotation ledger when the catalog commits: this transaction's folder moves
+    /// (which include archived nodes), then canonical resolution against `after`. See `ledger.rs`.
+    #[serde(default)]
+    ledger: bool,
 }
 
 fn parts(text: &str) -> Result<(&str, &str)> {
@@ -106,7 +125,14 @@ fn parts(text: &str) -> Result<(&str, &str)> {
 }
 
 fn same(a: &Project, b: &Project) -> bool {
-    serde_json::to_value(a).unwrap() == serde_json::to_value(b).unwrap()
+    a == b
+}
+/// Recovery guidance appended to every conflict that stops a pending transaction.
+fn blocked(root: &Path, what: String) -> String {
+    format!(
+        "{what}. The pending catalog transaction in {} was not applied, and project writes stay blocked until it can resume. Reads still answer from the committed catalog. Restore the named file to the text the journal records as `before` or `after` (or remove the outside edit), then run any project command to resume; keep the journal.",
+        pending(root).display()
+    )
 }
 fn pending(root: &Path) -> PathBuf {
     let legacy = root.join("tools/workspaces/catalog-transactions/pending");
@@ -130,17 +156,23 @@ fn fault(_point: &str) {
     }
 }
 
-pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
+/// Completes the pending catalog transaction, if any. Returns how many annotation-ledger
+/// report paths it repathed.
+pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
     let folder = pending(root);
     let path = folder.join("journal.json");
     if !path.exists() {
-        return Ok(());
+        return Ok(0);
     }
     contained(root, &path)?;
-    let j = journal_history::read_pending(&fs::read(&path).map_err(|e| e.to_string())?, project)?;
+    let j = journal_history::read_pending(&fs::read(&path).map_err(|e| e.to_string())?, project)
+        .map_err(|e| blocked(root, e))?;
     fault("journal");
     if !same(project, &j.before) && !same(project, &j.after) {
-        return Err("Catalog changed during batch transaction. Preserve its journal and resolve the conflict.".into());
+        return Err(blocked(
+            root,
+            "Catalog changed during batch transaction".into(),
+        ));
     }
     // All existing reports must still match a recorded input or output before resuming.
     for edit in &j.edits {
@@ -154,9 +186,9 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
             if candidate.is_file() {
                 let text = fs::read_to_string(&candidate).map_err(|e| e.to_string())?;
                 if Some(&text) != edit.before.as_ref() && text != edit.after {
-                    return Err(format!(
-                        "Report changed during batch: {}",
-                        candidate.display()
+                    return Err(blocked(
+                        root,
+                        format!("Report changed during batch: {}", candidate.display()),
                     ));
                 }
             }
@@ -172,12 +204,22 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
             );
         }
     }
+    // Journals from 0.8.0 and earlier carry whole annotation-ledger copies. A tool's later write
+    // no longer blocks them: the ledger is repathed in place instead, like newer journals.
+    let mut repath_ledger = j.ledger;
     for file in &j.sidecars {
         let path = root.join(&file.path);
         contained(root, &path)?;
+        if file.path == ledger::LEDGER {
+            repath_ledger = true;
+            continue;
+        }
         let current = fs::read_to_string(&path).map_err(|e| e.to_string())?;
         if current != file.before && current != file.after {
-            return Err(format!("Sidecar changed during batch: {}", file.path));
+            return Err(blocked(
+                root,
+                format!("Sidecar changed during batch: {}", file.path),
+            ));
         }
     }
     // Extract deepest folders first so parents and children can move independently.
@@ -231,15 +273,26 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
             atomic(&path, edit.after.as_bytes())?;
         }
     }
-    for file in &j.sidecars {
+    for file in j.sidecars.iter().filter(|f| f.path != ledger::LEDGER) {
         atomic(&root.join(&file.path), file.after.as_bytes())?;
     }
+    let ledger_rows = if repath_ledger {
+        let moved: Vec<(String, String)> = j
+            .moves
+            .iter()
+            .map(|m| (m.old.clone(), m.new.clone()))
+            .collect();
+        ledger::apply(root, &j.after, &moved)?
+    } else {
+        0
+    };
     fault("reports");
     let temporary = Library {
         root: root.parent().ok_or("Missing library directory")?.into(),
         projects: vec![j.after.clone()],
         busy_projects: vec![],
         _lock: None,
+        recovery_blocked: None,
     };
     if !j.dependencies.is_empty() {
         temporary.sync_dependency_subset(0, Some(&j.dependencies.iter().copied().collect()))?;
@@ -253,7 +306,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<()> {
     }
     fs::rename(folder, &receipt).map_err(|e| e.to_string())?;
     journal_history::compact(&receipt.join("journal.json"), &j)?;
-    Ok(())
+    Ok(ledger_rows)
 }
 
 /// Review flags live in a journaled sidecar beside the catalog, keyed by node ID, so older
@@ -331,13 +384,14 @@ impl Library {
                 before: before_text,
                 after: flags_text(&flags)?,
             }],
+            ledger: false,
         };
         let folder = prepare_pending(&root)?;
         atomic(
             &folder.join("journal.json"),
             &journal_history::pending_bytes(&journal)?,
         )?;
-        resume(&root, &mut self.projects[p])
+        resume(&root, &mut self.projects[p]).map(|_| ())
     }
 }
 impl Library {
@@ -368,13 +422,14 @@ impl Library {
                 before: before_text,
                 after: after_text,
             }],
+            ledger: false,
         };
         let folder = prepare_pending(&root)?;
         atomic(
             &folder.join("journal.json"),
             &journal_history::pending_bytes(&journal)?,
         )?;
-        resume(&root, &mut self.projects[p])
+        resume(&root, &mut self.projects[p]).map(|_| ())
     }
 }
 /// Return started-but-incomplete records to Not Started (for example after generated evidence was attached).
@@ -469,6 +524,7 @@ impl Library {
             moves: vec![],
             dependencies,
             sidecars: vec![],
+            ledger: false,
         };
         let root = self.dir(p);
         let folder = prepare_pending(&root)?;
@@ -480,7 +536,7 @@ impl Library {
         if std::env::var("SCOPEWORK_METADATA_FAIL_AT").as_deref() == Ok("journal") {
             std::process::exit(99);
         }
-        resume(&root, &mut self.projects[p])
+        resume(&root, &mut self.projects[p]).map(|_| ())
     }
     pub fn read_reports(&self, p: usize, ids: &[u64]) -> Result<serde_json::Value> {
         let project = &self.projects[p];
@@ -619,6 +675,7 @@ impl Library {
             moves: vec![],
             dependencies: vec![],
             sidecars: vec![],
+            ledger: false,
         };
         let folder = prepare_pending(&root)?;
         atomic(
@@ -630,16 +687,47 @@ impl Library {
     }
 
     pub fn batch(&mut self, p: usize, batch: &Batch) -> Result<Vec<u64>> {
+        self.apply_batch(p, batch).map(|outcome| outcome.created)
+    }
+    /// Applies a catalog batch and reports what it created and moved.
+    pub fn apply_batch(&mut self, p: usize, batch: &Batch) -> Result<BatchOutcome> {
         if !self.writable(p) {
-            return self.write_project(p, |l, p| l.batch(p, batch));
+            return self.write_project(p, |l, p| l.apply_batch(p, batch));
         }
         self.ensure_structural(p)?;
         let before = self.projects[p].clone();
-        if batch.schema != 1
-            || batch.expect_revision != before.revision
-            || batch.binary != before.binary
-        {
+        let preconditions = match batch.schema {
+            1 => batch.expect_revision == Some(before.revision),
+            // Schema 2: record-level preconditions, so unrelated commits do not conflict.
+            2 => batch.expect_revision.is_none_or(|r| r == before.revision),
+            _ => false,
+        };
+        if !preconditions || batch.binary != before.binary {
             return Err("Batch schema, exact binary identity or project revision does not match. Reload and review the batch.".into());
+        }
+        if batch.schema == 2 {
+            for u in &batch.update {
+                let current = before
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == u.id)
+                    .map(|n| n.revision);
+                match (u.expect_node_revision, current) {
+                    (None, _) => {
+                        return Err(format!(
+                            "Schema-2 batch updates need expect_node_revision (node {} has none).",
+                            u.id
+                        ));
+                    }
+                    (Some(expected), Some(actual)) if expected != actual => {
+                        return Err(format!(
+                            "record_conflict: node {} changed (revision {actual}, expected {expected}); reload and review it.",
+                            u.id
+                        ));
+                    }
+                    _ => {}
+                }
+            }
         }
         let mut after = before.clone();
         let mut positions: HashMap<_, _> = after
@@ -757,7 +845,11 @@ impl Library {
             changed.insert(order.parent);
         }
         if changed.is_empty() && !batch.repair_legacy_links {
-            return Ok(created);
+            return Ok(BatchOutcome {
+                created,
+                moved: vec![],
+                ledger_rows_repathed: 0,
+            });
         }
         let old = catalog_index::Index::new(&before);
         let new = catalog_index::Index::new(&after);
@@ -801,10 +893,29 @@ impl Library {
         }
         let rewriter = layout::Rewriter::new(&rewrites, &root);
         rewrites.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+        // Only reports that mention a moved folder can hold a reference that must change;
+        // legacy link repair still reads every report.
+        let mentioning = if rewrites.is_empty() || batch.repair_legacy_links {
+            HashSet::new()
+        } else {
+            let folders: HashSet<String> = moves
+                .iter()
+                .filter_map(|m| m.old.rsplit('/').next())
+                .map(str::to_uppercase)
+                .collect();
+            let reports: Vec<&str> = before
+                .nodes
+                .iter()
+                .filter(|n| !changed.contains(&n.id))
+                .map(|n| old.paths[&n.id].as_str())
+                .collect();
+            report_hashes::mentioning(&root, &reports, &folders)
+        };
         let mut edits = vec![];
         for n in &after.nodes {
             let original = if let Some(path) = old.paths.get(&n.id) {
-                if changed.contains(&n.id) || !rewrites.is_empty() {
+                if changed.contains(&n.id) || batch.repair_legacy_links || mentioning.contains(path)
+                {
                     Some(fs::read_to_string(root.join(path)).map_err(|e| e.to_string())?)
                 } else {
                     continue;
@@ -920,50 +1031,28 @@ impl Library {
                 .map(|u| u.id)
                 .collect();
             let original = coordination::ensure(&root, coordination::REVIEW_QUEUE, "entries")?;
-            let updated = coordination::queue_reopened(&original, &after, &reopened, &moved)?;
+            let updated = coordination::queue_reopened(
+                &original,
+                &after,
+                &reopened,
+                &coordination::batch_reason(&moved),
+            )?;
             sidecars.push(Sidecar {
                 path: coordination::REVIEW_QUEUE.into(),
                 before: original,
                 after: updated,
             });
         }
-        let annotation_path = root.join("tools/profiles/annotations.json");
-        if !moves.is_empty() && annotation_path.is_file() {
-            let original = fs::read_to_string(&annotation_path).map_err(|e| e.to_string())?;
-            let mut ledger: serde_json::Value =
-                serde_json::from_str(&original).map_err(|e| e.to_string())?;
-            let paths: HashMap<_, _> = edits
-                .iter()
-                .filter_map(|e| e.old.as_ref().map(|old| (old.as_str(), e.new.as_str())))
-                .collect();
-            let mut modified = false;
-            if ledger["schema"] == 1
-                && let Some(rows) = ledger["annotations"].as_array_mut()
-            {
-                for row in rows {
-                    if let Some(path) = row["report"]
-                        .as_str()
-                        .and_then(|path| paths.get(path))
-                        .copied()
-                    {
-                        row["report"] = path.into();
-                        row["catalog_move"] = "Canonical report path updated; original review hash retained. Re-review any changed report before applying annotations.".into();
-                        modified = true;
-                    }
-                }
-            }
-            if modified {
-                sidecars.push(Sidecar {
-                    path: "tools/profiles/annotations.json".into(),
-                    before: original,
-                    after: serde_json::to_string_pretty(&ledger).map_err(|e| e.to_string())?,
-                });
-            }
-        }
+        let moved: Vec<(u64, String, String)> = edits
+            .iter()
+            .filter_map(|e| Some((e.id, e.old.clone()?, e.new.clone())))
+            .filter(|(_, old, new)| old != new)
+            .collect();
         let j = Journal {
             before,
             after,
             edits,
+            ledger: !moves.is_empty(),
             moves,
             dependencies: dependencies.into_iter().collect(),
             sidecars,
@@ -978,8 +1067,12 @@ impl Library {
             &folder.join("journal.json"),
             &journal_history::pending_bytes(&j)?,
         )?;
-        resume(&root, &mut self.projects[p])?;
-        Ok(created)
+        let ledger_rows_repathed = resume(&root, &mut self.projects[p])?;
+        Ok(BatchOutcome {
+            created,
+            moved,
+            ledger_rows_repathed,
+        })
     }
 }
 
@@ -1212,6 +1305,7 @@ mod tests {
             moves: vec![],
             dependencies: vec![],
             sidecars: vec![],
+            ledger: false,
         };
         atomic(
             &receipt.join("journal.json"),
@@ -1266,6 +1360,7 @@ mod tests {
             moves: vec![],
             dependencies: vec![],
             sidecars: vec![],
+            ledger: false,
         };
         let bytes = journal_history::pending_bytes(&j).unwrap();
         assert!(
@@ -1289,6 +1384,7 @@ mod tests {
             moves: vec![],
             dependencies: vec![],
             sidecars: vec![],
+            ledger: false,
         };
         let bytes = journal_history::pending_bytes(&deletion).unwrap();
         assert!(
@@ -1314,6 +1410,7 @@ mod tests {
             moves: vec![],
             dependencies: vec![],
             sidecars: vec![],
+            ledger: false,
         };
         let bytes = journal_history::pending_bytes(&rearranged).unwrap();
         for current in [&rearranged.before, &rearranged.after] {
@@ -1336,6 +1433,7 @@ mod tests {
             moves: vec![],
             dependencies: vec![],
             sidecars: vec![],
+            ledger: false,
         };
         let receipt = lib.dir(0).join(format!(
             "tools/workspaces/catalog-transactions-v4/revision-{}/journal.json",

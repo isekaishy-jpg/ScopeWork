@@ -51,6 +51,39 @@ fn receipts(root: &Path) -> Vec<(u64, PathBuf)> {
     all
 }
 
+/// The parts of a receipt a summary reads. Unlisted fields, such as report and sidecar texts
+/// that can reach many megabytes, are skipped by the parser instead of being built as values.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Receipt {
+    changes: Value,
+    edits: Vec<EditRef>,
+    moves: Vec<Value>,
+    sidecars: Vec<PathRef>,
+    dependencies: Vec<Value>,
+}
+#[derive(Deserialize)]
+struct EditRef {
+    id: u64,
+    old: Option<String>,
+    new: String,
+}
+#[derive(Deserialize)]
+struct PathRef {
+    path: String,
+}
+impl Receipt {
+    fn summary_value(self) -> Value {
+        json!({
+            "changes": self.changes,
+            "edits": self.edits.into_iter().map(|e| json!({"id": e.id, "old": e.old, "new": e.new})).collect::<Vec<_>>(),
+            "moves": self.moves,
+            "sidecars": self.sidecars.into_iter().map(|s| json!({"path": s.path})).collect::<Vec<_>>(),
+            "dependencies": self.dependencies,
+        })
+    }
+}
+
 /// Summary of one receipt: which records changed and how, without report text.
 fn summarize(revision: u64, receipt: &Value, filter: &HistoryFilter) -> Option<Value> {
     let empty = vec![];
@@ -180,9 +213,11 @@ impl Library {
                     break;
                 }
                 let Ok(bytes) = fs::read(&path) else { continue };
-                let Ok(receipt) = serde_json::from_slice::<Value>(&bytes) else {
+                // Report and sidecar texts are skipped while parsing; summaries never show them.
+                let Ok(receipt) = serde_json::from_slice::<Receipt>(&bytes) else {
                     continue;
                 };
+                let receipt = receipt.summary_value();
                 if let Some(summary) = summarize(rev, &receipt, filter) {
                     entries.push(summary);
                     found += 1;

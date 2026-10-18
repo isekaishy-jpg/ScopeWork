@@ -29,6 +29,21 @@ pub(super) fn link(from: &str, to: &str) -> String {
         b[common..].join("/")
     )
 }
+/// The project path a relative `path` names from the report at `from`, or `None` above the root.
+fn resolve(from: &str, path: &str) -> Option<String> {
+    let mut parts: Vec<_> = from.split('/').collect();
+    parts.pop();
+    for component in path.split('/') {
+        match component {
+            ".." => {
+                parts.pop()?;
+            }
+            "." | "" => {}
+            _ => parts.push(component),
+        }
+    }
+    Some(parts.join("/"))
+}
 fn legacy(n: &Node) -> String {
     match n.kind {
         Kind::App => "app.md".into(),
@@ -38,9 +53,15 @@ fn legacy(n: &Node) -> String {
     }
 }
 /// Indexed path rewriting: cost follows the number of path components, not catalog size.
+///
+/// A reference is rewritten only when it must change: the project path it names lies under a
+/// moved folder, or the report holding a relative reference moved and the named project file
+/// exists. Every other reference, including quoted source strings such as `.\Movement_C.cpp`
+/// or `..\src\file.cpp`, keeps its exact text.
 pub(super) struct Rewriter {
     moves: std::collections::HashMap<String, String>,
     root: String,
+    project: PathBuf,
     destinations: regex::Regex,
     paths: regex::Regex,
 }
@@ -49,19 +70,19 @@ impl Rewriter {
         Self {
             moves: moves.iter().cloned().collect(),
             root: format!("{}/", root.to_string_lossy().replace('\\', "/").trim_end_matches('/')),
+            project: root.to_path_buf(),
             destinations: regex::Regex::new(r"\]\((<[^>]+>|[^\s)]+)\)").unwrap(),
             paths: regex::Regex::new(r#"(?:[A-Za-z][A-Za-z0-9+.-]*://|[A-Za-z]:[\\/]|/|\.{1,2}[\\/]|architectures/|functions/|chunks/|tools/)[^\s`<>\"'()\[\]]+"#).unwrap(),
         }
     }
-    fn remap(&self, path: &str) -> String {
+    /// The moved location of `path`, or `None` when no moved folder contains it.
+    fn remap(&self, path: &str) -> Option<String> {
         let mut prefix = path;
         loop {
             if let Some(to) = self.moves.get(prefix) {
-                return format!("{to}{}", &path[prefix.len()..]);
+                return Some(format!("{to}{}", &path[prefix.len()..]));
             }
-            let Some((parent, _)) = prefix.rsplit_once('/') else {
-                return path.into();
-            };
+            let (parent, _) = prefix.rsplit_once('/')?;
             prefix = parent;
         }
     }
@@ -83,12 +104,10 @@ impl Rewriter {
         let rewritten = if absolute {
             let local = &local[self.root.len()..];
             let end = local.find(['#', '?']).unwrap_or(local.len());
-            format!(
-                "{uri_prefix}{}{}{}",
-                self.root,
-                self.remap(&local[..end]),
-                &local[end..]
-            )
+            let Some(moved) = self.remap(&local[..end]) else {
+                return target.into();
+            };
+            format!("{uri_prefix}{}{moved}{}", self.root, &local[end..])
         } else {
             if local.starts_with(['#', '/']) || local.contains(':') {
                 return target.into();
@@ -100,22 +119,25 @@ impl Rewriter {
                     .iter()
                     .any(|p| path.starts_with(p))
             {
-                format!("{}{suffix}", self.remap(path))
+                let Some(moved) = self.remap(path) else {
+                    return target.into();
+                };
+                format!("{moved}{suffix}")
             } else {
-                let mut parts: Vec<_> = old.split('/').collect();
-                parts.pop();
-                for component in path.split('/') {
-                    match component {
-                        ".." => {
-                            if parts.pop().is_none() {
-                                return target.into();
-                            }
-                        }
-                        "." | "" => {}
-                        _ => parts.push(component),
-                    }
+                let Some(resolved) = resolve(old, path) else {
+                    return target.into();
+                };
+                let destination = match self.remap(&resolved) {
+                    Some(moved) => moved,
+                    // Only a moved report's links to existing project files need rebasing.
+                    None if old != new && self.project.join(&resolved).exists() => resolved,
+                    None => return target.into(),
+                };
+                // A reference that already names the destination from the new location stays as written.
+                if resolve(new, path).as_deref() == Some(destination.as_str()) {
+                    return target.into();
                 }
-                format!("{}{suffix}", link(new, &self.remap(&parts.join("/"))))
+                format!("{}{suffix}", link(new, &destination))
             }
         };
         let rewritten = if bare.contains("%20") {
@@ -333,6 +355,7 @@ pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
         root: root.parent().ok_or("Missing library directory")?.into(),
         projects: vec![project.clone()],
         _lock: None,
+        recovery_blocked: None,
     };
     temporary.sync_dependency_files(0)?;
     // The catalog is the commit point. The retained journal contains the original catalog and reports.
@@ -349,4 +372,76 @@ pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn fixture() -> Fixture {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("rewriter-{}", uuid::Uuid::new_v4()));
+        for file in [
+            "architectures/000001/000002/research.md",
+            "architectures/000001/000002/00002000/research.md",
+        ] {
+            fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+            fs::write(root.join(file), "report").unwrap();
+        }
+        Fixture(root)
+    }
+    const MOVED: (&str, &str) = (
+        "architectures/000001/000002/00001000",
+        "architectures/000001/000003/00001000",
+    );
+
+    #[test]
+    fn unrelated_references_and_source_literals_keep_their_bytes() {
+        let f = fixture();
+        let rewriter = Rewriter::new(&[(MOVED.0.into(), MOVED.1.into())], &f.0);
+        let report = "architectures/000001/000004/research.md";
+        let text = concat!(
+            r"Strings `.\Movement_C.cpp`, .\MovementShared.cpp and `..\src\fmod_file_cdda.cpp`; ",
+            "[chunk](../000002/research.md), [same](./research.md), see architectures/000001/000002/research.md."
+        );
+        assert_eq!(rewriter.rewrite(text, report, report), text);
+    }
+
+    #[test]
+    fn references_to_a_moved_folder_follow_it() {
+        let f = fixture();
+        let rewriter = Rewriter::new(&[(MOVED.0.into(), MOVED.1.into())], &f.0);
+        let report = "architectures/000001/000004/research.md";
+        let text = r"[f](../000002/00001000/research.md) and architectures/000001/000002/00001000/data/x.json `.\a.cpp`";
+        assert_eq!(
+            rewriter.rewrite(text, report, report),
+            r"[f](../000003/00001000/research.md) and architectures/000001/000003/00001000/data/x.json `.\a.cpp`"
+        );
+    }
+
+    #[test]
+    fn a_moved_report_rebases_only_links_to_existing_project_files() {
+        let f = fixture();
+        let rewriter = Rewriter::new(&[(MOVED.0.into(), MOVED.1.into())], &f.0);
+        let old = format!("{}/research.md", MOVED.0);
+        let new = format!("{}/research.md", MOVED.1);
+        let text = concat!(
+            "[chunk](../research.md) [sibling](../00002000/research.md) [data](./data/x.json) ",
+            r"`..\src\a.cpp` `.\b.cpp` ../missing/file.md"
+        );
+        assert_eq!(
+            rewriter.rewrite(text, &old, &new),
+            concat!(
+                "[chunk](../../000002/research.md) [sibling](../../000002/00002000/research.md) [data](./data/x.json) ",
+                r"`..\src\a.cpp` `.\b.cpp` ../missing/file.md"
+            )
+        );
+    }
 }
