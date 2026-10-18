@@ -1,6 +1,6 @@
 # Proposal: the Scopework coordinator
 
-Research and design for unblocked reads, prioritised and merged writes, and tool coordination when several agents work on one project. Follows [the 2026-10-18 work brief](proposal-2026-10-18.md). Research is complete; the design stage is still to do, so the Design section is a draft. Nothing here is implemented yet.
+Research and design for unblocked reads, prioritised and merged writes, and tool coordination when several agents work on one project. Follows [the 2026-10-18 work brief](proposal-2026-10-18.md). Research and design are complete; the alternatives and the reasons for each choice are in [the design document](design-coordinator.md). Nothing here is implemented yet.
 
 ## Requirements
 
@@ -133,7 +133,7 @@ So the per-project writer fits an owner thread. Owner callbacks run in arrival o
 
 **Named pipes, proven in a spike.** A throwaway program in the scratchpad (not the repository) built offline against `windows-sys` 0.61.2, the version already in `Cargo.lock`. One server thread per connection, four concurrent clients and 8,000 JSON-line round trips gave a median of 11 µs (p99 24 µs, max 166 µs). Clients opened the pipe with plain `std::fs::OpenOptions`, so the CLI side needs no foreign API. The server side is about 40 lines of FFI: `CreateNamedPipeW` with remote clients rejected, then `ConnectNamedPipe`. Transport cost is negligible next to a process start (about 11 ms) or a commit (about 300 ms). Opening the pipe from Python was verified in the third pass below.
 
-**Status of this document.** The design stage, which evaluates the alternatives for each major decision against explicit criteria, has not been done. Until it is, the selections under Design below are a draft.
+(At this point the design stage had not been done; it is now in [the design document](design-coordinator.md).)
 
 ### Remaining research questions (2026-10-18, third pass)
 
@@ -316,136 +316,90 @@ Without the window, the same request failed after 30 s (fourth pass).
 
 A coordinator that keeps a hidden window on a dedicated thread can therefore be closed gracefully by the standard files-in-use path during upgrade or uninstall, and by logoff and shutdown. On the query it would stop admitting work; on the end message it would finish the commit in progress (about 0.3 s) and exit. No installer custom action is required for that path. A version handshake is still needed so a newer client retires an older coordinator it finds running.
 
-**Status.** No design assumption remains untested apart from the different-user rejection above. Only the read-during-write rate is unmeasured; phase 1 adds the read log that measures it.
+**Status.** No design assumption remains untested apart from the different-user rejection above, which cannot be produced on this machine without creating a second Windows account; it is covered by a unit test instead. Only the read-during-write rate is unmeasured; phase 1 adds the read log that measures it.
 
-## Design
+## Proposed approach
 
-### One coordinator process per research home
+The alternatives for each decision, the criteria they were judged against and the reasons for each choice are in [the design document](design-coordinator.md). In short:
 
-`research serve` runs one long-lived process per research home. A lock file in the home keeps it single-instance. The first CLI call that finds none starts it detached, the way the GUI already launches import runners. It exits after a configurable idle period. It holds no state that is not also on disk: catalogs, reports and journals stay exactly as today, and crash recovery is still the pending journal.
-
-The CLI keeps its commands and output. When a coordinator is reachable, it sends the command over the pipe and prints the answer; otherwise it runs the command itself as today (**direct mode**). The GUI becomes a client the same way. A `research session` client keeps one pipe open for many commands.
-
-### Reads from immutable snapshots
-
-For each open project, the coordinator holds a **snapshot**: an immutable value containing the committed catalog, its index, sidecars, and report texts loaded on demand for that revision. A commit builds the next snapshot and installs it with a single atomic swap. A reader takes whatever snapshot is current when it starts and keeps it until it finishes, so:
-
-- reads never wait for writes, and writes never wait for reads;
-- an answer always comes from exactly one committed revision; there is no window and no retry;
-- `status`, `node show`, `read-batch` and the GUI stop re-parsing the catalog on every call.
-
-Report texts are cached per revision and evicted by a byte budget. The fourth pass found Solcache suits only writer-side retention, and that in-place report writes need a before-text ordering rule. A commit replaces only the entries it changed. Report files edited outside Scopework are noticed through the existing size-and-modification-time stamps before the coordinator serves their text.
-
-### Pending-write context on reads
-
-Every read answer includes the snapshot `revision` and a `pending` list for the records it returned (not the whole queue). Each entry holds:
-
-- the operation kind and state (`queued` or `running`);
-- who submitted it and the queue position;
-- what it will change: text, status, location, membership or ledger rows.
-
-An agent that needs the result can `wait --revision-above`; one that only reads moves on, informed. The GUI shows the same on the record header and greys editing of a record with a running write.
-
-### Write queues, priorities and merging
-
-The coordinator keeps one queue per **named resource**. Built-in resources are each project's `catalog` and its `ledger`; tools can declare more, such as `ghidra`. Each operation carries a **priority class**:
-
-- **interactive:** GUI actions, single saves and completions;
-- **normal:** typical tool writes;
-- **bulk:** imports, large batches and evidence passes;
-- **job:** long tool runs.
-
-Order is FIFO within a class, with ageing so a lower class is never starved. Running work is never pre-empted.
-
-**Merging.** An operation kind may declare a **merge key**. When a writer finishes, the coordinator takes the head of the queue plus every compatible queued operation with the same key, up to a size bound. Nothing is delayed to wait for more. Each one is validated on its own, in arrival order, against the in-memory state as it stands after the ones before it. Rejected operations get their own error. The accepted ones commit as one transaction: one journal, one catalog write, one fsync. The first merge keys:
-
-- completions;
-- report and evidence saves;
-- claims, flags and review-queue changes;
-- ledger row edits.
-
-The rule for every merged operation is that it would have produced the same result run alone, in that order. Token checks, prerequisites and completion rules are unchanged.
-
-**CPU work** runs on one Solworker runtime per process:
-
-| Class | Work |
-| --- | --- |
-| High | Validating and rendering an interactive batch, building the next snapshot |
-| Mid | Normal-class validation, report hashing for commits |
-| Low | Background index rebuilds, the reference index, bulk evidence passes |
-
-Each project's committing writer is an owner thread (`SWOwner`) that holds the mutable state. Batches validate in parallel with `try_spawn_batch` behind one completion. Snapshots are `SWShared`. A notification route wakes the pipe server when queue or snapshot state changes, and it pushes those events to subscribed clients. The GUI then updates on change instead of polling on a timer. The GUI's and the CLI's own runtimes are replaced by one long-lived runtime per process.
-
-### Tool coordination: declared, not inferred
-
-A tool declares itself in a manifest in the project's `tools/` folder, or with flags on `research job`. The declaration gives the operation kind, the resources it touches, its priority class, and whether queued requests may be merged or collapsed, with the key. Two forms:
-
-- **Coordinator operations** for writes Scopework can perform itself. Ledger `put` and `put-type` become ledger operations. The coordinator validates, merges and writes them, replacing direct file writes and the ledger race with moves.
-- **Leases** for work that stays in the tool's own process, such as headless Ghidra. A tool asks for a lease on its declared resources, waits in the fair queue and releases when done. A collapsible job (an annotation apply, an inventory export) whose request is still queued when an identical job finishes is answered "covered by job N" and never runs twice.
-
-An undeclared tool still works. It can take a plain named lease and gets no merging. Nothing breaks when a tool changes or a new one appears.
-
-**Drift audit.** (The fourth pass found static analysis cannot tell which files a tool writes; drift on shared resources must be detected at runtime, with this static audit only advisory.) `research tools audit PROJECT` reads the current scripts and reports, per tool:
-
-- the files and resources it writes;
-- the CLI commands it calls;
-- the locks it takes.
-
-It flags differences from the declarations, such as a tool writing the ledger without declaring it, or merge candidates. The report is advisory; the coordinator never infers behaviour from it.
-
-The three shared modules are the natural adoption points. `catalog.py` gains the speed-up from the CLI routing alone. A pipe-speaking `catalog.py` would also avoid the process start per call. `annotations.py` and `fresh_re.lock` would move to ledger operations and leases. Those are tooling changes, made by the project's own sessions when they choose.
-
-### The queue counter
-
-The dashboard footer gets a queue pane: running and waiting operations for the selected project, by class (for example `Queue 1 running · 4 waiting`). Hovering or clicking lists each operation: kind, submitter, records or resource, and waiting time. The Research records status bar shows the same for its project. With no coordinator, the pane shows the direct-mode lock queue (`research locks`), so it is never blank or wrong. `research queue PROJECT` gives the same view on the CLI.
-
-### Direct mode and compatibility
-
-Direct mode stays fully correct. It is today's journaled transactions, the fair lock queue and the blocked-recovery reads from the 2026-10-18 work.
-
-The coordinator takes a project's exclusive lock only while it commits, as a direct writer does. Before each commit it checks whether `project.json` changed since its snapshot, and reloads if so. Direct-mode writers, older Scopework versions and external edits therefore stay safe, at the price of a reload. There is only ever one writer at a time per project, whichever path it came through.
-
-Mixed operation is a supported state, not an error. It is also the state during every upgrade.
+- **One coordinator per research home** (`research serve`).
+  - Started by the first client and closed when idle.
+  - Closed gracefully by the standard files-in-use path through a hidden shutdown window, or on request with `research coordinator stop`.
+  - It holds no state that is not on disk; journals remain the crash-recovery record.
+- **Named-pipe transport.**
+  - Pipe name per user and research home.
+  - Owner-only descriptor, remote clients rejected, first-instance creation, and a client check that the server runs as the same user.
+- **Argument passthrough.** The CLI sends its arguments and prints the same answer as in direct mode. A handshake retires an older coordinator, and an older client falls back to direct mode.
+- **Reads from immutable snapshots**, never waiting on a commit.
+  - The before-text rule keeps reads correct while commits rewrite report files in place.
+  - Each answer carries `revision` and per-record `pending` context, with ancestor bookkeeping excluded.
+- **A queue per resource, owned by the writer.**
+  - Four classes (interactive, normal, bulk, job), FIFO within a class, with ageing.
+  - Record operations (completions, saves, flags, claims, review queue) are merged when the writer becomes free, up to 256 operations or 8 MB. Each is validated in queue order, so results equal serial execution.
+  - Structural operations commit alone.
+  - History lists every operation with its submitter.
+- **Tool coordination by generic leases** on named resources.
+  - Optional payload batching: one holder applies all queued ledger edits in one write and one Ghidra apply.
+  - Collapsing: identical idempotent jobs answer "covered by", only by a job that started after the request was queued.
+  - Declarations in a manifest, with flags that override it.
+  - Runtime drift detection on shared resources; the static audit is advisory only.
+- **Direct mode stays correct and available** (`SCOPEWORK_COORDINATOR=off|auto|required`). The coordinator locks a project only to commit, and reloads when another process committed.
+- **Queue counter** in the dashboard footer and `research queue`, fed by pushed events, with the lock queue as the fallback.
+- **Solworker:**
+  - one runtime per process (High, Mid and Low classes);
+  - an owner thread per open project as the writer;
+  - std threads for pipe connections;
+  - a notification route for events.
 
 ## Phasing
 
-1. **Coordinator core.**
-   - `serve`, the pipe protocol, auto-start and idle exit;
-   - snapshot reads with pending context;
-   - per-project write queues with priority classes;
-   - merging for completions and report and evidence saves;
+0. **Changes that help today's agents without a coordinator** (design D9). Each is independently releasable:
+   - **Narrow invalidation:** only complete ancestors and prerequisite consumers are reopened.
+   - **Cheaper fingerprints:** one serialisation, no in-process re-verification. About 190 ms becomes about 40 ms per commit on the live project.
+   - **One Solworker runtime per process.**
+1. **Coordinator core:**
+   - `serve`, pipe and handshake;
+   - auto-start, idle exit, shutdown window and `coordinator stop`;
+   - snapshot reads with the before-text rule and pending context;
+   - writer queues with classes and ageing;
+   - merging of record operations, with per-operation history;
    - CLI and GUI routing with direct-mode fallback;
-   - one Solworker runtime per process;
-   - the footer queue pane.
-2. **Tool coordination.**
-   - ledger operations;
-   - named leases with collapsing;
-   - manifests and `research tools audit`;
-   - an optional pipe client for `catalog.py`.
-3. **Storage.** With all writes coming from one process, incremental catalog writes (open TODO) become possible without changing readers.
+   - the footer queue pane and `research queue`;
+   - a read log (counts) to measure reads during writes.
+2. **Tool coordination:**
+   - leases with payload batching and collapsing;
+   - manifests and flags;
+   - runtime drift detection and `research tools audit`;
+   - pipe clients for `catalog.py` and `annotations.py`, adopted by the project's sessions.
+3. **Storage.** Incremental catalog writes, once all writes come from one process.
 
-Each phase is independently useful and releasable.
+## Acceptance criteria
 
-## Acceptance criteria (phase 1)
+**Phase 0:**
 
-- With a write running, `node show` and `status` answer from the last committed revision without waiting.
-- Answers carry `revision` and a correct `pending` list.
-- A reader never sees a mixed revision, under a concurrent stress test on a small fixture.
-- Forty queued single-record completions commit as fewer transactions than operations. Results and rejections are identical to applying them one by one. Measured on a fixture: commits per second and per-operation latency, before and after.
-- Interactive operations overtake queued bulk ones; bulk ones are not starved.
-- The footer pane and `research queue` agree with the coordinator's queue.
-- Killing the coordinator mid-commit leaves a pending journal that the next coordinator or direct-mode command recovers, exactly as today.
-- With the coordinator absent or a different version, every command works in direct mode.
-- An external `project.json` change is picked up before the next commit.
-- fmt, clippy `-D warnings` and tests pass.
+- Completing or saving a record no longer changes the revision of ancestors that are not complete. Complete ancestors and prerequisite consumers are still reopened, and stale completion, draft and structural tokens are still rejected. Regression tests cover each.
+- An in-process commit serialises the after-catalog once and does not re-read its journal. Crash recovery still verifies both fingerprints; the existing recovery tests pass.
+- One Solworker runtime per process, shared by hashing, GUI snapshots, the browser and imports.
 
-## Risks and open questions
+**Phase 1:**
 
-- **One process becomes critical.** Mitigation: no state outside disk, journal recovery unchanged, direct-mode fallback, and a watchdog restart by the next CLI call. A coordinator bug could still affect every agent at once, which argues for releasing phase 1 behind a `SCOPEWORK_COORDINATOR=off|auto` switch.
-- **Memory.** A snapshot of 31,600 records plus cached report texts is tens of megabytes per open project; the report cache needs a byte budget.
-- **Merging changes failure isolation.** Each operation is still validated alone and gets its own result, but one journal now holds several operations. History must still show each operation with its submitter.
-- **Process starts remain** for tools that call `research.exe` per command until `catalog.py` speaks to the pipe. The routing removes lock waiting, not process creation.
-- **Open:**
-  - the idle-exit period;
-  - whether the GUI may start the coordinator or only connect to it;
-  - whether the coordinator may ever run tool commands itself (proposed: no; leases only).
+- With a write running, `node show` and `status` answer from the last committed revision without waiting. Answers carry `revision` and correct `pending` entries, with bookkeeping excluded.
+- Under a concurrent stress test on a small fixture, no read returns a mixed revision. This includes reads of reports a running commit rewrites.
+- Forty queued record operations commit in fewer transactions than operations, with results and rejections identical to applying them one at a time in queue order. Commits per second and per-operation latency are measured before and after, on a fixture.
+- Interactive operations overtake queued bulk ones; aged bulk operations are not starved.
+- The footer pane, `research queue` and the coordinator's queue agree.
+- Killing the coordinator mid-commit leaves a pending journal that the next coordinator or direct-mode command recovers.
+- A graceful Restart Manager shutdown drains and exits.
+- With the coordinator absent, or a newer or older version present, every command still works.
+- A second server for the same pipe name is refused.
+- A client rejects a server of another user (unit test with a substituted SID).
+- fmt, clippy `-D warnings` and all tests pass.
+
+## Risks
+
+- **One process serves every agent.** A coordinator bug affects all of them at once. Mitigations: no state outside disk, unchanged journal recovery, automatic restart by the next client, and `SCOPEWORK_COORDINATOR=off` as an immediate way back to direct mode.
+- **Merging puts several operations in one journal.** Each keeps its own validation, result and history entry. An I/O failure fails the whole commit, and recovery is unchanged.
+- **The before-text rule is new correctness code.** It is the one place where a mistake could serve a torn answer, so it gets a dedicated concurrent stress test.
+- **Process starts remain** for tools that call `research.exe` per command, until `catalog.py` speaks to the pipe (phase 2). The coordinator removes lock waiting and catalog parsing, not process creation.
+- **Unverified on this machine:** a different-user rejection. It is covered by a unit test only.
+- **Default values** (idle exit, ageing, merge bound, cache budget) are starting points to tune from phase 1 measurements.
