@@ -2131,6 +2131,22 @@ mod background_ui_tests {
         assert!(ui.open);
     }
     #[test]
+    fn one_solworker_runtime_serves_every_class_and_thread() {
+        let here = background::shared().unwrap() as *const _ as usize;
+        let there = std::thread::spawn(|| background::shared().unwrap() as *const _ as usize)
+            .join()
+            .unwrap();
+        assert_eq!(here, there, "one runtime per process");
+        for class in [
+            solworker::SWExecutionClass::Low,
+            solworker::SWExecutionClass::Mid,
+            solworker::SWExecutionClass::High,
+        ] {
+            let task = background::spawn(class, move || 21 * 2).unwrap();
+            assert_eq!(background::join(task).unwrap(), 42);
+        }
+    }
+    #[test]
     fn obsolete_report_load_cannot_replace_current_selection_or_draft() {
         let mut ui = isolated_ui();
         ui.generation = 2;

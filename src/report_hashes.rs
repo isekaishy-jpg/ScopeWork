@@ -106,13 +106,9 @@ fn hash_file(path: &Path) -> Option<String> {
     Some(format!("{:x}", Sha256::digest(&bytes)))
 }
 
-fn bulk_runtime() -> Option<solworker::SWRuntime> {
-    background::runtime(
-        std::thread::available_parallelism()
-            .map_or(2, |n| n.get())
-            .clamp(2, 8),
-    )
-    .ok()
+/// The shared runtime's Low workers for bulk passes, or `None` (serial) if it cannot start.
+fn bulk_runtime() -> Option<&'static solworker::SWRuntime> {
+    background::shared().ok()
 }
 /// Runs `work` over every item, in parallel chunks when a runtime is given and serially
 /// otherwise or after a failed chunk (a panicking chunk leaves its items unprocessed).
@@ -168,7 +164,7 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
     // Metadata calls dominate a warm evaluation on Windows, so bulk evaluations stat in parallel.
     let mut stats: Vec<(&str, Option<(u64, u64)>)> = reports.iter().map(|r| (*r, None)).collect();
     let runtime = bulk.then(bulk_runtime).flatten();
-    for_each(&mut stats, runtime.as_ref(), 64, |entry| {
+    for_each(&mut stats, runtime, 64, |entry| {
         entry.1 = metadata(&dir.join(entry.0))
     });
     for (rel, meta) in stats {
@@ -190,7 +186,7 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
         return out;
     }
     let hashed_ns = now_ns();
-    let parallel = runtime.as_ref().filter(|_| misses.len() >= BULK);
+    let parallel = runtime.filter(|_| misses.len() >= BULK);
     for_each(&mut misses, parallel, 32, |miss| {
         miss.3 = hash_file(&dir.join(&miss.0))
     });
@@ -249,7 +245,7 @@ pub(super) fn mentioning(
     let persisted: HashMap<String, Mentions> = load_persisted(&persisted_path);
     let runtime = (reports.len() >= BULK).then(bulk_runtime).flatten();
     let mut stats: Vec<(&str, Option<(u64, u64)>)> = reports.iter().map(|r| (*r, None)).collect();
-    for_each(&mut stats, runtime.as_ref(), 64, |entry| {
+    for_each(&mut stats, runtime, 64, |entry| {
         entry.1 = metadata(&dir.join(entry.0))
     });
     let mut known: Vec<(String, Mentions)> = vec![];
@@ -268,7 +264,7 @@ pub(super) fn mentioning(
         }
     }
     let read_ns = now_ns();
-    for_each(&mut misses, runtime.as_ref(), 32, |miss| {
+    for_each(&mut misses, runtime, 32, |miss| {
         miss.3 = fs::read(dir.join(&miss.0))
             .ok()
             .map(|bytes| folder_names(&String::from_utf8_lossy(&bytes)))

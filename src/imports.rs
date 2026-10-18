@@ -395,7 +395,6 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
     let project_root = root.join(&job.project);
     job.timings_ms
         .insert("catalog_preparation".into(), elapsed(start));
-    let mut runtime = background::runtime(WORKERS)?;
     let prepared_result = (|| -> Result<bool> {
         job.prepared = 0;
         for (sequence, chunk) in units.chunks(SEGMENT).enumerate() {
@@ -409,9 +408,10 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
             for part in chunk.chunks(chunk.len().div_ceil(WORKERS)) {
                 let part = part.to_vec();
                 let metadata = metadata.clone();
-                tasks.push(background::spawn(&runtime, move || {
-                    render_files(part, &metadata.0, &metadata.1)
-                })?);
+                tasks.push(background::spawn(
+                    solworker::SWExecutionClass::Low,
+                    move || render_files(part, &metadata.0, &metadata.1),
+                )?);
             }
             let mut prepared = vec![];
             for task in tasks {
@@ -482,11 +482,7 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
         }
         Ok(true)
     })();
-    let shutdown = runtime
-        .shutdown()
-        .map_err(|e| format!("Worker shutdown: {e:?}"));
     let ready = prepared_result?;
-    shutdown?;
     if !ready {
         return Ok(());
     }

@@ -4,30 +4,45 @@ use solworker::{
     SWExecutionClass, SWOwnedLimits, SWRuntime, SWRuntimeConfig, SWSpawnOptions, SWTask,
     SWWorkerConfig,
 };
-pub(super) fn runtime(workers: usize) -> Result<SWRuntime> {
-    let config = SWRuntimeConfig::new(
-        workers,
-        [
-            SWWorkerConfig::new(workers),
-            SWWorkerConfig::new(0),
-            SWWorkerConfig::new(0),
-        ],
-    )
-    .map_err(|e| format!("Worker configuration: {e:?}"))?;
-    SWRuntime::builder(config)
-        .with_owned_limits(
-            SWOwnedLimits::new(16, 32, [16; 3], [1; 3])
-                .map_err(|e| format!("Worker capacity: {e:?}"))?,
-        )
-        .build()
-        .map_err(|e| format!("Worker startup: {e:?}"))
+/// The process's one Solworker runtime, created on first use. Low runs bulk work (report
+/// hashing, import rendering), Mid prepares GUI snapshots, High answers interactive browser
+/// queries. Worker counts follow the machine; each class can hand all its workers owned work.
+pub(super) fn shared() -> Result<&'static SWRuntime> {
+    static RUNTIME: std::sync::OnceLock<std::result::Result<SWRuntime, String>> =
+        std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            let low = std::thread::available_parallelism()
+                .map_or(2, |n| n.get().saturating_sub(1))
+                .clamp(2, 8);
+            let (mid, high) = (2, 2);
+            let config = SWRuntimeConfig::new(
+                low + mid + high,
+                [
+                    SWWorkerConfig::new(low),
+                    SWWorkerConfig::new(mid),
+                    SWWorkerConfig::new(high),
+                ],
+            )
+            .map_err(|e| format!("Worker configuration: {e:?}"))?;
+            SWRuntime::builder(config)
+                .with_owned_limits(
+                    SWOwnedLimits::new(64, 64, [32; 3], [low, mid, high])
+                        .map_err(|e| format!("Worker capacity: {e:?}"))?,
+                )
+                .build()
+                .map_err(|e| format!("Worker startup: {e:?}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
+/// Runs `work` as an owned job on the shared runtime's `class` workers.
 pub(super) fn spawn<T: Send + 'static>(
-    runtime: &SWRuntime,
+    class: SWExecutionClass,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<SWTask<T>> {
-    runtime
-        .lane(SWExecutionClass::Low)
+    shared()?
+        .lane(class)
         .try_spawn(SWSpawnOptions::default(), work)
         .map(|(task, _)| task)
         .map_err(|e| format!("Worker admission: {:?}", e.reason))
@@ -190,10 +205,9 @@ pub(super) fn snapshot(
         .into_iter()
         .map(Arc::new)
         .collect::<Vec<_>>();
-    let runtime = runtime(2)?;
     let input = projects.clone();
     let flag_root = root.clone();
-    let browser = join(spawn(&runtime, move || {
+    let browser = join(spawn(SWExecutionClass::Mid, move || {
         input
             .iter()
             .map(|p| {
@@ -245,18 +259,16 @@ pub(super) fn launch_import(root: &Path, project: &str, id: &str) -> Result<()> 
 /// Only the GUI owner pumps this inbox; no CPU task or filesystem work is helped.
 pub(super) struct SnapshotInbox {
     owner: solworker::SWOwner<Option<Result<Snapshot>>>,
-    runtime: SWRuntime,
 }
 impl SnapshotInbox {
     pub fn new() -> Result<Self> {
-        let runtime = runtime(1)?;
-        let mut owner = runtime
+        let mut owner = shared()?
             .owner(None, std::num::NonZeroUsize::new(1).unwrap())
             .map_err(|e| format!("Snapshot owner: {e:?}"))?;
         owner
             .set_phase(solworker::SWPhase(1))
             .map_err(|e| format!("Snapshot phase: {e:?}"))?;
-        Ok(Self { owner, runtime })
+        Ok(Self { owner })
     }
     pub fn sender(&self) -> solworker::SWOwnerSender<Option<Result<Snapshot>>> {
         self.owner.sender()
@@ -270,8 +282,7 @@ impl SnapshotInbox {
 }
 impl Drop for SnapshotInbox {
     fn drop(&mut self) {
+        // The shared runtime outlives this inbox; closing the owner rejects late deliveries.
         self.owner.close();
-        // This runtime has owner callbacks only, no potentially blocking worker jobs.
-        let _ = self.runtime.shutdown();
     }
 }

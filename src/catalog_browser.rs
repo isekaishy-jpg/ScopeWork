@@ -6,7 +6,6 @@ type VisibleRows = Vec<(u64, usize)>;
 #[derive(Default)]
 pub(super) struct Browser {
     data: std::sync::Arc<BrowserData>,
-    runtime: Option<solworker::SWRuntime>,
     pending: Option<(u64, solworker::SWTask<VisibleRows>)>,
     generation: u64,
     selection_generation: u64,
@@ -129,29 +128,21 @@ impl Browser {
             self.pending = None;
         }
         if self.pending.is_none() && self.selection_generation != self.generation {
-            if self.runtime.is_none() {
-                match background::runtime(1) {
-                    Ok(runtime) => self.runtime = Some(runtime),
-                    Err(e) => self.error = Some(e),
+            let data = self.data.clone();
+            let expanded = self.expanded.clone();
+            let focus = self.focus;
+            let flagged = self.flagged_only;
+            let queued = self.queued_only;
+            let query = self.query.trim().to_lowercase();
+            match background::spawn(solworker::SWExecutionClass::High, move || {
+                data.visible(&expanded, focus, flagged, queued, &query)
+            }) {
+                Ok(task) => {
+                    self.pending = Some((self.generation, task));
+                    self.selection_generation = self.generation;
                 }
-            }
-            if let Some(runtime) = &self.runtime {
-                let data = self.data.clone();
-                let expanded = self.expanded.clone();
-                let focus = self.focus;
-                let flagged = self.flagged_only;
-                let queued = self.queued_only;
-                let query = self.query.trim().to_lowercase();
-                match background::spawn(runtime, move || {
-                    data.visible(&expanded, focus, flagged, queued, &query)
-                }) {
-                    Ok(task) => {
-                        self.pending = Some((self.generation, task));
-                        self.selection_generation = self.generation;
-                    }
-                    Err(e) => {
-                        ui.label(e);
-                    }
+                Err(e) => {
+                    ui.label(e);
                 }
             }
         }
