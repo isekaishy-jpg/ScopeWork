@@ -225,37 +225,26 @@ impl Library {
                 }
             }
         }
-        let mut queue: Vec<_> = changed.iter().copied().collect();
-        let mut invalid = HashSet::new();
-        let mut dependents: HashMap<u64, Vec<u64>> = HashMap::new();
-        for e in &before.dependencies {
-            dependents
-                .entry(e.prerequisite)
-                .or_default()
-                .push(e.dependent);
-        }
-        while let Some(id) = queue.pop() {
-            if !invalid.insert(id) {
-                continue;
-            }
-            if let Some(parent) = old.nodes[&id].parent {
-                queue.push(parent);
-            }
-            if let Some(consumers) = dependents.get(&id) {
-                queue.extend(consumers);
-            }
-        }
         drop(new);
+        // Changed (edited) surviving records need review, and so do the complete records the
+        // change reaches, including the old parents of removed records.
+        let edited: HashSet<u64> = changed
+            .iter()
+            .copied()
+            .filter(|id| !removed.contains(id))
+            .collect();
         for n in &mut after.nodes {
-            if invalid.contains(&n.id) {
-                n.revision += 1;
-                n.accepted_hash = None;
-                n.accepted_prerequisites.clear();
-                if n.status == Status::Complete {
-                    n.status = Status::InProgress;
-                }
+            if edited.contains(&n.id) {
+                reopen::mark_changed(n, None);
             }
         }
+        let old_parents: HashMap<u64, u64> = removed
+            .iter()
+            .filter_map(|id| Some((*id, old.nodes[id].parent?)))
+            .collect();
+        let consumers = reopen::consumers_of(&before.dependencies);
+        let reached = reopen::reopen_affected(&mut after, &changed, &old_parents, &consumers);
+        let invalid: HashSet<u64> = edited.iter().copied().chain(reached).collect();
         let mut dependencies: Vec<_> = removed_dependencies
             .iter()
             .flat_map(|e| [e.dependent, e.prerequisite])

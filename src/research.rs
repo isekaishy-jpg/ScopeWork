@@ -114,6 +114,8 @@ mod layout;
 mod ledger;
 #[path = "records_ui.rs"]
 mod records_ui;
+#[path = "reopen.rs"]
+mod reopen;
 #[path = "report_hashes.rs"]
 mod report_hashes;
 pub use catalog_batch::Batch;
@@ -1017,25 +1019,15 @@ impl Library {
             .ok_or("Evidence marker missing")?;
         Ok((body.to_string(), evidence.to_string()))
     }
-    fn invalidate(&mut self, p: usize, id: u64) {
-        let mut cursor = self.projects[p]
-            .nodes
-            .iter()
-            .find(|n| n.id == id)
-            .and_then(|n| n.parent);
-        while let Some(parent) = cursor {
-            let n = self.projects[p]
-                .nodes
-                .iter_mut()
-                .find(|n| n.id == parent)
-                .unwrap();
-            if n.status == Status::Complete {
-                n.status = Status::InProgress;
-            }
-            n.accepted_hash = None;
-            n.revision += 1;
-            cursor = n.parent;
-        }
+    /// Reopens the complete records a change to `id` reaches (see `reopen.rs`).
+    fn reopen_affected(&mut self, p: usize, id: u64) {
+        let consumers = reopen::consumers_of(&self.projects[p].dependencies);
+        reopen::reopen_affected(
+            &mut self.projects[p],
+            &[id].into(),
+            &Default::default(),
+            &consumers,
+        );
     }
     pub fn effective_all(&self, p: usize) -> std::collections::HashMap<u64, Status> {
         catalog_index::Index::new(&self.projects[p]).states(&self.dir(p))
@@ -1294,8 +1286,7 @@ impl Library {
         n.accepted_hash = complete.then(|| hash(&report));
         n.accepted_prerequisites = stamps;
         n.revision += 1;
-        self.invalidate(p, id);
-        self.invalidate_dependents(p, id);
+        self.reopen_affected(p, id);
         self.projects[p].revision += 1;
         let after = std::mem::replace(&mut self.projects[p], before.clone());
         self.commit_report(p, before, after, id, original, report)
@@ -1893,35 +1884,6 @@ impl Library {
             })
             .collect()
     }
-    fn invalidate_dependents(&mut self, p: usize, id: u64) {
-        let mut queue = vec![id];
-        let mut seen = std::collections::HashSet::new();
-        while let Some(source) = queue.pop() {
-            let targets: Vec<_> = self.projects[p]
-                .dependencies
-                .iter()
-                .filter(|e| e.prerequisite == source)
-                .map(|e| e.dependent)
-                .collect();
-            for target in targets {
-                if seen.insert(target) {
-                    let n = self.projects[p]
-                        .nodes
-                        .iter_mut()
-                        .find(|n| n.id == target)
-                        .unwrap();
-                    if n.status == Status::Complete {
-                        n.status = Status::InProgress;
-                    }
-                    n.accepted_hash = None;
-                    n.accepted_prerequisites.clear();
-                    n.revision += 1;
-                    self.invalidate(p, target);
-                    queue.push(target);
-                }
-            }
-        }
-    }
     pub fn set_dependencies(&mut self, p: usize, id: u64, rvas: &str) -> Result<()> {
         if !self.writable(p) {
             return self.write_project(p, |l, p| l.set_dependencies(p, id, rvas));
@@ -1985,8 +1947,7 @@ impl Library {
         n.accepted_hash = None;
         n.accepted_prerequisites.clear();
         n.revision += 1;
-        self.invalidate(p, id);
-        self.invalidate_dependents(p, id);
+        self.reopen_affected(p, id);
         self.projects[p].revision += 1;
         let after = std::mem::replace(&mut self.projects[p], before.clone());
         self.commit_metadata(p, before, after, vec![], affected.into_iter().collect())

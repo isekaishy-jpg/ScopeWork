@@ -642,27 +642,7 @@ fn publish(
             .filter(|id| old_index.nodes.contains_key(id))
             .collect();
         let mut edits = vec![];
-        let mut invalid = HashSet::new();
-        let mut queue: Vec<_> = parents.iter().copied().collect();
-        let mut consumers: HashMap<u64, Vec<u64>> = HashMap::new();
-        for edge in &after.dependencies {
-            consumers
-                .entry(edge.prerequisite)
-                .or_default()
-                .push(edge.dependent);
-        }
-        while let Some(id) = queue.pop() {
-            if !invalid.insert(id) {
-                continue;
-            }
-            if let Some(parent) = index.nodes[&id].parent {
-                queue.push(parent);
-            }
-            if let Some(users) = consumers.get(&id) {
-                queue.extend(users);
-            }
-        }
-        for id in parents {
+        for id in parents.iter().copied() {
             let path = &index.paths[&id];
             let original =
                 fs::read_to_string(project_root.join(path)).map_err(|e| e.to_string())?;
@@ -676,16 +656,14 @@ fn publish(
         }
         drop(index);
         drop(lib);
+        // Parents gain source links; complete records they reach need review again.
         for node in &mut after.nodes {
-            if invalid.contains(&node.id) {
-                node.accepted_hash = None;
-                node.accepted_prerequisites.clear();
-                node.revision += 1;
-                if node.status == Status::Complete {
-                    node.status = Status::InProgress;
-                }
+            if parents.contains(&node.id) {
+                reopen::mark_changed(node, None);
             }
         }
+        let consumers = reopen::consumers_of(&after.dependencies);
+        reopen::reopen_affected(&mut after, &parents, &HashMap::new(), &consumers);
         after.revision += 1;
         after.structural_epoch += 1;
         after.active_import = None;

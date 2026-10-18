@@ -634,43 +634,15 @@ impl Library {
         if changed.is_empty() {
             return Ok(changed);
         }
-        let mut dependents: HashMap<u64, Vec<u64>> = HashMap::new();
-        for edge in &before.dependencies {
-            dependents
-                .entry(edge.prerequisite)
-                .or_default()
-                .push(edge.dependent);
-        }
-        let mut invalid = HashSet::new();
-        let mut queue = changed.clone();
-        while let Some(id) = queue.pop() {
-            if !invalid.insert(id) {
-                continue;
-            }
-            if let Some(parent) = index.nodes[&id].parent {
-                queue.push(parent);
-            }
-            if let Some(consumers) = dependents.get(&id) {
-                queue.extend(consumers);
-            }
-        }
         let mut after = before.clone();
+        let edited: HashSet<u64> = changed.iter().copied().collect();
         for node in &mut after.nodes {
-            if invalid.contains(&node.id) {
-                node.revision += 1;
-                node.accepted_hash = None;
-                node.accepted_prerequisites.clear();
-                node.status =
-                    statuses
-                        .get(&node.id)
-                        .copied()
-                        .unwrap_or(if node.status == Status::Complete {
-                            Status::InProgress
-                        } else {
-                            node.status
-                        });
+            if edited.contains(&node.id) {
+                reopen::mark_changed(node, statuses.get(&node.id).copied());
             }
         }
+        let consumers = reopen::consumers_of(&before.dependencies);
+        reopen::reopen_affected(&mut after, &edited, &HashMap::new(), &consumers);
         after.revision += 1;
         let journal = Journal {
             before,
@@ -965,30 +937,16 @@ impl Library {
                 });
             }
         }
-        // Changed ownership, membership, ordering or linked evidence requires review up both old and new trees.
-        let mut queue: Vec<_> = changed.iter().copied().collect();
-        let mut invalid = HashSet::new();
-        let mut dependents: HashMap<u64, Vec<u64>> = HashMap::new();
-        for e in &after.dependencies {
-            dependents
-                .entry(e.prerequisite)
-                .or_default()
-                .push(e.dependent);
-        }
-        while let Some(id) = queue.pop() {
-            if !invalid.insert(id) {
-                continue;
-            }
-            if let Some(parent) = old.nodes.get(&id).and_then(|n| n.parent) {
-                queue.push(parent);
-            }
-            if let Some(parent) = new.nodes.get(&id).and_then(|n| n.parent) {
-                queue.push(parent);
-            }
-            if let Some(targets) = dependents.get(&id) {
-                queue.extend(targets);
-            }
-        }
+        // Changed ownership, membership, ordering or linked evidence requires review of the changed
+        // records and of the complete records they reach, up both old and new trees.
+        let old_parents: HashMap<u64, u64> = old
+            .nodes
+            .iter()
+            .filter_map(|(id, n)| {
+                let parent = n.parent?;
+                (new.nodes.get(id).and_then(|m| m.parent) != Some(parent)).then_some((*id, parent))
+            })
+            .collect();
         let mut dependencies: HashSet<u64> = created
             .iter()
             .copied()
@@ -1006,16 +964,18 @@ impl Library {
             }
         }
         drop(new);
+        let existing: HashSet<u64> = changed
+            .iter()
+            .copied()
+            .filter(|id| old.nodes.contains_key(id))
+            .collect();
         for n in &mut after.nodes {
-            if invalid.contains(&n.id) && old.nodes.contains_key(&n.id) {
-                n.revision += 1;
-                n.accepted_hash = None;
-                n.accepted_prerequisites.clear();
-                if n.status == Status::Complete {
-                    n.status = Status::InProgress;
-                }
+            if existing.contains(&n.id) {
+                reopen::mark_changed(n, None);
             }
         }
+        let consumers = reopen::consumers_of(&after.dependencies);
+        let reached = reopen::reopen_affected(&mut after, &existing, &old_parents, &consumers);
         after.revision += 1;
         after.layout_version = before.layout_version.max(3);
         after.structural_epoch += 1;
@@ -1024,8 +984,9 @@ impl Library {
         let reopened: Vec<u64> = before
             .nodes
             .iter()
-            .filter(|n| n.status == Status::Complete && invalid.contains(&n.id))
+            .filter(|n| n.status == Status::Complete && existing.contains(&n.id))
             .map(|n| n.id)
+            .chain(reached)
             .collect();
         if !reopened.is_empty() {
             let moved: Vec<u64> = batch
