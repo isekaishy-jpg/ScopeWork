@@ -41,3 +41,7 @@ Resolved on main, unreleased (2026-10-18): commits 39c3cfd, 284e646 and 065ecf8;
 
 - [ ] **Shared worker runtime.** Report hashing and GUI snapshots start a Solworker runtime (up to 8 threads) per bulk call and per refresh. Reuse one per process if Solworker supports concurrent use from several threads.
 - [ ] **Reclaim ledger copies on the live project.** `research journal wow-335a-12340 --compact-sidecars` would reclaim about 14.2 GB of the 15.3 GB transaction history. It is irreversible for those historical bytes, so it is the user's call; run it with the new version installed and no session writing.
+
+Recorded 2026-10-18 (research pass done, not implemented):
+
+- [ ] **Coordinator.** One coordinator process per research home: reads from immutable snapshots that a write never blocks, with pending-write context; per-resource priority queues with merged same-kind operations; declared tool operations and leases with a drift audit; a queue counter in the dashboard footer; one Solworker runtime per process. Proposal, measurements and phasing: docs/proposal-coordinator.md. Supersedes the open operation-queue and shared-worker-runtime items above once implemented.
