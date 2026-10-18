@@ -287,7 +287,36 @@ Many unresolvable targets are per-run output folders, but static analysis cannot
 
 Drift detection for shared resources (catalog, ledger, sidecars, reports, the Ghidra project) must be runtime: the coordinator records any change to them made outside a declared operation or held lease, with the lease holders at that time. The static audit stays an advisory report of module and command usage.
 
-**Status.** Research for the design stage is complete. The rate of reads that land on a record during a write cannot be measured without a read log, which phase 1 adds. Two items stay assumptions until implementation: the pipe first-instance and same-user client check, and the hidden-window shutdown alternative.
+**Status.** Two items remained assumptions after this pass: the pipe first-instance and same-user client check, and the hidden-window shutdown alternative. The fifth pass below tests both.
+
+### Last two assumptions tested (2026-10-18, fifth pass)
+
+Both were tested in the scratchpad spike (not the repository), built offline against the `windows-sys` version already in `Cargo.lock`.
+
+**Pipe-name squatting and server identity.**
+
+| Check | Result |
+| --- | --- |
+| Creating the pipe with `FILE_FLAG_FIRST_PIPE_INSTANCE` while another handle already holds the name | Refused with access denied (error 5); an impostor that got there first is detected. |
+| The same flag on a free name | Succeeds. |
+| Further instances by the same server | Allowed, so concurrent clients still work. |
+| Client lookup of the serving process (`GetNamedPipeServerProcessId`, Rust and Python ctypes) | Returns the server's process ID. The client then compared that process's user SID with its own; in Python this ran across two separate processes. |
+
+Limit: only the matching-user case could be exercised, because this machine has a single interactive account; a rejection of a different user was not produced. The client check must also handle a server process that has already exited.
+
+**Graceful shutdown through a hidden window.** The spike ran as a windowless background process started with `CREATE_NO_WINDOW`, like the earlier test, but owning a hidden top-level window with a message loop.
+
+| Step | Result |
+| --- | --- |
+| Classification | Still `RmConsole`, not restartable |
+| Messages delivered by graceful `RmShutdown` | `WM_QUERYENDSESSION` (with `ENDSESSION_CLOSEAPP`), then `WM_ENDSESSION` |
+| Outcome | The process recorded "drained and exiting" and exited with code 0; `RmShutdown` returned success in 0.4 s |
+
+Without the window, the same request failed after 30 s (fourth pass).
+
+A coordinator that keeps a hidden window on a dedicated thread can therefore be closed gracefully by the standard files-in-use path during upgrade or uninstall, and by logoff and shutdown. On the query it would stop admitting work; on the end message it would finish the commit in progress (about 0.3 s) and exit. No installer custom action is required for that path. A version handshake is still needed so a newer client retires an older coordinator it finds running.
+
+**Status.** No design assumption remains untested apart from the different-user rejection above. Only the read-during-write rate is unmeasured; phase 1 adds the read log that measures it.
 
 ## Design
 
