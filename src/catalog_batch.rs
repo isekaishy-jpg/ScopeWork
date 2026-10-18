@@ -178,6 +178,38 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
             "Catalog changed during batch transaction".into(),
         ));
     }
+    finish(root, project, &j, None)
+}
+
+/// Commits a transaction this process has just built: writes its pending journal, then
+/// applies it. Unlike recovery, the journal is not read back and re-verified, and the
+/// after-catalog is serialised once for its fingerprint and the catalog write. Returns how
+/// many annotation-ledger report paths it repathed.
+fn commit(root: &Path, project: &mut Project, j: &Journal) -> Result<usize> {
+    let (delta, after_bytes) = journal_history::pending_delta(j)?;
+    let folder = prepare_pending(root)?;
+    atomic(
+        &folder.join("journal.json"),
+        &serde_json::to_vec(&delta).map_err(|e| e.to_string())?,
+    )?;
+    #[cfg(debug_assertions)]
+    if std::env::var("SCOPEWORK_METADATA_FAIL_AT").as_deref() == Ok("journal") {
+        std::process::exit(99);
+    }
+    fault("journal");
+    finish(root, project, j, Some((delta, after_bytes)))
+}
+
+/// Applies a pending journal's reports, moves, sidecars and catalog, then turns the pending
+/// folder into the completed receipt. `prepared` carries the delta and after-catalog bytes
+/// when the caller built them in memory; recovery passes `None` and re-derives both.
+fn finish(
+    root: &Path,
+    project: &mut Project,
+    j: &Journal,
+    prepared: Option<(serde_json::Value, Vec<u8>)>,
+) -> Result<usize> {
+    let folder = pending(root);
     // All existing reports must still match a recorded input or output before resuming.
     for edit in &j.edits {
         let candidates = [
@@ -301,7 +333,11 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
     if !j.dependencies.is_empty() {
         temporary.sync_dependency_subset(0, Some(&j.dependencies.iter().copied().collect()))?;
     }
-    atomic(&root.join("project.json"), &catalog_bytes(&j.after)?)?;
+    let (delta, after_bytes) = match prepared {
+        Some((delta, bytes)) => (Some(delta), bytes),
+        None => (None, catalog_bytes(&j.after)?),
+    };
+    atomic(&root.join("project.json"), &after_bytes)?;
     *project = j.after.clone();
     fault("catalog");
     let receipt = folder.with_file_name(format!("revision-{}", project.revision));
@@ -309,7 +345,16 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
         return Err("Batch receipt already exists; preserve the pending journal.".into());
     }
     rename_retrying(&folder, &receipt).map_err(|e| at(&folder, e))?;
-    journal_history::compact(&receipt.join("journal.json"), &j)?;
+    match delta {
+        Some(mut delta) => {
+            delta["kind"] = "completed-catalog-delta".into();
+            atomic(
+                &receipt.join("journal.json"),
+                &serde_json::to_vec(&delta).map_err(|e| e.to_string())?,
+            )?;
+        }
+        None => journal_history::compact(&receipt.join("journal.json"), j)?,
+    }
     Ok(ledger_rows)
 }
 
@@ -390,12 +435,7 @@ impl Library {
             }],
             ledger: false,
         };
-        let folder = prepare_pending(&root)?;
-        atomic(
-            &folder.join("journal.json"),
-            &journal_history::pending_bytes(&journal)?,
-        )?;
-        resume(&root, &mut self.projects[p]).map(|_| ())
+        commit(&root, &mut self.projects[p], &journal).map(|_| ())
     }
 }
 impl Library {
@@ -428,12 +468,7 @@ impl Library {
             }],
             ledger: false,
         };
-        let folder = prepare_pending(&root)?;
-        atomic(
-            &folder.join("journal.json"),
-            &journal_history::pending_bytes(&journal)?,
-        )?;
-        resume(&root, &mut self.projects[p]).map(|_| ())
+        commit(&root, &mut self.projects[p], &journal).map(|_| ())
     }
 }
 /// Return started-but-incomplete records to Not Started (for example after generated evidence was attached).
@@ -531,16 +566,7 @@ impl Library {
             ledger: false,
         };
         let root = self.dir(p);
-        let folder = prepare_pending(&root)?;
-        atomic(
-            &folder.join("journal.json"),
-            &journal_history::pending_bytes(&journal)?,
-        )?;
-        #[cfg(debug_assertions)]
-        if std::env::var("SCOPEWORK_METADATA_FAIL_AT").as_deref() == Ok("journal") {
-            std::process::exit(99);
-        }
-        resume(&root, &mut self.projects[p]).map(|_| ())
+        commit(&root, &mut self.projects[p], &journal).map(|_| ())
     }
     pub fn read_reports(&self, p: usize, ids: &[u64]) -> Result<serde_json::Value> {
         let project = &self.projects[p];
@@ -653,12 +679,7 @@ impl Library {
             sidecars: vec![],
             ledger: false,
         };
-        let folder = prepare_pending(&root)?;
-        atomic(
-            &folder.join("journal.json"),
-            &journal_history::pending_bytes(&journal)?,
-        )?;
-        resume(&root, &mut self.projects[p])?;
+        commit(&root, &mut self.projects[p], &journal)?;
         Ok(changed)
     }
 
@@ -1022,17 +1043,7 @@ impl Library {
             dependencies: dependencies.into_iter().collect(),
             sidecars,
         };
-        let folder = pending(&root);
-        contained(&root, &folder)?;
-        if folder.exists() {
-            return Err("Pending catalog transaction exists; reopen to resume it".into());
-        }
-        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-        atomic(
-            &folder.join("journal.json"),
-            &journal_history::pending_bytes(&j)?,
-        )?;
-        let ledger_rows_repathed = resume(&root, &mut self.projects[p])?;
+        let ledger_rows_repathed = commit(&root, &mut self.projects[p], &j)?;
         Ok(BatchOutcome {
             created,
             moved,
@@ -1382,6 +1393,36 @@ mod tests {
             let recovered = journal_history::read_pending(&bytes, current).unwrap();
             assert!(same(&recovered.before, &rearranged.before));
             assert!(same(&recovered.after, &rearranged.after));
+        }
+    }
+
+    #[test]
+    fn single_serialisation_gives_the_fingerprints_recovery_checks() {
+        let workspace = Workspace::new();
+        let lib = workspace.populate("alpha");
+        let before = lib.projects[0].clone();
+        let mut after = before.clone();
+        after.nodes[3].name = "Renamed".into();
+        after.revision += 1;
+        let j = Journal {
+            before: before.clone(),
+            after: after.clone(),
+            edits: vec![],
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![],
+            ledger: false,
+        };
+        let (delta, bytes) = journal_history::pending_delta(&j).unwrap();
+        assert_eq!(bytes, catalog_bytes(&after).unwrap());
+        assert_eq!(
+            serde_json::to_vec(&delta).unwrap(),
+            journal_history::pending_bytes(&j).unwrap()
+        );
+        let pending = serde_json::to_vec(&delta).unwrap();
+        for current in [&before, &after] {
+            let recovered = journal_history::read_pending(&pending, current).unwrap();
+            assert!(same(&recovered.before, &before) && same(&recovered.after, &after));
         }
     }
 

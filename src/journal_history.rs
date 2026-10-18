@@ -67,6 +67,16 @@ fn record_changes<T: PartialEq + Serialize, K: Eq + std::hash::Hash>(
     Ok(json!({"before": removed, "after": added}))
 }
 fn delta(j: &Journal) -> Result<Value> {
+    Ok(delta_with_after(j)?.0)
+}
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+/// The delta receipt plus the after-catalog's bytes (`catalog_bytes`), serialised once and
+/// used both for the after fingerprint and, by `commit`, for writing `project.json`.
+fn delta_with_after(j: &Journal) -> Result<(Value, Vec<u8>)> {
+    let after_bytes = catalog_bytes(&j.after)?;
     let mut changes = serde_json::Map::new();
     changes.insert(
         "nodes".into(),
@@ -78,18 +88,23 @@ fn delta(j: &Journal) -> Result<Value> {
             (d.dependent, d.prerequisite)
         })?,
     );
-    Ok(
+    Ok((
         json!({"schema":1,"kind":"completed-catalog-delta","before":header(&j.before)?,"after":header(&j.after)?,"changes":changes,
-        "before_hash":hash(&serde_json::to_string(&j.before).map_err(|e|e.to_string())?),
-        "after_hash":hash(&serde_json::to_string(&j.after).map_err(|e|e.to_string())?),
+        "before_hash":sha256(&catalog_bytes(&j.before)?),
+        "after_hash":sha256(&after_bytes),
         "edits":j.edits,"moves":j.moves,"dependencies":j.dependencies,"sidecars":j.sidecars,"ledger":j.ledger}),
-    )
+        after_bytes,
+    ))
 }
 
 pub(super) fn pending_bytes(j: &Journal) -> Result<Vec<u8>> {
-    let mut value = delta(j)?;
+    serde_json::to_vec(&pending_delta(j)?.0).map_err(|e| e.to_string())
+}
+/// The pending journal value and the after-catalog bytes, for an in-process commit.
+pub(super) fn pending_delta(j: &Journal) -> Result<(Value, Vec<u8>)> {
+    let (mut value, after) = delta_with_after(j)?;
     value["kind"] = "pending-catalog-delta".into();
-    serde_json::to_vec(&value).map_err(|e| e.to_string())
+    Ok((value, after))
 }
 
 pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {

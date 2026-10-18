@@ -349,6 +349,10 @@ Mixed versions: 0.8.0 writers that still bump every ancestor remain correct alon
 
 `journal_history::pending_bytes` takes the before-catalog fingerprint from the bytes read when the project was opened for writing, kept on the `Library`, and the after-catalog bytes from the single serialisation. The journal format is unchanged, so older versions can still recover new journals.
 
+*Implementation note (phase 0.2).*
+- **The before fingerprint is still computed by serialising the catalog.** Catalogs written by older versions or by migration are pretty-printed, while recovery fingerprints the compact serialisation, so the bytes read at open cannot stand in for it.
+- **Measured on a copy of the live catalog:** building the journal now takes about 112 ms, against about 200 ms before (journal 95 ms, re-verification 93 ms, compare 3 ms, second serialisation about 9 ms). That saves about 90 ms per commit, not the estimated 150 ms. The rest is the delta itself and its two hashes, which leaves room for the faster fingerprint listed under the future extension path.
+
 **0.3 One Solworker runtime per process** (design D9.3).
 
 A process-wide runtime, created on first use, replaces the per-call runtimes:

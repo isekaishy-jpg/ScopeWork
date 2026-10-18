@@ -345,9 +345,7 @@ impl Library {
                 {
                     coordination::ensure(&root, coordination::REVIEW_QUEUE, "entries")?;
                 }
-                let folder = prepare_pending(&root)?;
-                atomic(&folder.join("journal.json"), &bytes)?;
-                resume(&root, &mut self.projects[p])?;
+                commit(&root, &mut self.projects[p], &j)?;
             }
         }
         Ok(
