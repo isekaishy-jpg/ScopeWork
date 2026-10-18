@@ -1,6 +1,6 @@
 # Proposal: the Scopework coordinator
 
-Research and design for unblocked reads, prioritised and merged writes, and tool coordination when several agents work on one project. Follows [the 2026-10-18 work brief](proposal-2026-10-18.md). This is a proposal; nothing here is implemented yet.
+Research and design for unblocked reads, prioritised and merged writes, and tool coordination when several agents work on one project. Follows [the 2026-10-18 work brief](proposal-2026-10-18.md). Research is complete; the design stage is still to do, so the Design section is a draft. Nothing here is implemented yet.
 
 ## Requirements
 
@@ -75,6 +75,65 @@ Solworker schedules work inside one process. Every agent command is its own `res
 | Spool folder of request files | Filesystem permissions. | Polling latency; many small files. |
 
 Named pipes are selected. They are the platform's intended local IPC, carry the user's identity, and add no new crate.
+
+### Closing the research gaps (2026-10-18, second pass)
+
+**Commit cost after the work-brief fixes.** The one-per-second figures above come from 0.8.0, so the new build was timed two ways.
+
+On a disposable 100-function fixture (release build, wall time per command including process start):
+
+| Command | Median | p90 |
+| --- | --- | --- |
+| `project revision` (process start and open) | 11 ms | 13 ms |
+| `node show` | 12 ms | 14 ms |
+| `node save` | 44 ms | 53 ms |
+| `node complete` | 40 ms | 47 ms |
+
+At the live project's size, measured in memory on a copy of its 7.8 MB catalog with a temporary test that was not committed:
+
+| Commit step | Time |
+| --- | --- |
+| Build the index | 30 ms |
+| Journal delta with both catalog fingerprints | 93–103 ms |
+| Verify the journal against the catalog | 93–96 ms |
+| Compare catalogs | 3 ms |
+| Write and fsync the catalog | 26–27 ms |
+
+With opening the catalog (parse 21 ms plus validation), a commit on the live project now costs roughly 0.3–0.4 s of fixed work, before any report reads. The four full-catalog serialise-and-hash passes used as fingerprints are the largest single part, about 190 ms. That fixed cost is the same for one operation or many, so merging still multiplies throughput. Cheaper fingerprints (hashing the changed records plus a running catalog digest) are a separate, smaller gain worth weighing in the design.
+
+**Which records commits touch.** In the last 1,959 commits:
+- the median commit changed 4 records (p90 also 4);
+- 85% of commits changed the App record, an architecture and a chunk.
+
+Completing or saving a function bumps the revision of every ancestor and clears its acceptance, even when those ancestors are not complete. The 137 minutes sampled had sessions in 13 architectures (one architecture had 773 of the commits), but every session's commits touched the same ancestors.
+
+Consequences for the design:
+- **Pending context needs a distinction.** Without one, a read of the App or an architecture would almost always show a pending write. Context must separate bookkeeping (an ancestor's revision bump) from changes to the record's own content, status or place.
+- **Record-level preconditions conflict on ancestors.** A schema-2 precondition on a chunk or architecture conflicts with nearly every commit beneath it. Preconditions on functions, which is the common move, are unaffected.
+- **Ancestor bumps merge cleanly.** They commute, so merged completions under one architecture share them.
+- **Some bumps may be unnecessary.** Bumping ancestors that are not complete appears unnecessary for correctness: draft tokens use lineage, not revisions, and completion tokens include child states. Removing those bumps would cut conflicts and noise. This needs its own correctness review in the design stage.
+
+**Reads during writes.** Reads are not logged anywhere, so how often a read lands on a record under a running write cannot be measured from history. Proxies:
+- `catalog.py` always reads a record (`node show`) immediately before writing it, so every tool write is preceded by a read of the same record;
+- with ancestors touched by 85% of commits at about 14 commits per minute, a read of the App or an architecture coincides with a write most of the time.
+
+Measuring it directly needs a read log, which phase 1 should add (counts only).
+
+**Solworker mechanisms, checked in source** (pinned revision `273b45b`):
+
+| Mechanism | What the source confirms |
+| --- | --- |
+| `SWRuntime::owner(state, capacity)` | Creates a thread-bound owner whose state need not be `Send`. |
+| `SWOwnerSender::try_post(phase, FnOnce(&mut O))` | Bounded and reserved before acceptance; returns an observable delivery; the callback runs on the owner thread. |
+| `SWLane::try_spawn_batch` | Takes owned `'static` closures, in bounded portions, with explicit partial rejection; it never runs inline. |
+| `notification_route` | Takes a `Fn() -> io::Result<()> + Send + Sync` signal. |
+| `SWTask::into_shared` | Gives `SWShared` for `Send + Sync` results. |
+
+So the per-project writer fits an owner thread. Owner callbacks run in arrival order, though, so priority classes and merging must be the writer's own queue state, with posted callbacks only enqueueing. That matches Solworker's guidance: application order lives in the application, CPU work goes on lanes. Batched validation needs the inputs owned, which an `Arc` snapshot provides.
+
+**Named pipes, proven in a spike.** A throwaway program in the scratchpad (not the repository) built offline against `windows-sys` 0.61.2, the version already in `Cargo.lock`. One server thread per connection, four concurrent clients and 8,000 JSON-line round trips gave a median of 11 µs (p99 24 µs, max 166 µs). Clients opened the pipe with plain `std::fs::OpenOptions`, so the CLI side needs no foreign API. The server side is about 40 lines of FFI: `CreateNamedPipeW` with remote clients rejected, then `ConnectNamedPipe`. Transport cost is negligible next to a process start (about 11 ms) or a commit (about 300 ms). Not verified: opening the pipe from Python, which Windows supports as an ordinary file open; this matters only for a later pipe-speaking `catalog.py`.
+
+**Status of this document.** The research is now complete. The design stage, which evaluates the alternatives for each major decision against explicit criteria, has not been done. Until it is, the selections under Design below are a draft.
 
 ## Design
 
