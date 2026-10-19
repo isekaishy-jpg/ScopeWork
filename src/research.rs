@@ -1416,6 +1416,10 @@ pub struct ResearchUi {
     confirm_complete: bool,
     reviewed: bool,
     new_project_open: bool,
+    /// Write queues of the projects on screen, started once the research home is known.
+    queue: Option<crate::queue_watch::QueueWatch>,
+    /// The project whose queue list is open.
+    queue_open: Option<String>,
 }
 impl Default for ResearchUi {
     fn default() -> Self {
@@ -1471,6 +1475,8 @@ impl ResearchUi {
             confirm_complete: false,
             reviewed: false,
             new_project_open: false,
+            queue: None,
+            queue_open: None,
         }
     }
     fn load(&mut self, p: usize, id: u64) {
@@ -1537,6 +1543,15 @@ impl ResearchUi {
     pub fn poll(&mut self, ctx: &egui::Context) {
         use std::sync::mpsc::TryRecvError;
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        if self.queue.is_none()
+            && let Some(home) = self.root.as_ref().and_then(|root| root.parent())
+        {
+            let ctx = ctx.clone();
+            self.queue = Some(crate::queue_watch::QueueWatch::start(
+                home.to_path_buf(),
+                move || ctx.request_repaint(),
+            ));
+        }
         if let Some(task) = &self.action_task {
             match task.try_recv() {
                 Ok(result) => {

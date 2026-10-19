@@ -40,6 +40,68 @@ impl ResearchUi {
         self.confirm_complete = confirm_complete;
         self.new_project_open = new_project;
     }
+    /// Watches the write queue of the dashboard's project and, while this window is open, of
+    /// its own project.
+    pub fn watch_queues(&self, dashboard: Option<&str>) {
+        let Some(queue) = &self.queue else {
+            return;
+        };
+        let mut projects: Vec<&str> = dashboard.into_iter().collect();
+        if self.open && !self.project_id.is_empty() && dashboard != Some(self.project_id.as_str()) {
+            projects.push(&self.project_id);
+        }
+        queue.watch(&projects);
+    }
+    /// `Queue: n running, m waiting` for `project`, once polled.
+    pub fn queue_label(&self, project: &str) -> String {
+        self.queue
+            .as_ref()
+            .and_then(|q| q.view(project))
+            .map_or_else(|| "Queue: -".into(), |v| v.label())
+    }
+    /// Opens the write-queue list for `project`.
+    pub fn open_queue(&mut self, project: &str) {
+        self.queue_open = Some(project.to_string());
+    }
+    fn show_queue(&mut self, ctx: &egui::Context) {
+        let Some(project) = self.queue_open.clone() else {
+            return;
+        };
+        let view = self.queue.as_ref().and_then(|q| q.view(&project));
+        let mut open = true;
+        classic::Window::new("write-queue", "Write queue")
+            .default_size([520.0, 300.0])
+            .show(ctx, &mut open, |ui| {
+                ui.add_space(4.0);
+                classic::label(ui, format!("Project: {project}"), None);
+                let Some(view) = view else {
+                    classic::label(ui, "Waiting for the first update...", None);
+                    return;
+                };
+                classic::label(
+                    ui,
+                    if view.source == "coordinator" {
+                        "Source: coordinator"
+                    } else {
+                        "Source: project lock (no coordinator is running)"
+                    },
+                    None,
+                );
+                for (title, lines) in [("Running", &view.running), ("Waiting", &view.waiting)] {
+                    classic::group(ui, title, |ui| {
+                        if lines.is_empty() {
+                            classic::label(ui, "None", None);
+                        }
+                        for line in lines {
+                            classic::label(ui, line, None);
+                        }
+                    });
+                }
+            });
+        if !open {
+            self.queue_open = None;
+        }
+    }
     fn set_error(&mut self, error: String) {
         self.message = error;
         self.message_error = true;
@@ -47,6 +109,7 @@ impl ResearchUi {
 
     pub fn show(&mut self, ctx: &egui::Context) {
         self.show_new_project(ctx);
+        self.show_queue(ctx);
         if !self.open {
             return;
         }
@@ -654,7 +717,12 @@ impl ResearchUi {
                 self.message.clone()
             };
             let colour = self.message_error.then(|| classic::alert(dark));
-            classic::status_pane(ui, (width - 224.0).max(120.0), &message, colour);
+            classic::status_pane(ui, (width - 404.0).max(120.0), &message, colour);
+            let queue = self.queue_label(&self.project_id);
+            if classic::status_pane_button(ui, 178.0, &queue).clicked() {
+                let project = self.project_id.clone();
+                self.open_queue(&project);
+            }
             classic::status_pane(
                 ui,
                 110.0,

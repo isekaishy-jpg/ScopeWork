@@ -548,8 +548,15 @@ pub fn menu_frame(dark: bool) -> egui::Frame {
 
 /// A sunken status-bar pane holding one line of text.
 pub fn status_pane(ui: &mut Ui, width: f32, text: &str, colour: Option<Color32>) {
+    let _ = pane(ui, width, text, colour, Sense::hover());
+}
+/// A status pane that opens something when clicked.
+pub fn status_pane_button(ui: &mut Ui, width: f32, text: &str) -> Response {
+    pane(ui, width, text, None, Sense::click())
+}
+fn pane(ui: &mut Ui, width: f32, text: &str, colour: Option<Color32>, sense: Sense) -> Response {
     let dark = ui.visuals().dark_mode;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 19.0), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 19.0), sense);
     bevel(ui.painter(), rect, true);
     let colour = colour.unwrap_or_else(|| ink(dark));
     let galley = ui
@@ -560,6 +567,7 @@ pub fn status_pane(ui: &mut Ui, width: f32, text: &str, colour: Option<Color32>)
         galley,
         colour,
     );
+    response
 }
 
 /// A classic window: raised frame, navy title bar with a close box, grey face. Dragging the

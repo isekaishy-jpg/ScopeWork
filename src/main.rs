@@ -189,6 +189,8 @@ impl eframe::App for Dashboard {
         if ctx.style().visuals.dark_mode != self.dark {
             ctx.set_visuals(classic::visuals(self.dark));
         }
+        let queue_project = self.projects.get(self.project).map(|p| p.id.clone());
+        self.research.watch_queues(queue_project.as_deref());
         let bg = background(self.dark);
         let ink = foreground(self.dark);
         egui::CentralPanel::default()
@@ -505,13 +507,13 @@ impl eframe::App for Dashboard {
                 t(26.0,bottom+122.0,format!("Selected: {}    Funcs: {} / {}    {}",name,completed,n,["Done","In progress","Not done"][status]));
                 let mut sx = 0.0;
                 for (width, label) in [
-                    (w * 0.34, format!("Funcs: {} / {total}", counts[0])),
+                    (w * 0.24, format!("Funcs: {} / {total}", counts[0])),
                     (
-                        w * 0.33,
+                        w * 0.24,
                         format!("Chunks done: {done_chunks} / {total_chunks}"),
                     ),
                     (
-                        w * 0.33,
+                        w * 0.34,
                         project_view.as_ref().map(|project|format!("App: {:?} | Inventory: {} funcs | Required: {} | Context: {}",project.app_status,project.inventory_functions,project.required_functions,project.inventory_functions-project.required_functions)).unwrap_or_else(||"No projects".into()),
                     ),
                 ] {
@@ -519,6 +521,16 @@ impl eframe::App for Dashboard {
                     bevel(&p, sr, true);
                     t(sx + 5.0, h - 10.0, label);
                     sx += width;
+                }
+                // The write queue of the selected project; clicking lists it.
+                if let Some(id) = &queue_project {
+                    let sr = r(sx, h - 20.0, w - sx - 16.0, 19.0);
+                    bevel(&p, sr, true);
+                    let label = self.research.queue_label(id);
+                    text(&p.with_clip_rect(sr.shrink(1.0)), o.x + sx + 5.0, o.y + h - 10.0, label, Color32::BLACK);
+                    if ui.interact(sr, ui.id().with("queue"), egui::Sense::click()).clicked() {
+                        self.research.open_queue(id);
+                    }
                 }
                 for i in 0..3 {
                     let d = i as f32 * 4.0;

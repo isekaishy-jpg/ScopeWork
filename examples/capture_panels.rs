@@ -55,6 +55,8 @@ impl eframe::App for Capture {
             ctx.set_visuals(classic::visuals(dark));
         }
         self.ui.poll(ctx);
+        let first = self.ui.snapshot().first().map(|p| p.id.clone());
+        self.ui.watch_queues(first.as_deref());
         if !self.selected
             && let Some(project) = self.ui.snapshot().first()
         {
