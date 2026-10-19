@@ -1,6 +1,6 @@
 # Proposal: coordinator phase 2, tool coordination
 
-Phase 2 of [the coordinator proposal](proposal-coordinator.md). It builds on design decision D8 in [the design document](design-coordinator.md) and on phase 1 as implemented. Research and proposal are complete; nothing here is implemented. Implementation starts on approval.
+Phase 2 of [the coordinator proposal](proposal-coordinator.md). It builds on design decision D8 in [the design document](design-coordinator.md) and on phase 1 as implemented. Research and proposal are complete, and the proposal is implemented (see "As implemented" at the end). Adopting it in the tools is the project sessions' change.
 
 The goal: tools that share project resources (the annotation ledger, the Ghidra project) wait in one ordered, visible queue. Work of the same kind is collected and done once, and changes made outside that queue are recorded. Scopework orders, batches and relays this work; it never runs a tool and holds no knowledge of any particular tool (criterion C6).
 
@@ -203,3 +203,25 @@ Each step can be adopted alone and rolled back alone.
 - **Holders that report wrong results.** A holder that applies a batch partly and reports success misleads its joined requesters. Mitigation: the contract, plus `job run`'s rule that a non-zero exit fails every joined payload.
 - **Long holders starve others.** A Ghidra job of several minutes holds `ghidra` throughout. Ageing reorders waiting requests but cannot pre-empt a holder. `job status` shows the hold time.
 - **The manifest drifts from the tools.** The audit reports kinds used but not declared, and kinds declared but unused. Drift entries catch the effects at runtime.
+
+## As implemented (2026-10-18)
+
+Implemented as proposed, with these deviations:
+- **No `retry` message.** When a holder is lost before reporting, its joined requests wait again at their original place without being told; their clients are always ready to be granted the lease themselves. This removes a message type and the `holder_lost` error.
+- **No `job lease` command.** A lease lives as long as a connection, which a one-shot CLI process cannot keep. Pipe clients lease with the protocol directly, as documented in the CLI guide.
+- **Protocol 2 without a protocol-1 answer.** Protocol 1 never shipped. Clients and coordinators of different protocols refuse each other at the handshake, and `job run` then falls back to lock files under `auto`.
+- **Catalog and sidecar drift uses the revision, not receipts.** Several Scopework writes leave no receipt: the research scope, and import reservation, cancellation and publication. Every Scopework write raises the catalog revision (a layout migration raises its layout version), so a change with neither is drift. Receipts are still read to recognise ledger repaths.
+- **`interactive` is not a tool class.** It stays reserved for the GUI; tools use `normal`, `bulk` or `job`.
+- **Result reporting is best effort.** If the coordinator is gone after the command ran, `job run` still returns its own result, and unanswered joined requests wait again.
+
+Validation:
+- **Integration tests:** `tests/coordinator_leases.rs` drives `job run` with a stand-in tool. It covers:
+  - joining with per-payload results;
+  - covering;
+  - exclusivity;
+  - failure (`job_failed`);
+  - a dead holder;
+  - direct-mode lock files shown by `research locks`;
+  - drift: leased writes and Scopework's scope write are not drift, while a hand edit is recorded once.
+- **Unit tests** cover the manifest, the lease queue (joining, reservation, holder loss), the drift rules and the audit.
+- **The time criterion for merged ledger writes** can only be measured once `annotations.py` adopts `ledger-put`. Until then the tests show the structure it depends on: N queued payloads run as one command.

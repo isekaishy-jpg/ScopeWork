@@ -400,3 +400,86 @@ The pipe accepts only the same Windows user on the same machine. A coordinator f
 Reads are counted per record class with how many carried a pending entry. `coordinator status` shows the counts, and each day's counts are appended to the tooling history as one `coordinator-reads` entry.
 
 The dashboard footer and the Research records status bar show `Queue: n running, m waiting` for their project; click it for the list.
+
+### Commit measurements
+
+`coordinator status` reports per project how many batches the writer committed, the operations per batch, and how often it reused its in-memory catalog. It also gives the median and p90 times of opening, building the journal (delta and fingerprints), writing it, and applying it, plus queue wait per class. Each day's figures are appended to the tooling history as one `coordinator-commits` entry.
+
+## Tool leases
+
+Tools that share project resources, such as the annotation ledger or the Ghidra project, can run their work under a **lease** instead of a private lock file:
+- **Ordering:** leases queue in order with the same classes and ageing as catalog writes.
+- **Visibility:** they show in `research queue` and in the GUI queue panes.
+- **Joining:** work of one kind can be collected and done once.
+
+```powershell
+research job run example --kind ledger-put --payload-file row.json -- python tools/scripts/annotations.py apply-queued
+research job run example --resource ghidra --class job -- python tools/scripts/fresh_re.py analyze
+research job status example
+research tools audit example
+```
+
+`job run` holds the lease exactly while COMMAND runs, and passes COMMAND's exit code through. COMMAND's own output goes to stderr. Stdout carries the job's JSON answer: `ran` (whether this request's command ran), `result`, `lease`, and `source`:
+- `coordinator`: it ran under a coordinator lease;
+- `done`: another holder ran it and returned this payload's result;
+- `covered`: another holder's run covered this payload-less request;
+- `locks`: it ran under lock files, without a coordinator.
+
+**Joining.** Requests with the same key and the same resources that are waiting when a lease is granted join it, up to 256 payloads or 8 MB.
+- The holder's command receives every payload, and must give each the result it would have had alone, in order.
+- Payload-less requests are *covered* by the run's overall result.
+- A request only joins work that started after it was queued.
+
+**The command's contract.**
+- `SCOPEWORK_JOB_PAYLOADS` names a JSON array of `{"payload_id", "submitter", "kind", "payload"}`, this request's own first.
+- Write `{"results": [{"payload_id": n, "ok": ...} or {"payload_id": n, "error": "..."}], "overall": ...}` to the path in `SCOPEWORK_JOB_RESULTS`. A payload without a result is answered `no result`.
+- A non-zero exit fails every payload with `job_failed`.
+- `SCOPEWORK_JOB_LEASE` holds the lease number.
+
+**Leases end with the holder.** A lease lasts as long as its holder's connection, so a holder that dies releases it at once. Requests that had joined it and were not yet answered wait again at their original place, and may run themselves next.
+
+**Several resources** are granted together or not at all, and a waiting request reserves its resources against later ones. Nobody holds a resource while waiting, and requests cannot starve.
+
+**Without a coordinator** (`SCOPEWORK_COORDINATOR=off`, or none can start), `job run` takes exclusive lock files per resource, in name order, under `.project-locks/`. `research locks` shows them under `resources`. Every request then runs alone with its own payload, so results are the same, only without joining.
+
+**Pipe clients.** A tool that keeps a connection, such as a Python module, can lease directly. After the hello (role `tool`), it sends:
+- `{"id": n, "lease": {"project", "resources": [...], "key", "class", "kind", "payload"}}`, and waits for one of:
+  - `{"granted": {"lease", "payloads"}}`;
+  - `{"done": {"by", "result"}}`;
+  - `{"covered": {"by", "result"}}`.
+- When granted, `{"id": n, "results": [...], "overall": ...}`, then `{"id": n, "release": lease}`, or it closes the connection.
+
+### Declarations: `tools/coordinator.toml`
+
+```toml
+version = 1
+
+[resources.ledger]
+files = ["tools/profiles/annotations.json"]   # watched for drift
+
+[resources.ghidra]                            # exclusive; no files watched
+
+[kinds.ledger-put]
+resources = ["ledger"]
+key = "ledger-put"
+class = "normal"                              # normal, bulk or job
+```
+
+Flags override every field (`--resource`, `--key`, `--class`), and an undeclared kind can lease with `--resource`. Names are lowercase words joined by hyphens. Unknown fields and other mistakes are refused with their line.
+
+### Drift
+
+While a coordinator runs, it polls each project's shared files every 2 s:
+- **Declared files:** a change is drift when no lease on their resource was held, granted or released since the previous poll.
+- **Catalog and sidecars:** a change to `project.json`, or to the review-flag, claim or review-queue sidecars, is drift unless the catalog revision (or layout version) also changed. Every Scopework write raises the revision.
+- **Ledger repaths:** the annotation ledger's in-place repath by a catalog transaction is recognised from its receipt.
+
+Drift is recorded as a history entry of kind `drift`, naming the file, the resource and both hashes, and is counted in `coordinator status`. It is never blocked or reverted. `research history show example --kind drift` lists the entries.
+
+`research tools audit` is advisory: a textual scan of `tools/scripts` and `tools/instrumentation`. It reports:
+- the project's own modules that tools import;
+- the `research` subcommands and subprocess executables tools use;
+- declared kinds against the kinds referenced or leased: declared but unused, and used but undeclared;
+- drift entries per resource.
+
+It cannot tell which files a tool writes; drift entries record that at runtime.

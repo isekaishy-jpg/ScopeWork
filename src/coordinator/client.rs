@@ -38,8 +38,16 @@ pub struct Connection {
 }
 impl Connection {
     fn send(&mut self, value: &Value) -> Result<Value, String> {
+        self.post(value)?;
+        self.receive()
+    }
+    /// Sends one message without waiting for an answer.
+    pub(crate) fn post(&mut self, value: &Value) -> Result<(), String> {
         writeln!(self.writer, "{value}").map_err(|e| e.to_string())?;
-        self.writer.flush().map_err(|e| e.to_string())?;
+        self.writer.flush().map_err(|e| e.to_string())
+    }
+    /// Waits for the next message.
+    pub(crate) fn receive(&mut self) -> Result<Value, String> {
         let mut line = String::new();
         if self
             .reader

@@ -6,7 +6,12 @@
 //! It keeps no state that is not on disk. Each project's writer takes the project's file lock
 //! only to commit, so direct-mode commands and older Scopework versions stay correct beside
 //! it; their commits are picked up before the next read or commit.
+pub mod audit;
 pub mod client;
+mod drift;
+pub mod job;
+mod leases;
+pub mod manifest;
 pub mod pipe;
 
 use crate::cli::{self, Route, WriteRoute};
@@ -20,7 +25,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Protocol number in the handshake; both sides must match.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 /// The product version, compared to retire an older coordinator.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How long a coordinator with no clients and no queued work stays up.
@@ -163,16 +168,6 @@ struct CommitLog {
 }
 impl CommitLog {
     fn view(&self) -> Value {
-        fn spread(values: &[u64]) -> Value {
-            let mut sorted = values.to_vec();
-            sorted.sort_unstable();
-            let at = |q: usize| {
-                sorted
-                    .get((sorted.len() * q / 100).min(sorted.len().saturating_sub(1)))
-                    .copied()
-            };
-            json!({"count": sorted.len(), "median": at(50), "p90": at(90)})
-        }
         let waits: serde_json::Map<String, Value> = self
             .wait_ms
             .iter()
@@ -183,6 +178,17 @@ impl CommitLog {
             "delta_us": spread(&self.delta_us), "journal_us": spread(&self.journal_us),
             "apply_us": spread(&self.apply_us), "wait_ms": waits})
     }
+}
+/// Count, median and p90 of a set of measurements.
+fn spread(values: &[u64]) -> Value {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let at = |q: usize| {
+        sorted
+            .get((sorted.len() * q / 100).min(sorted.len().saturating_sub(1)))
+            .copied()
+    };
+    json!({"count": sorted.len(), "median": at(50), "p90": at(90)})
 }
 fn micros(time: Duration) -> u64 {
     u64::try_from(time.as_micros()).unwrap_or(u64::MAX)
@@ -221,6 +227,10 @@ struct ProjectState {
     /// The writer's catalog kept between batches (see `Resident`).
     resident: Mutex<Option<Resident>>,
     commits: Mutex<CommitLog>,
+    /// Leases on the project's tool resources (phase 2).
+    leases: Mutex<leases::Leases>,
+    /// Drift entries recorded per resource since this coordinator started.
+    drift: Mutex<std::collections::BTreeMap<String, u64>>,
 }
 
 /// How long the writer may reuse its in-memory catalog before re-opening it from disk.
@@ -307,6 +317,8 @@ impl Server {
             writing: AtomicBool::new(false),
             resident: Mutex::new(None),
             commits: Mutex::new(CommitLog::default()),
+            leases: Mutex::new(leases::Leases::default()),
+            drift: Mutex::new(Default::default()),
             reads: Mutex::new(ReadLog {
                 day: today(),
                 ..ReadLog::default()
@@ -316,6 +328,9 @@ impl Server {
         let server = self.clone();
         let writer = state.clone();
         std::thread::spawn(move || server.write_loop(&writer));
+        let server = self.clone();
+        let watched = state.clone();
+        std::thread::spawn(move || server.drift_loop(&watched));
         Ok(state)
     }
     /// A snapshot from the committed catalog, read the way direct mode reads it (shared lock,
@@ -461,7 +476,12 @@ impl Server {
             ),
             Err(_) => (vec![], vec![]),
         };
-        json!({"project": state.id, "source": "coordinator", "running": running, "waiting": waiting})
+        let leases = state
+            .leases
+            .lock()
+            .map(|l| l.view())
+            .unwrap_or_else(|_| json!({"held": [], "waiting": []}));
+        json!({"project": state.id, "source": "coordinator", "running": running, "waiting": waiting, "leases": leases})
     }
 
     fn enqueue(
@@ -550,7 +570,12 @@ impl Server {
             .lock()
             .map(|mut log| std::mem::take(&mut *log))
             .unwrap_or_default();
-        if reads == 0 && commits.sizes.is_empty() {
+        let leases = state
+            .leases
+            .lock()
+            .map(|mut l| std::mem::take(&mut l.stats))
+            .unwrap_or_default();
+        if reads == 0 && commits.sizes.is_empty() && leases.is_empty() {
             return;
         }
         let _ = research::with_lock_wait(Duration::from_secs(10), || {
@@ -573,8 +598,54 @@ impl Server {
                 let diff = json!({"day_unix": day * 86_400, "commits": commits.view()});
                 lib.append_history(0, "coordinator-commits", &summary, &[], &[], Some(diff))?;
             }
+            if !leases.is_empty() {
+                let summary = format!("Tool leases through the coordinator (day {day})");
+                let diff = json!({"day_unix": day * 86_400, "kinds": leases.view()});
+                lib.append_history(0, "coordinator-leases", &summary, &[], &[], Some(diff))?;
+            }
             Ok(())
         });
+    }
+    /// Polls the project's shared files every 2 s and records changes made outside their
+    /// owners as `drift` history entries.
+    fn drift_loop(&self, state: &ProjectState) {
+        let dir = self.root.join(&state.id);
+        let mut watch = drift::Watch::default();
+        loop {
+            let found = watch.check(&dir, &|resource, since| {
+                state
+                    .leases
+                    .lock()
+                    .is_ok_and(|l| l.excused(resource, since))
+            });
+            for change in found {
+                if let Ok(mut counts) = state.drift.lock() {
+                    *counts.entry(change.resource.clone()).or_insert(0) += 1;
+                }
+                let owner = if change.resource == "catalog" {
+                    "a catalog transaction".to_string()
+                } else {
+                    format!("a {} lease", change.resource)
+                };
+                let summary = format!("{} changed without {owner}", change.file);
+                let diff = json!({"resource": change.resource, "file": change.file,
+                    "before_sha256": change.before, "after_sha256": change.after});
+                let _ = research::with_lock_wait(Duration::from_secs(10), || {
+                    Library::open_project(self.root.clone(), Some(&state.id))
+                })
+                .and_then(|mut lib| {
+                    lib.append_history(
+                        0,
+                        "drift",
+                        &summary,
+                        &[],
+                        std::slice::from_ref(&change.file),
+                        Some(diff),
+                    )
+                });
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
     }
     fn commit_batch(&self, state: &Arc<ProjectState>, batch: Vec<Operation>) {
         if let Ok(mut log) = state.commits.lock() {
@@ -873,6 +944,7 @@ impl Server {
                     .queue
                     .lock()
                     .is_ok_and(|q| q.waiting.is_empty() && q.running.is_empty())
+                    && state.leases.lock().is_ok_and(|l| l.is_empty())
             })
         })
     }
@@ -913,7 +985,9 @@ impl Server {
                             .unwrap_or_default();
                         json!({"project": state.id, "waiting": waiting, "running": running,
                             "reads": reads, "reads_with_pending": with_pending, "reads_by_class": classes,
-                            "commits": state.commits.lock().map(|log| log.view()).unwrap_or_default()})
+                            "commits": state.commits.lock().map(|log| log.view()).unwrap_or_default(),
+                            "leases": state.leases.lock().map(|l| l.stats.view()).unwrap_or_default(),
+                            "drift": state.drift.lock().map(|d| json!(*d)).unwrap_or_default()})
                     })
                     .collect()
             })
@@ -924,6 +998,128 @@ impl Server {
             "connections": self.connections.load(Ordering::Acquire), "projects": projects})
     }
 
+    /// Serves one lease request: waits for the grant or for another holder's answer. A granted
+    /// connection holds the lease until it sends `release` or closes. Returns false when the
+    /// connection has ended.
+    fn serve_lease(
+        self: &Arc<Self>,
+        reader: &mut BufReader<std::fs::File>,
+        send: &mut dyn FnMut(Value) -> bool,
+        id: Value,
+        request: &Value,
+        submitter: &str,
+    ) -> bool {
+        let lease = &request["lease"];
+        let refuse = |send: &mut dyn FnMut(Value) -> bool, error: String| {
+            send(json!({"id": id, "error": error, "kind": cli::error_kind(&error)}))
+        };
+        if !self.admitting.load(Ordering::Acquire) {
+            return send(json!({"id": id, "unavailable": "stopping"}));
+        }
+        let project = lease["project"].as_str().unwrap_or_default();
+        let state = match self.project(project) {
+            Ok(state) => state,
+            Err(e) => return refuse(send, e),
+        };
+        let resources: std::collections::BTreeSet<String> = lease["resources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.as_str().map(String::from))
+            .collect();
+        if resources.is_empty() || !resources.iter().all(|r| manifest::valid_name(r)) {
+            return refuse(
+                send,
+                "lease_refused: a lease names one or more resources, lowercase words joined by hyphens".into(),
+            );
+        }
+        let payload = lease.get("payload").filter(|p| !p.is_null()).cloned();
+        let bytes = payload.as_ref().map_or(0, |p| p.to_string().len());
+        if bytes > leases::PAYLOAD_BYTES {
+            return refuse(send, "lease_refused: a payload may not exceed 1 MB".into());
+        }
+        let class = match lease["class"].as_str() {
+            Some("bulk") => Class::Bulk,
+            Some("job") => Class::Job,
+            _ => Class::Normal,
+        };
+        let kind = lease["kind"].as_str().unwrap_or("lease").to_string();
+        let (reply, events) = std::sync::mpsc::channel();
+        let request_id = self.next_operation.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut leases) = state.leases.lock() {
+            leases.enqueue(leases::Request {
+                id: request_id,
+                kind,
+                resources,
+                key: lease["key"].as_str().map(String::from),
+                class,
+                submitter: submitter.to_string(),
+                payload,
+                bytes,
+                queued: Instant::now(),
+                reply,
+            });
+        }
+        let granted = match events.recv() {
+            Err(_) => return refuse(send, "The lease queue failed".into()),
+            Ok(leases::Event::Done { by, result }) => {
+                return send(json!({"id": id, "done": {"by": by, "result": result}}));
+            }
+            Ok(leases::Event::Covered { by, result }) => {
+                return send(json!({"id": id, "covered": {"by": by, "result": result}}));
+            }
+            Ok(leases::Event::Granted { lease, payloads }) => {
+                if !send(json!({"id": id, "granted": {"lease": lease, "payloads": payloads}})) {
+                    if let Ok(mut leases) = state.leases.lock() {
+                        leases.release(lease);
+                    }
+                    return false;
+                }
+                lease
+            }
+        };
+        let release = || {
+            if let Ok(mut leases) = state.leases.lock() {
+                leases.release(granted);
+            }
+        };
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                release();
+                return false;
+            }
+            self.touch();
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                send(json!({"error": "Each line must be a JSON object"}));
+                continue;
+            };
+            let message_id = message["id"].clone();
+            if let Some(results) = message["results"].as_array() {
+                let reported = state
+                    .leases
+                    .lock()
+                    .map_err(|_| "The lease queue failed".to_string())
+                    .and_then(|mut l| l.results(granted, results, &message["overall"]));
+                let answer = match reported {
+                    Ok(()) => json!({"id": message_id, "reported": granted}),
+                    Err(e) => json!({"id": message_id, "error": e}),
+                };
+                if !send(answer) {
+                    release();
+                    return false;
+                }
+            } else if message.get("release").is_some() {
+                release();
+                return send(json!({"id": message_id, "released": granted}));
+            } else {
+                send(
+                    json!({"id": message_id, "error": "A lease holder may only report results or release its lease"}),
+                );
+            }
+        }
+    }
     fn serve_connection(self: &Arc<Self>, pipe: std::fs::File) {
         let Ok(reader) = pipe.try_clone() else { return };
         let mut reader = BufReader::new(reader);
@@ -978,6 +1174,13 @@ impl Server {
             }
             if request["status"] == true {
                 send(json!({"id": id, "exit": 0, "stdout": self.status(), "stderr": []}));
+                continue;
+            }
+            if request.get("lease").is_some() {
+                self.touch();
+                if !self.serve_lease(&mut reader, &mut send, id, &request, &submitter) {
+                    return;
+                }
                 continue;
             }
             let arguments: Vec<String> = request["args"]

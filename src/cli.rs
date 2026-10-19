@@ -2,7 +2,7 @@
 //! executable, `research session` and the coordinator.
 use crate::{
     paths,
-    research::{Batch, Kind, Library, Status, imports},
+    research::{Batch, Kind, Library, Status, imports, valid_id},
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
@@ -103,9 +103,48 @@ pub(crate) enum Command {
     /// Inspect or stop this research home's coordinator.
     #[command(subcommand)]
     Coordinator(CoordinatorCommand),
+    /// Tool work under leases on a project's named tool resources.
+    #[command(subcommand)]
+    Job(JobCommand),
+    /// A project's tool declarations and usage.
+    #[command(subcommand)]
+    Tools(ToolsCommand),
     /// Run the coordinator for this research home (started automatically by clients).
     #[command(hide = true)]
     Serve,
+}
+#[derive(Subcommand)]
+pub(crate) enum JobCommand {
+    /// Run COMMAND while holding a lease. Requests with the same key that wait together share
+    /// one run: COMMAND then receives every payload and reports a result for each.
+    Run {
+        project: String,
+        /// A kind declared in tools/coordinator.toml, or a new name used with --resource.
+        #[arg(long)]
+        kind: Option<String>,
+        /// A resource to lease (repeatable); overrides the kind's resources.
+        #[arg(long = "resource")]
+        resources: Vec<String>,
+        /// Requests with this key and the same resources join one lease.
+        #[arg(long)]
+        key: Option<String>,
+        /// normal, bulk or job.
+        #[arg(long)]
+        class: Option<String>,
+        /// This request's payload: a JSON file of at most 1 MB.
+        #[arg(long)]
+        payload_file: Option<PathBuf>,
+        /// The command and its arguments, after --.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Held and waiting leases (from the coordinator, or the resource lock files).
+    Status { project: String },
+}
+#[derive(Subcommand)]
+pub(crate) enum ToolsCommand {
+    /// Advisory: what the project's tool sources appear to use, against tools/coordinator.toml.
+    Audit { project: String },
 }
 #[derive(Subcommand)]
 pub(crate) enum CoordinatorCommand {
@@ -543,6 +582,51 @@ fn run(args: Args) -> Result<Value, String> {
         }
         // Reached only in direct mode: the lock queue stands in for the coordinator's.
         Command::Queue { project } => return crate::coordinator::lock_queue(&root, project),
+        Command::Job(JobCommand::Run {
+            project,
+            kind,
+            resources,
+            key,
+            class,
+            payload_file,
+            command,
+        }) => {
+            if !valid_id(project) {
+                return Err("Invalid project ID".into());
+            }
+            let manifest = crate::coordinator::manifest::load(&root.join(project))?;
+            let spec =
+                manifest.resolve(kind.as_deref(), resources, key.as_deref(), class.as_deref())?;
+            let payload = match payload_file {
+                None => None,
+                Some(path) => {
+                    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    if bytes.len() > 1 << 20 {
+                        return Err("lease_refused: a payload may not exceed 1 MB".into());
+                    }
+                    Some(
+                        serde_json::from_slice::<Value>(&bytes)
+                            .map_err(|e| format!("{}: {e}", path.display()))?,
+                    )
+                }
+            };
+            let (answer, exit) =
+                crate::coordinator::job::run(&home, project, &spec, payload, command)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&answer).unwrap_or_default()
+            );
+            std::process::exit(exit);
+        }
+        Command::Job(JobCommand::Status { project }) => {
+            return crate::coordinator::job::status(&home, project);
+        }
+        Command::Tools(ToolsCommand::Audit { project }) => {
+            if !valid_id(project) {
+                return Err("Invalid project ID".into());
+            }
+            return crate::coordinator::audit::run(&root.join(project));
+        }
         _ => {}
     }
     if let Command::Wait {
@@ -1152,6 +1236,8 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
         | Command::Locks { .. }
         | Command::Wait { .. }
         | Command::Queue { .. }
+        | Command::Job(_)
+        | Command::Tools(_)
         | Command::Coordinator(_)
         | Command::Serve
         | Command::Session => unreachable!(),
@@ -1489,6 +1575,8 @@ pub(crate) fn route(command: &Command) -> Route {
         | Command::Session
         | Command::Journal { .. }
         | Command::Coordinator(_)
+        | Command::Job(_)
+        | Command::Tools(_)
         | Command::Serve => Route::Direct,
     }
 }

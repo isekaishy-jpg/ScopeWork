@@ -183,7 +183,7 @@ fn remove_orphaned_catalog_temporaries(dir: &Path) {
         }
     }
 }
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
@@ -476,6 +476,53 @@ pub fn lock_status(projects: &Path, id: &str) -> Result<serde_json::Value> {
     if !valid_id(id) {
         return Err("Invalid project ID".into());
     }
+    let mut status = lock_entry(projects, id);
+    // Tool resource locks taken by `job run` without a coordinator.
+    let prefix = format!("{id}.res-");
+    let mut resources = serde_json::Map::new();
+    for entry in fs::read_dir(projects.join(".project-locks"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(resource) = name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".lock"))
+        {
+            let mut entry = lock_entry(projects, &resource_lock_id(id, resource));
+            if let Some(object) = entry.as_object_mut() {
+                object.remove("project");
+            }
+            resources.insert(resource.to_string(), entry);
+        }
+    }
+    status["resources"] = resources.into();
+    Ok(status)
+}
+/// The lock name of a project's tool resource.
+fn resource_lock_id(project: &str, resource: &str) -> String {
+    format!("{project}.res-{resource}")
+}
+/// Exclusive locks on a project's tool resources for `job run` without a coordinator, taken
+/// in name order so that two requests never deadlock. They wait like project locks.
+pub(crate) fn resource_locks(
+    projects: &Path,
+    project: &str,
+    resources: &[String],
+) -> Result<Vec<fs::File>> {
+    if !valid_id(project) {
+        return Err("Invalid project ID".into());
+    }
+    let mut names = resources.to_vec();
+    names.sort();
+    names.dedup();
+    names
+        .iter()
+        .map(|resource| project_lock(projects, &resource_lock_id(project, resource), true))
+        .collect()
+}
+fn lock_entry(projects: &Path, id: &str) -> serde_json::Value {
     let folder = projects.join(".project-locks");
     let path = folder.join(format!("{id}.lock"));
     let (writer, readers) = match fs::OpenOptions::new().read(true).write(true).open(&path) {
@@ -509,9 +556,7 @@ pub fn lock_status(projects: &Path, id: &str) -> Result<serde_json::Value> {
             Some(v)
         })
         .collect();
-    Ok(
-        serde_json::json!({"project": id, "writer_active": writer, "readers_active": readers, "writer": holder, "waiting": waiting}),
-    )
+    serde_json::json!({"project": id, "writer_active": writer, "readers_active": readers, "writer": holder, "waiting": waiting})
 }
 /// The legacy library gate (shared unless `exclusive_gate`) plus the project's own lock.
 fn acquire_locks(

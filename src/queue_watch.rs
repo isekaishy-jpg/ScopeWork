@@ -29,23 +29,35 @@ impl QueueView {
     }
     /// Reads `research queue` output (either source).
     pub fn from_json(value: &Value) -> Self {
-        let lines = |key: &str| -> Vec<String> {
-            value[key]
-                .as_array()
+        let lines = |list: &Value| -> Vec<String> {
+            list.as_array()
                 .map(|entries| entries.iter().map(describe).collect())
                 .unwrap_or_default()
         };
+        // Tool leases count with operations: held ones run, waiting ones wait.
+        let mut running = lines(&value["running"]);
+        running.extend(lines(&value["leases"]["held"]));
+        let mut waiting = lines(&value["waiting"]);
+        waiting.extend(lines(&value["leases"]["waiting"]));
         Self {
             project: value["project"].as_str().unwrap_or_default().to_string(),
             source: value["source"].as_str().unwrap_or_default().to_string(),
-            running: lines("running"),
-            waiting: lines("waiting"),
+            running,
+            waiting,
         }
     }
 }
 /// One queue entry as a line: a coordinator operation or a lock holder/waiter.
 fn describe(entry: &Value) -> String {
-    if let Some(kind) = entry["kind"].as_str() {
+    if let Some(resources) = entry["resources"].as_array() {
+        let kind = entry["kind"].as_str().unwrap_or("lease");
+        let names: Vec<&str> = resources.iter().filter_map(Value::as_str).collect();
+        let who = entry["submitter"].as_str().unwrap_or("?");
+        let joined = entry["joined"]
+            .as_u64()
+            .map_or(String::new(), |n| format!(", {n} joined"));
+        format!("{kind} lease on {}{joined} - {who}", names.join(", "))
+    } else if let Some(kind) = entry["kind"].as_str() {
         let nodes = entry["nodes"].as_array().map_or(0, Vec::len);
         let who = entry["submitter"].as_str().unwrap_or("?");
         let class = entry["class"].as_str().unwrap_or("normal");
@@ -177,6 +189,20 @@ mod tests {
         assert_eq!(
             QueueView::from_json(&json!({})).label(),
             "Queue: 0 running, 0 waiting"
+        );
+        let leased = QueueView::from_json(
+            &json!({"project": "p", "source": "coordinator", "running": [], "waiting": [],
+            "leases": {"held": [{"lease": 7, "kind": "ledger-put", "resources": ["ledger"], "submitter": "agent-2", "joined": 3}],
+                "waiting": [{"request": 9, "kind": "annotations-apply", "resources": ["ghidra", "ledger"], "submitter": "agent-4"}]}}),
+        );
+        assert_eq!(leased.label(), "Queue: 1 running, 1 waiting");
+        assert_eq!(
+            leased.running,
+            ["ledger-put lease on ledger, 3 joined - agent-2"]
+        );
+        assert_eq!(
+            leased.waiting,
+            ["annotations-apply lease on ghidra, ledger - agent-4"]
         );
     }
 }

@@ -382,7 +382,7 @@ fn the_handshake_turns_away_older_clients_and_retires_for_newer_ones() {
         writeln!(
             writer,
             "{}",
-            json!({"hello": {"protocol": 1, "version": version, "role": "cli"}})
+            json!({"hello": {"protocol": research_dashboard::coordinator::PROTOCOL, "version": version, "role": "cli"}})
         )
         .unwrap();
         let mut line = String::new();
@@ -476,7 +476,7 @@ fn gui_queue_polls_do_not_keep_an_idle_coordinator_alive() {
         writeln!(
             writer,
             "{}",
-            json!({"hello": {"protocol": 1, "version": version, "role": "gui"}})
+            json!({"hello": {"protocol": research_dashboard::coordinator::PROTOCOL, "version": version, "role": "gui"}})
         )
         .unwrap();
         writeln!(
