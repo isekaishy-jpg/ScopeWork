@@ -1,6 +1,6 @@
 # Proposal: the Scopework coordinator
 
-Research and design for unblocked reads, prioritised and merged writes, and tool coordination when several agents work on one project. Follows [the 2026-10-18 work brief](proposal-2026-10-18.md). Research, design and proposal are complete. The alternatives and the reasons for each choice are in [the design document](design-coordinator.md); the concrete plan is under Proposal below. Nothing here is implemented yet; implementation starts on approval.
+Research and design for unblocked reads, prioritised and merged writes, and tool coordination when several agents work on one project. Follows [the 2026-10-18 work brief](proposal-2026-10-18.md). Research, design and proposal are complete. The alternatives and the reasons for each choice are in [the design document](design-coordinator.md); the concrete plan is under Proposal below. Phases 0 and 1 are implemented (see "Phase 1 as implemented"). Phases 2 and 3 have their own proposals: [phase 2, tool coordination](proposal-coordinator-phase2.md) and [phase 3, storage](proposal-coordinator-phase3.md).
 
 ## Requirements
 
@@ -463,9 +463,9 @@ Phase 1 shipped with these deviations from the text above. Each keeps the requir
 - runtime drift events for the catalog, sidecars and ledger;
 - `research tools audit PROJECT` (advisory).
 
-Adopting it in `catalog.py` and `annotations.py` is the project sessions' change. Phase 2 gets its own proposal before implementation, with the payload and result formats.
+Adopting it in `catalog.py` and `annotations.py` is the project sessions' change. Its proposal, with the payload and result formats: [phase 2](proposal-coordinator-phase2.md).
 
-**Phase 3, storage:** incremental catalog writes owned by the coordinator, and a cache of derived effective status. Its own proposal after phase 1 measurements.
+**Phase 3, storage:** incremental catalog writes owned by the coordinator, and a cache of derived effective status. Its proposal, with measurement gates: [phase 3](proposal-coordinator-phase3.md).
 
 ### Module plan
 
