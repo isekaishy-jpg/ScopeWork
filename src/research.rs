@@ -112,6 +112,8 @@ pub mod imports;
 mod layout;
 #[path = "ledger.rs"]
 mod ledger;
+#[path = "operations.rs"]
+pub(crate) mod operations;
 #[path = "records_ui.rs"]
 mod records_ui;
 #[path = "reopen.rs"]
@@ -257,6 +259,9 @@ fn open_folder(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Report and sidecar texts by project-relative path, standing in for the files on disk.
+pub(crate) type Overlay =
+    std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, Option<String>>>>;
 pub struct Library {
     pub root: PathBuf,
     pub projects: Vec<Project>,
@@ -264,6 +269,12 @@ pub struct Library {
     /// Why a pending transaction could not resume when this read-only view was opened; the
     /// view shows the committed catalog. Writes stay blocked until recovery succeeds.
     pub recovery_blocked: Option<String>,
+    /// Texts this view uses instead of the files on disk: reports and sidecars staged by earlier
+    /// operations of a merged commit, or replaced by commits newer than a coordinator snapshot.
+    /// `None` in an entry means the file does not exist for this view.
+    pub(crate) overlay: Option<Overlay>,
+    /// Operations collected for one merged commit (see `operations.rs`); `None` commits each.
+    staging: Option<operations::Staged>,
     _lock: Option<OperationLocks>,
 }
 // Keep the legacy gate shared for the lifetime of every project operation. Older
@@ -717,6 +728,20 @@ impl Library {
         }
         Ok(())
     }
+    /// A read-only view of a committed catalog, as a coordinator snapshot holds it. It takes
+    /// no lock: reports and sidecars are read through `overlay`, which keeps the texts newer
+    /// commits replaced, so answers always come from this one revision.
+    pub(crate) fn snapshot_view(root: PathBuf, project: Project, overlay: Overlay) -> Self {
+        Self {
+            root,
+            projects: vec![project],
+            busy_projects: vec![],
+            recovery_blocked: None,
+            overlay: Some(overlay),
+            staging: None,
+            _lock: None,
+        }
+    }
     pub fn open(root: PathBuf) -> Result<Self> {
         Self::open_project(root, None)
     }
@@ -740,6 +765,8 @@ impl Library {
                 busy_projects: vec![],
                 _lock: None,
                 recovery_blocked: None,
+                overlay: None,
+                staging: None,
             };
             for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
                 let entry = entry.map_err(|e| e.to_string())?;
@@ -885,6 +912,8 @@ impl Library {
             projects: project.into_iter().collect(),
             busy_projects: vec![],
             recovery_blocked,
+            overlay: None,
+            staging: None,
             _lock: Some(locks),
         })
     }
@@ -927,6 +956,8 @@ impl Library {
             busy_projects: vec![],
             _lock: None,
             recovery_blocked: None,
+            overlay: None,
+            staging: None,
         };
         validation.validate_dependencies(0, &p.dependencies)
     }
@@ -1007,8 +1038,18 @@ impl Library {
         layout::inside(&self.dir(p), &path)?;
         Ok(path)
     }
+    /// A report's path relative to its project folder.
+    pub(crate) fn report_rel(&self, p: usize, id: u64) -> Result<String> {
+        let n = self.projects[p]
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .ok_or("Unknown report")?;
+        Ok(relative(&self.projects[p], n))
+    }
     pub fn read(&self, p: usize, id: u64) -> Result<(String, String)> {
-        let full = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
+        self.path(p, id)?;
+        let full = self.text(p, &self.report_rel(p, id)?)?;
         let marker = "\n<!-- research-content -->\n";
         let content = full
             .split_once(marker)
@@ -1030,7 +1071,8 @@ impl Library {
         );
     }
     pub fn effective_all(&self, p: usize) -> std::collections::HashMap<u64, Status> {
-        catalog_index::Index::new(&self.projects[p]).states(&self.dir(p))
+        catalog_index::Index::new(&self.projects[p])
+            .states_all_with(&self.dir(p), &|| self.hash_overrides())
     }
     pub fn required_nodes(&self, p: usize) -> std::collections::HashSet<u64> {
         catalog_index::Index::new(&self.projects[p]).required
@@ -1050,7 +1092,7 @@ impl Library {
             return n.status;
         }
         catalog_index::Index::new(&self.projects[p])
-            .states_for(&self.dir(p), [id])
+            .states_with(&self.dir(p), [id], &|| self.hash_overrides())
             .get(&id)
             .copied()
             .unwrap_or(Status::NotStarted)
@@ -1119,7 +1161,8 @@ impl Library {
                     .map(|e| e.prerequisite),
             )
             .chain([id]);
-        catalog_index::Index::new(project).states_for(&self.dir(p), inputs)
+        catalog_index::Index::new(project)
+            .states_with(&self.dir(p), inputs, &|| self.hash_overrides())
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
         if !self.writable(p) {
@@ -1269,7 +1312,7 @@ impl Library {
             return Err("Reserved report markers cannot appear in report content.".into());
         }
         let before = self.projects[p].clone();
-        let original = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
+        let original = self.text(p, &self.report_rel(p, id)?)?;
         let report = catalog_index::Index::new(&before).render(&before, id, body, evidence);
         let n = self.projects[p]
             .nodes
@@ -1876,9 +1919,9 @@ impl Library {
                     .find(|n| n.id == e.prerequisite)
                     .unwrap();
                 let content = self
-                    .path(p, n.id)
+                    .report_rel(p, n.id)
                     .ok()
-                    .and_then(|path| fs::read_to_string(path).ok())
+                    .and_then(|rel| self.text(p, &rel).ok())
                     .unwrap_or_default();
                 (n.id, format!("{}:{}", n.revision, hash(&content)))
             })

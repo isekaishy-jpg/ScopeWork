@@ -45,6 +45,8 @@ impl Fixture {
     }
     fn command(&self, args: &[&str]) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_research"));
+        // These tests cover direct mode; tests/coordinator.rs covers the coordinator.
+        c.env("SCOPEWORK_COORDINATOR", "off");
         c.arg("--home").arg(&self.home).args(args);
         c
     }

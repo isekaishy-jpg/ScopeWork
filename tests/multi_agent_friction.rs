@@ -58,6 +58,8 @@ impl Fixture {
     }
     fn run(&self, args: &[&str]) -> Output {
         std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+            // These tests cover direct mode; tests/coordinator.rs covers the coordinator.
+            .env("SCOPEWORK_COORDINATOR", "off")
             .arg("--home")
             .arg(&self.home)
             .args(args)
@@ -332,6 +334,8 @@ fn reads_continue_while_a_pending_transaction_is_blocked() {
     fs::write(f.home.join("body.md"), "Interrupted").unwrap();
     fs::write(f.home.join("evidence.md"), "Evidence").unwrap();
     let o = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        // These tests cover direct mode; tests/coordinator.rs covers the coordinator.
+        .env("SCOPEWORK_COORDINATOR", "off")
         .env("SCOPEWORK_CATALOG_FAIL_AT", "journal")
         .arg("--home")
         .arg(&f.home)
@@ -397,6 +401,8 @@ fn waiting_writers_go_before_later_readers_and_dead_tickets_are_ignored() {
     held.lock().unwrap();
     let spawn = |args: &[&str]| {
         std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+            // These tests cover direct mode; tests/coordinator.rs covers the coordinator.
+            .env("SCOPEWORK_COORDINATOR", "off")
             .arg("--home")
             .arg(&f.home)
             .args(args)

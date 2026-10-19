@@ -57,24 +57,14 @@ impl Library {
     pub fn report_token(&self, p: usize, id: u64) -> Result<String> {
         let index = catalog_index::Index::new(&self.projects[p]);
         let path = index.paths.get(&id).ok_or("Unknown report")?;
-        draft(
-            &self.projects[p],
-            &index,
-            id,
-            &fs::read_to_string(self.dir(p).join(path)).map_err(|e| e.to_string())?,
-        )
+        draft(&self.projects[p], &index, id, &self.text(p, path)?)
     }
     pub fn completion_token(&self, p: usize, id: u64) -> Result<String> {
         let project = &self.projects[p];
         let index = catalog_index::Index::new(project);
         let path = index.paths.get(&id).ok_or("Unknown report")?;
-        let own = draft(
-            project,
-            &index,
-            id,
-            &fs::read_to_string(self.dir(p).join(path)).map_err(|e| e.to_string())?,
-        )?;
-        completion(&index, &self.dir(p), id, &own)
+        let own = draft(project, &index, id, &self.text(p, path)?)?;
+        self.completion(p, &index, id, &own)
     }
     pub fn structural_token(&self, p: usize, id: u64) -> Result<String> {
         Ok(format!(
@@ -92,7 +82,7 @@ impl Library {
             "completion" if token.starts_with("c4:") => self.completion_token(p, id)?,
             "structural" if token.starts_with("s4:") => self.structural_token(p, id)?,
             _ if !token.contains(':') => {
-                let content = fs::read_to_string(self.path(p, id)?).map_err(|e| e.to_string())?;
+                let content = self.text(p, &self.report_rel(p, id)?)?;
                 hash(&format!("{}\n{content}", self.projects[p].revision))
             }
             _ => {
@@ -110,45 +100,54 @@ impl Library {
     }
 }
 
-fn completion(index: &catalog_index::Index<'_>, dir: &Path, id: u64, own: &str) -> Result<String> {
-    let mut queue = vec![id];
-    let mut seen = HashSet::new();
-    while let Some(id) = queue.pop() {
-        if !seen.insert(id) {
-            continue;
+impl Library {
+    /// The completion token: the draft token plus the state of everything completion checks.
+    fn completion(
+        &self,
+        p: usize,
+        index: &catalog_index::Index<'_>,
+        id: u64,
+        own: &str,
+    ) -> Result<String> {
+        let mut queue = vec![id];
+        let mut seen = HashSet::new();
+        while let Some(id) = queue.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(kids) = index.children.get(&id) {
+                queue.extend(kids.iter().filter(|k| !index.nodes[k].context_only));
+            }
+            if let Some(deps) = index.requires.get(&id) {
+                queue.extend(deps);
+            }
         }
-        if let Some(kids) = index.children.get(&id) {
-            queue.extend(kids.iter().filter(|k| !index.nodes[k].context_only));
+        let states = index.states_with(&self.dir(p), seen.iter().copied(), &|| {
+            self.hash_overrides()
+        });
+        let mut inputs = vec![];
+        for id in seen {
+            let n = index.nodes[&id];
+            let actual = if n.status == Status::Complete {
+                Some(hash(&self.text(p, &index.paths[&id])?))
+            } else {
+                None
+            };
+            inputs.push((
+                id,
+                n.revision,
+                n.status,
+                states[&id],
+                n.accepted_hash.clone(),
+                actual,
+            ));
         }
-        if let Some(deps) = index.requires.get(&id) {
-            queue.extend(deps);
-        }
+        inputs.sort_by_key(|i| i.0);
+        Ok(format!(
+            "c4:{}",
+            hash(&serde_json::to_string(&(own, inputs)).map_err(|e| e.to_string())?)
+        ))
     }
-    let states = index.states_for(dir, seen.iter().copied());
-    let mut inputs = vec![];
-    for id in seen {
-        let n = index.nodes[&id];
-        let actual = if n.status == Status::Complete {
-            Some(hash(
-                &fs::read_to_string(dir.join(&index.paths[&id])).map_err(|e| e.to_string())?,
-            ))
-        } else {
-            None
-        };
-        inputs.push((
-            id,
-            n.revision,
-            n.status,
-            states[&id],
-            n.accepted_hash.clone(),
-            actual,
-        ));
-    }
-    inputs.sort_by_key(|i| i.0);
-    Ok(format!(
-        "c4:{}",
-        hash(&serde_json::to_string(&(own, inputs)).map_err(|e| e.to_string())?)
-    ))
 }
 
 #[derive(Serialize)]
@@ -180,15 +179,16 @@ impl Library {
         let node = index.nodes.get(&id).ok_or("Unknown node")?;
         let report = self.dir(p).join(&index.paths[&id]);
         layout::inside(&self.dir(p), &report)?;
-        let text = fs::read_to_string(&report).map_err(|e| e.to_string())?;
+        let text = self.text(p, &index.paths[&id])?;
         let (body, evidence) = parts(&text)?;
         let token = draft(project, &index, id, &text)?;
-        let completion_token = completion(&index, &self.dir(p), id, &token)?;
+        let completion_token = self.completion(p, &index, id, &token)?;
         let structural_token = format!(
             "s4:{}",
             hash(&format!("{}:{}", project.structural_epoch, token))
         );
-        let effective_status = index.states_for(&self.dir(p), [id])[&id];
+        let effective_status =
+            index.states_with(&self.dir(p), [id], &|| self.hash_overrides())[&id];
         let requires = index.requires.get(&id).cloned().unwrap_or_default();
         let dependency_rvas = requires
             .iter()

@@ -356,6 +356,8 @@ pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
         projects: vec![project.clone()],
         _lock: None,
         recovery_blocked: None,
+        overlay: None,
+        staging: None,
     };
     temporary.sync_dependency_files(0)?;
     // The catalog is the commit point. The retained journal contains the original catalog and reports.

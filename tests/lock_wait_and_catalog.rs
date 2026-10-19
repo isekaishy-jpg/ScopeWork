@@ -34,6 +34,8 @@ impl Fixture {
     }
     fn run(&self, args: &[&str]) -> Output {
         std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+            // These tests cover direct mode; tests/coordinator.rs covers the coordinator.
+            .env("SCOPEWORK_COORDINATOR", "off")
             .arg("--home")
             .arg(&self.home)
             .args(args)
@@ -131,6 +133,8 @@ fn locks_lists_the_holder_and_waiters_and_wait_idle_returns_after_release() {
     let f = Fixture::new();
     let held = f.hold();
     let mut waiter = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        // These tests cover direct mode; tests/coordinator.rs covers the coordinator.
+        .env("SCOPEWORK_COORDINATOR", "off")
         .arg("--home")
         .arg(&f.home)
         .args(["--wait", "20", "node", "show", "fixture", "0"])
@@ -151,6 +155,8 @@ fn locks_lists_the_holder_and_waiters_and_wait_idle_returns_after_release() {
     }
     assert!(seen, "the waiting reader should be listed");
     let idle = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        // These tests cover direct mode; tests/coordinator.rs covers the coordinator.
+        .env("SCOPEWORK_COORDINATOR", "off")
         .arg("--home")
         .arg(&f.home)
         .args(["wait", "fixture", "--idle", "--timeout", "20"])
@@ -182,6 +188,8 @@ fn wait_times_out_and_session_answers_one_line_per_command() {
     drop(_held);
     use std::io::Write;
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        // These tests cover direct mode; tests/coordinator.rs covers the coordinator.
+        .env("SCOPEWORK_COORDINATOR", "off")
         .arg("--home")
         .arg(&f.home)
         .arg("session")

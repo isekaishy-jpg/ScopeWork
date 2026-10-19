@@ -319,6 +319,8 @@ impl Library {
             projects: vec![project],
             busy_projects: vec![],
             recovery_blocked: None,
+            overlay: None,
+            staging: None,
             _lock: Some(OperationLocks {
                 project: Some(id.into()),
                 writable: apply,

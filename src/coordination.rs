@@ -143,7 +143,7 @@ pub(super) fn open_queue(dir: &Path, project: &Project) -> std::collections::Has
 impl Library {
     /// Claims that are currently in force (unexpired), by node.
     pub fn claims(&self, p: usize) -> Result<BTreeMap<u64, Claim>> {
-        let text = fs::read_to_string(self.dir(p).join(CLAIMS)).unwrap_or_default();
+        let text = self.text_opt(p, CLAIMS)?.unwrap_or_default();
         let now = now_unix();
         Ok(read_map::<Claim>(&text, "claims")?
             .into_iter()
@@ -230,7 +230,7 @@ impl Library {
         p: usize,
         states: &std::collections::HashMap<u64, Status>,
     ) -> Result<BTreeMap<u64, Vec<QueueEntry>>> {
-        let text = fs::read_to_string(self.dir(p).join(REVIEW_QUEUE)).unwrap_or_default();
+        let text = self.text_opt(p, REVIEW_QUEUE)?.unwrap_or_default();
         Ok(read_map::<Vec<QueueEntry>>(&text, "entries")?
             .into_iter()
             .filter(|(id, _)| states.get(id).is_some_and(|s| *s != Status::Complete))

@@ -39,6 +39,8 @@ impl Fixture {
     }
     fn run(&self, args: &[&str]) -> Output {
         std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+            // These tests cover direct mode; tests/coordinator.rs covers the coordinator.
+            .env("SCOPEWORK_COORDINATOR", "off")
             .arg("--home")
             .arg(&self.home)
             .args(args)

@@ -82,38 +82,38 @@ pub struct ReportSave {
     pub evidence: String,
 }
 #[derive(Serialize, Deserialize)]
-struct Edit {
-    id: u64,
-    old: Option<String>,
-    new: String,
-    before: Option<String>,
-    after: String,
+pub(super) struct Edit {
+    pub(super) id: u64,
+    pub(super) old: Option<String>,
+    pub(super) new: String,
+    pub(super) before: Option<String>,
+    pub(super) after: String,
 }
 #[derive(Serialize, Deserialize)]
-struct Move {
+pub(super) struct Move {
     id: u64,
     old: String,
     new: String,
 }
 #[derive(Serialize, Deserialize)]
-struct Sidecar {
-    path: String,
-    before: String,
-    after: String,
+pub(super) struct Sidecar {
+    pub(super) path: String,
+    pub(super) before: String,
+    pub(super) after: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Journal {
-    before: Project,
-    after: Project,
-    edits: Vec<Edit>,
-    moves: Vec<Move>,
-    dependencies: Vec<u64>,
-    sidecars: Vec<Sidecar>,
+pub(super) struct Journal {
+    pub(super) before: Project,
+    pub(super) after: Project,
+    pub(super) edits: Vec<Edit>,
+    pub(super) moves: Vec<Move>,
+    pub(super) dependencies: Vec<u64>,
+    pub(super) sidecars: Vec<Sidecar>,
     /// Repath the annotation ledger when the catalog commits: this transaction's folder moves
     /// (which include archived nodes), then canonical resolution against `after`. See `ledger.rs`.
     #[serde(default)]
-    ledger: bool,
+    pub(super) ledger: bool,
 }
 
 fn parts(text: &str) -> Result<(&str, &str)> {
@@ -185,7 +185,7 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
 /// applies it. Unlike recovery, the journal is not read back and re-verified, and the
 /// after-catalog is serialised once for its fingerprint and the catalog write. Returns how
 /// many annotation-ledger report paths it repathed.
-fn commit(root: &Path, project: &mut Project, j: &Journal) -> Result<usize> {
+pub(super) fn commit(root: &Path, project: &mut Project, j: &Journal) -> Result<usize> {
     let (delta, after_bytes) = journal_history::pending_delta(j)?;
     let folder = prepare_pending(root)?;
     atomic(
@@ -197,6 +197,26 @@ fn commit(root: &Path, project: &mut Project, j: &Journal) -> Result<usize> {
         std::process::exit(99);
     }
     fault("journal");
+    let mut previous: Vec<(String, Option<String>)> = j
+        .edits
+        .iter()
+        .flat_map(|e| {
+            let mut files = vec![];
+            if let Some(old) = &e.old {
+                files.push((old.clone(), e.before.clone()));
+            }
+            if e.old.as_deref() != Some(e.new.as_str()) {
+                files.push((e.new.clone(), None));
+            }
+            files
+        })
+        .collect();
+    previous.extend(
+        j.sidecars
+            .iter()
+            .map(|s| (s.path.clone(), Some(s.before.clone()))),
+    );
+    operations::before_commit(&previous);
     finish(root, project, j, Some((delta, after_bytes)))
 }
 
@@ -329,6 +349,8 @@ fn finish(
         busy_projects: vec![],
         _lock: None,
         recovery_blocked: None,
+        overlay: None,
+        staging: None,
     };
     if !j.dependencies.is_empty() {
         temporary.sync_dependency_subset(0, Some(&j.dependencies.iter().copied().collect()))?;
@@ -371,9 +393,10 @@ pub(super) fn read_flags(root: &Path) -> Result<std::collections::BTreeMap<u64, 
     if !path.is_file() {
         return Ok(Default::default());
     }
-    let value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+    parse_flags(&fs::read_to_string(&path).map_err(|e| e.to_string())?)
+}
+fn parse_flags(text: &str) -> Result<std::collections::BTreeMap<u64, ReviewFlag>> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     if value["schema"] != 1 {
         return Err("Unsupported review flag file".into());
     }
@@ -385,7 +408,10 @@ fn flags_text(flags: &std::collections::BTreeMap<u64, ReviewFlag>) -> Result<Str
 }
 impl Library {
     pub fn review_flags(&self, p: usize) -> Result<std::collections::BTreeMap<u64, ReviewFlag>> {
-        read_flags(&self.dir(p))
+        match self.text_opt(p, REVIEW_FLAGS)? {
+            Some(text) => parse_flags(&text),
+            None => Ok(Default::default()),
+        }
     }
     /// Flag (Some reason) or clear (None) a record for review. Flags never change status; they block completion.
     pub fn set_review_flag(&mut self, p: usize, id: u64, reason: Option<&str>) -> Result<()> {
@@ -395,13 +421,16 @@ impl Library {
         if !self.projects[p].nodes.iter().any(|n| n.id == id) {
             return Err("Unknown node".into());
         }
-        let root = self.dir(p);
-        let path = root.join(REVIEW_FLAGS);
-        if !path.is_file() {
-            atomic(&path, flags_text(&Default::default())?.as_bytes())?;
-        }
-        let before_text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let mut flags = read_flags(&root)?;
+        let before_text = match self.text_opt(p, REVIEW_FLAGS)? {
+            Some(text) => text,
+            None => {
+                // An empty file first, so the transaction has a `before` to recover to.
+                let empty = flags_text(&Default::default())?;
+                atomic(&self.dir(p).join(REVIEW_FLAGS), empty.as_bytes())?;
+                empty
+            }
+        };
+        let mut flags = parse_flags(&before_text)?;
         match reason.map(str::trim) {
             Some("") => return Err("A review flag needs a short reason.".into()),
             Some(reason) => {
@@ -435,7 +464,7 @@ impl Library {
             }],
             ledger: false,
         };
-        commit(&root, &mut self.projects[p], &journal).map(|_| ())
+        self.commit_or_stage(p, journal).map(|_| ())
     }
 }
 impl Library {
@@ -448,7 +477,10 @@ impl Library {
         } else {
             "entries"
         };
-        let before_text = coordination::ensure(&root, name, field)?;
+        let before_text = match self.text_opt(p, name)? {
+            Some(text) => text,
+            None => coordination::ensure(&root, name, field)?,
+        };
         if before_text == after_text {
             return Ok(());
         }
@@ -468,7 +500,7 @@ impl Library {
             }],
             ledger: false,
         };
-        commit(&root, &mut self.projects[p], &journal).map(|_| ())
+        self.commit_or_stage(p, journal).map(|_| ())
     }
 }
 /// Return started-but-incomplete records to Not Started (for example after generated evidence was attached).
@@ -565,8 +597,7 @@ impl Library {
             sidecars: vec![],
             ledger: false,
         };
-        let root = self.dir(p);
-        commit(&root, &mut self.projects[p], &journal).map(|_| ())
+        self.commit_or_stage(p, journal).map(|_| ())
     }
     pub fn read_reports(&self, p: usize, ids: &[u64]) -> Result<serde_json::Value> {
         let project = &self.projects[p];
@@ -579,7 +610,7 @@ impl Library {
                 return Err("Duplicate report ID".into());
             }
             let path = self.dir(p).join(&index.paths[id]);
-            let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let text = self.text(p, &index.paths[id])?;
             let (body, evidence) = parts(&text)?;
             reports.push(serde_json::json!({"id":id,"report":path,"body":body,"evidence":evidence,
                 "token":edit_tokens::draft(project,&index,*id,&text)?,"criteria":node.kind.completion_criteria()}));
@@ -621,7 +652,7 @@ impl Library {
             }
             let path = &index.paths[&input.id];
             contained(&root, &root.join(path))?;
-            let original = fs::read_to_string(root.join(path)).map_err(|e| e.to_string())?;
+            let original = self.text(p, path)?;
             let current = if input.expect.starts_with("d4:") {
                 edit_tokens::draft(&before, &index, input.id, &original)?
             } else {
@@ -679,7 +710,7 @@ impl Library {
             sidecars: vec![],
             ledger: false,
         };
-        commit(&root, &mut self.projects[p], &journal)?;
+        self.commit_or_stage(p, journal)?;
         Ok(changed)
     }
 

@@ -165,6 +165,8 @@ pub(super) fn snapshot(
         busy_projects: vec![],
         _lock: None,
         recovery_blocked: None,
+        overlay: None,
+        staging: None,
     };
     let mut views = vec![];
     let mut ids = fs::read_dir(&root)

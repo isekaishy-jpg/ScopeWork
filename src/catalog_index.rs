@@ -116,6 +116,7 @@ impl<'a> Index<'a> {
         &self,
         dir: &Path,
         roots: impl IntoIterator<Item = u64>,
+        overrides: &dyn Fn() -> HashMap<String, Option<String>>,
     ) -> HashMap<u64, Option<String>> {
         let mut seen = HashSet::new();
         let mut queue: Vec<u64> = roots.into_iter().collect();
@@ -137,8 +138,17 @@ impl<'a> Index<'a> {
         let ids: Vec<u64> = wanted.into_iter().collect();
         let rels: Vec<&str> = ids.iter().map(|id| self.paths[id].as_str()).collect();
         let hashes = report_hashes::hashes(dir, &rels);
+        // Read after hashing: a text replaced meanwhile is already in the caller's overrides.
+        let overrides = overrides();
         ids.into_iter()
-            .map(|id| (id, hashes.get(&self.paths[&id]).cloned().flatten()))
+            .map(|id| {
+                let path = &self.paths[&id];
+                let hash = match overrides.get(path) {
+                    Some(overridden) => overridden.clone(),
+                    None => hashes.get(path).cloned().flatten(),
+                };
+                (id, hash)
+            })
             .collect()
     }
     fn state(
@@ -205,13 +215,16 @@ impl<'a> Index<'a> {
         cache.insert(id, state);
         state
     }
-    pub fn states_for(
+    /// Effective status of `ids`, with report hashes that differ from the files on disk for the caller's view
+    /// (texts staged in a merged commit, or replaced since a snapshot was taken).
+    pub fn states_with(
         &self,
         dir: &Path,
         ids: impl IntoIterator<Item = u64>,
+        overrides: &dyn Fn() -> HashMap<String, Option<String>>,
     ) -> HashMap<u64, Status> {
         let ids: Vec<u64> = ids.into_iter().collect();
-        let hashes = self.report_hashes(dir, ids.iter().copied());
+        let hashes = self.report_hashes(dir, ids.iter().copied(), overrides);
         let mut cache = HashMap::new();
         let mut active = HashSet::new();
         for id in ids {
@@ -220,7 +233,15 @@ impl<'a> Index<'a> {
         cache
     }
     pub fn states(&self, dir: &Path) -> HashMap<u64, Status> {
-        let hashes = self.report_hashes(dir, self.nodes.keys().copied());
+        self.states_all_with(dir, &HashMap::new)
+    }
+    /// `states` with hash overrides, as in `states_with`.
+    pub fn states_all_with(
+        &self,
+        dir: &Path,
+        overrides: &dyn Fn() -> HashMap<String, Option<String>>,
+    ) -> HashMap<u64, Status> {
+        let hashes = self.report_hashes(dir, self.nodes.keys().copied(), overrides);
         let mut cache = HashMap::new();
         let mut active = HashSet::new();
         for id in self.nodes.keys() {
