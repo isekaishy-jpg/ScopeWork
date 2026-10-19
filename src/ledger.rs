@@ -80,14 +80,13 @@ impl Library {
             dir.to_string_lossy()
                 .replace('\\', "/")
                 .trim_end_matches('/')
-                .to_lowercase()
         );
         let rows: Vec<serde_json::Value> = paths
             .iter()
             .map(|input| {
                 let mut path = input.replace('\\', "/");
-                if path.to_lowercase().starts_with(&prefix) {
-                    path = path[prefix.len()..].to_string();
+                if let Some(rest) = layout::strip_prefix_ignore_case(&path, &prefix) {
+                    path = rest.to_string();
                 }
                 match resolver.current(&path) {
                     Some((id, current)) => {

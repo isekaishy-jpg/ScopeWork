@@ -393,7 +393,9 @@ research coordinator stop         # stop admitting, finish queued work, exit
 
 `SCOPEWORK_COORDINATOR` selects the behaviour: `auto` (default) uses or starts a coordinator and falls back to direct mode when none can be used; `off` always runs in-process; `required` fails with `coordinator_unavailable` instead of falling back. `SCOPEWORK_SUBMITTER` names the caller in queue entries (default: process ID and command).
 
-If the connection fails after a write was sent, the command fails with `coordinator_lost`: the operation may or may not have been applied, so check the record (its token or revision) before retrying. Reads and writes that could not be sent fall back or fail as above and are safe to retry.
+If the connection fails after a write was sent, the command fails with `coordinator_lost`: the operation may or may not have been applied, so check the record (its token or revision) before retrying. If the coordinator's writer itself fails while applying a batch, its operations fail with `writer_failed`, with the same advice; the writer keeps serving later operations. Reads and writes that could not be sent fall back or fail as above and are safe to retry.
+
+Reads answer from the coordinator's snapshot unless another process (direct mode, an older version, an import publication) is changing the project at the same time; such a read is answered again under the project lock, the way direct mode answers it, so it never mixes two revisions. `research wait --idle` waits until no writer holds the lock and the coordinator's queue is empty.
 
 The pipe accepts only the same Windows user on the same machine. A coordinator from an older version retires when a newer client connects; a newer coordinator turns older clients away and they run in direct mode. Windows shutdown and installer upgrades close it gracefully after queued work finishes.
 

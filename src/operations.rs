@@ -211,10 +211,13 @@ impl Library {
                 .collect(),
             ledger: false,
         };
-        catalog_batch::commit(&root, &mut self.projects[p], &j)?;
+        if let Err(e) = catalog_batch::commit(&root, &mut self.projects[p], &j) {
+            // Nothing staged may outlive a failed commit in memory.
+            self.projects[p] = j.before;
+            return Err(e);
+        }
         Ok(staged.operations)
     }
-    /// Abandons staged operations: restores the catalog from before the first one.
     /// Runs one operation while staging. If it fails without staging anything, its in-memory
     /// changes are undone, as they would vanish with its own process; if it staged and then
     /// failed, the staged part stays, as its commit would have.
@@ -232,6 +235,7 @@ impl Library {
         }
         result
     }
+    /// Abandons staged operations: restores the catalog from before the first one.
     pub(crate) fn discard_staged(&mut self, p: usize) {
         self.overlay = None;
         if let Some(staged) = self.staging.take() {
@@ -282,6 +286,9 @@ mod tests {
             lib.save_report(0, 4, "Second research", "Evidence", true, &tokens[2])
                 .is_ok(),
             lib.claim(0, 2, "agent-a", "", None, false).is_ok(),
+            // A second claim must keep the first; a conflicting one is refused.
+            lib.claim(0, 1, "agent-b", "", None, false).is_ok(),
+            lib.claim(0, 2, "agent-c", "", None, false).is_ok(),
         ]
     }
     fn tokens(lib: &Library) -> Vec<String> {
@@ -310,19 +317,23 @@ mod tests {
         let merged_results = run(&mut merged, &merged_tokens);
         assert_eq!(
             merged.commit_staged(0).unwrap(),
-            4,
-            "four operations accepted"
+            5,
+            "five operations accepted"
         );
 
         assert_eq!(merged_results, serial_results);
-        assert_eq!(merged_results, vec![true, true, false, true, false, true]);
+        assert_eq!(
+            merged_results,
+            vec![true, true, false, true, false, true, true, false]
+        );
         assert!(merged.projects[0] == serial.projects[0]);
         assert_eq!(reports(&merged), reports(&serial));
         assert_eq!(
             merged.review_flags(0).unwrap(),
             serial.review_flags(0).unwrap()
         );
-        assert_eq!(merged.claims(0).unwrap().len(), 1);
+        assert_eq!(merged.claims(0).unwrap(), serial.claims(0).unwrap());
+        assert_eq!(merged.claims(0).unwrap().len(), 2);
         // One receipt for the whole merged commit.
         let receipts = fs::read_dir(
             merged
@@ -349,6 +360,28 @@ mod tests {
         assert!(lib.set_dependencies(0, 4, "1000").is_err());
         lib.discard_staged(0);
         assert!(lib.set_dependencies(0, 4, "1000").is_ok());
+    }
+
+    #[test]
+    fn a_failed_merged_commit_leaves_no_staged_state_in_memory() {
+        let (_home, mut lib) = fixture();
+        let before = lib.projects[0].clone();
+        let token = lib.report_token(0, 3).unwrap();
+        lib.begin_staging(0);
+        lib.save_report(0, 3, "Staged research", "Evidence", false, &token)
+            .unwrap();
+        assert!(lib.projects[0] != before, "the save is staged in memory");
+        // An unexpected file in the pending folder makes the commit fail before it writes.
+        let pending = lib
+            .dir(0)
+            .join("tools/workspaces/catalog-transactions-v4/pending");
+        fs::create_dir_all(&pending).unwrap();
+        fs::write(pending.join("stray.txt"), "x").unwrap();
+        assert!(lib.commit_staged(0).is_err());
+        assert!(
+            lib.projects[0] == before,
+            "the failed commit's state was undone"
+        );
     }
 
     #[test]

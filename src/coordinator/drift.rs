@@ -17,6 +17,8 @@ const SIDECARS: [&str; 3] = ["review-flags.json", "claims.json", "review-queue.j
 const LEDGER: &str = "tools/profiles/annotations.json";
 
 type Stamp = Option<(u64, SystemTime)>;
+/// How close to a stamp's taking a modification time must be to distrust the stamp.
+const RACY: std::time::Duration = std::time::Duration::from_secs(2);
 fn stamp(path: &Path) -> Stamp {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.len(), meta.modified().ok()?))
@@ -42,14 +44,15 @@ pub(super) struct Watch {
     /// When the previous check started; leases touched since then excuse a change.
     previous: Option<Instant>,
     manifest: Stamp,
-    /// Declared files: path -> (resource, stamp, hash).
-    files: BTreeMap<String, (String, Stamp, Option<String>)>,
+    /// Declared files: path -> (resource, stamp, hash, when the stamp was taken).
+    files: BTreeMap<String, (String, Stamp, Option<String>, SystemTime)>,
     /// The catalog and sidecars: path -> stamp.
     owned: BTreeMap<String, Stamp>,
     /// The catalog's revision and layout version last seen, and the stamp they were read at.
     revision: Option<u64>,
     layout: Option<u64>,
     catalog: Stamp,
+    catalog_taken: Option<SystemTime>,
 }
 
 /// The catalog's revision and layout version, read from the first 64 KB of `project.json`
@@ -101,12 +104,12 @@ impl Watch {
                 let kept = self
                     .files
                     .remove(&file)
-                    .map(|(_, s, h)| (s, h))
+                    .map(|(_, s, h, t)| (s, h, t))
                     .unwrap_or_else(|| {
                         let path = dir.join(&file);
-                        (stamp(&path), hash(&path))
+                        (stamp(&path), hash(&path), SystemTime::now())
                     });
-                files.insert(file, (resource, kept.0, kept.1));
+                files.insert(file, (resource, kept.0, kept.1, kept.2));
             }
             self.files = files;
         }
@@ -116,7 +119,12 @@ impl Watch {
         let in_flight = dir.join(PENDING).exists();
         let catalog = dir.join("project.json");
         let catalog_stamp = stamp(&catalog);
-        let (revision, layout) = if catalog_stamp == self.catalog && !first {
+        // The racy-timestamp rule again: a catalog rewritten within one clock tick keeps its stamp.
+        let catalog_racy = catalog_stamp.is_some_and(|(_, modified)| {
+            self.catalog_taken
+                .is_none_or(|taken| modified + RACY > taken)
+        });
+        let (revision, layout) = if catalog_stamp == self.catalog && !first && !catalog_racy {
             (self.revision, self.layout)
         } else {
             catalog_head(&catalog)
@@ -136,7 +144,10 @@ impl Watch {
             let path = dir.join(owned);
             let now = stamp(&path);
             let before = self.owned.insert(owned.to_string(), now);
-            if first || in_flight || before.as_ref() == Some(&now) || scopework_wrote {
+            // A sidecar appearing is Scopework creating it empty just before its first
+            // transaction (the transaction itself may land in the next poll).
+            let created = before == Some(None);
+            if first || in_flight || created || before.as_ref() == Some(&now) || scopework_wrote {
                 continue;
             }
             found.push(Drift {
@@ -150,15 +161,20 @@ impl Watch {
             self.revision = revision;
             self.layout = layout;
             self.catalog = catalog_stamp;
+            self.catalog_taken = Some(SystemTime::now());
         }
 
-        for (file, (resource, old_stamp, old_hash)) in self.files.iter_mut() {
+        for (file, (resource, old_stamp, old_hash, taken)) in self.files.iter_mut() {
             let path = dir.join(file.as_str());
             let now = stamp(&path);
-            if now == *old_stamp {
+            // A stamp is trusted only for a file modified well before it was taken (git's
+            // racy-timestamp rule): two same-size writes within one timestamp tick look alike.
+            let racy = now.is_some_and(|(_, modified)| modified + RACY > *taken);
+            if now == *old_stamp && !racy {
                 continue;
             }
             *old_stamp = now;
+            *taken = SystemTime::now();
             let new_hash = hash(&path);
             if new_hash == *old_hash {
                 continue;
@@ -237,7 +253,8 @@ mod tests {
         );
         // Rewriting the same bytes is no change.
         std::fs::write(d.join(LEDGER), "{\"a\":2}").unwrap();
-        assert!(watch.check(d, &nobody).is_empty());
+        let found = watch.check(d, &nobody);
+        assert!(found.is_empty(), "{found:?}");
 
         // A catalog change that raises the revision is Scopework's (a transaction, or a scope or
         // import write without a receipt); one that does not is drift.
@@ -263,7 +280,7 @@ mod tests {
         assert!(watch.check(d, &nobody).is_empty());
         std::fs::write(
             d.join("project.json"),
-            r#"{"layout_version":5,"revision":3,"research_scope":"y"}"#,
+            r#"{"layout_version":5,"revision":3,"research_scope":"yy"}"#,
         )
         .unwrap();
         let drift = watch.check(d, &nobody);
@@ -272,5 +289,13 @@ mod tests {
             (drift[0].resource.as_str(), drift[0].file.as_str()),
             ("catalog", "project.json")
         );
+        // A sidecar created empty ahead of its transaction is not drift; an edit without a
+        // revision change is.
+        std::fs::write(d.join("claims.json"), r#"{"schema":1,"claims":{}}"#).unwrap();
+        assert!(watch.check(d, &nobody).is_empty());
+        std::fs::write(d.join("claims.json"), r#"{"schema":1,"claims":{"2":{}}}"#).unwrap();
+        let drift = watch.check(d, &nobody);
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0].file, "claims.json");
     }
 }

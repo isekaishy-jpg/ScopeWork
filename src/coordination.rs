@@ -176,8 +176,7 @@ impl Library {
         if owner.is_empty() {
             return Err("A claim needs an owner.".into());
         }
-        let root = self.dir(p);
-        let mut all: BTreeMap<u64, Claim> = read_map(&ensure(&root, CLAIMS, "claims")?, "claims")?;
+        let mut all: BTreeMap<u64, Claim> = read_map(&self.claims_text(p)?, "claims")?;
         let now = now_unix();
         if let Some(existing) = all.get(&id)
             && existing.owner != owner
@@ -208,8 +207,7 @@ impl Library {
         if !self.writable(p) {
             return self.write_project(p, |l, p| l.release_claim(p, id, owner, force));
         }
-        let root = self.dir(p);
-        let mut all: BTreeMap<u64, Claim> = read_map(&ensure(&root, CLAIMS, "claims")?, "claims")?;
+        let mut all: BTreeMap<u64, Claim> = read_map(&self.claims_text(p)?, "claims")?;
         match all.get(&id) {
             None => return Ok(false),
             Some(c) if c.owner != owner.trim() && !force => {
@@ -223,6 +221,14 @@ impl Library {
         all.remove(&id);
         self.write_sidecar(p, CLAIMS, write_map("claims", &all)?)?;
         Ok(true)
+    }
+    /// The claims sidecar as this view sees it (including claims staged earlier in a merged
+    /// commit), created empty first when it does not exist yet.
+    fn claims_text(&self, p: usize) -> Result<String> {
+        match self.text_opt(p, CLAIMS)? {
+            Some(text) => Ok(text),
+            None => ensure(&self.dir(p), CLAIMS, "claims"),
+        }
     }
     /// Open review-queue entries: records reopened by structural changes and not complete again.
     pub fn review_queue(

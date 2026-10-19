@@ -655,9 +655,33 @@ fn run(args: Args) -> Result<Value, String> {
         let mut revision = 0;
         let mut complete_ok = complete.is_none();
         let mut evaluated: Option<std::time::Instant> = None;
+        // With a coordinator, writes also wait in its queue while the lock is free.
+        let mut coordinator: Option<crate::coordinator::client::Connection> = None;
         loop {
             let status = crate::research::lock_status(&root, id)?;
-            let idle_ok = !idle || status["writer_active"] == false;
+            let queue_idle = !idle || {
+                if coordinator.is_none() {
+                    coordinator = crate::coordinator::client::connect(&home, "cli", false)
+                        .ok()
+                        .flatten();
+                }
+                match coordinator
+                    .as_mut()
+                    .map(|c| c.request(&["queue".into(), id.clone()], None))
+                {
+                    Some(Ok(answer)) => answer.stdout.as_ref().is_some_and(|queue| {
+                        queue["running"].as_array().is_some_and(Vec::is_empty)
+                            && queue["waiting"].as_array().is_some_and(Vec::is_empty)
+                    }),
+                    // Gone: the lock alone decides, as without a coordinator.
+                    Some(Err(_)) => {
+                        coordinator = None;
+                        true
+                    }
+                    None => true,
+                }
+            };
+            let idle_ok = !idle || (status["writer_active"] == false && queue_idle);
             let stamp = fs::metadata(&catalog)
                 .ok()
                 .map(|m| (m.len(), m.modified().ok()));

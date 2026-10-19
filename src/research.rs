@@ -510,7 +510,7 @@ pub(crate) fn resource_locks(
     projects: &Path,
     project: &str,
     resources: &[String],
-) -> Result<Vec<fs::File>> {
+) -> Result<Vec<ResourceLock>> {
     if !valid_id(project) {
         return Err("Invalid project ID".into());
     }
@@ -519,8 +519,25 @@ pub(crate) fn resource_locks(
     names.dedup();
     names
         .iter()
-        .map(|resource| project_lock(projects, &resource_lock_id(project, resource), true))
+        .map(|resource| {
+            let id = resource_lock_id(project, resource);
+            Ok(ResourceLock {
+                _file: project_lock(projects, &id, true)?,
+                holder: projects.join(".project-locks").join(format!("{id}.holder")),
+            })
+        })
         .collect()
+}
+/// A lock from `resource_locks`. Like a project lock, it removes its holder record before
+/// the lock itself is released.
+pub(crate) struct ResourceLock {
+    _file: fs::File,
+    holder: PathBuf,
+}
+impl Drop for ResourceLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.holder);
+    }
 }
 fn lock_entry(projects: &Path, id: &str) -> serde_json::Value {
     let folder = projects.join(".project-locks");

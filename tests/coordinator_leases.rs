@@ -376,6 +376,11 @@ fn without_a_coordinator_lock_files_exclude_and_show_in_locks() {
         .map(|r| r.1)
         .collect();
     assert_eq!(starts, [1, 1]);
+    // Released locks leave no holder record behind.
+    let holder = f
+        .home
+        .join("projects/.project-locks/fixture.res-ledger.holder");
+    assert!(!holder.exists(), "stale holder record");
 }
 
 #[test]

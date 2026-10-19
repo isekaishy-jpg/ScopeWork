@@ -18,6 +18,13 @@ struct Journal {
     annotations: Option<String>,
 }
 
+/// `text` after `prefix`, compared ignoring ASCII case (Windows paths), or `None`. Never splits
+/// a character, whatever `text` holds.
+pub(super) fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
+}
 pub(super) fn link(from: &str, to: &str) -> String {
     let mut a: Vec<_> = from.split('/').collect();
     a.pop();
@@ -100,9 +107,7 @@ impl Rewriter {
             ""
         };
         let local = normalized.strip_prefix(uri_prefix).unwrap();
-        let absolute = local.to_lowercase().starts_with(&self.root.to_lowercase());
-        let rewritten = if absolute {
-            let local = &local[self.root.len()..];
+        let rewritten = if let Some(local) = strip_prefix_ignore_case(local, &self.root) {
             let end = local.find(['#', '?']).unwrap_or(local.len());
             let Some(moved) = self.remap(&local[..end]) else {
                 return target.into();
@@ -414,6 +419,23 @@ mod tests {
             "[chunk](../000002/research.md), [same](./research.md), see architectures/000001/000002/research.md."
         );
         assert_eq!(rewriter.rewrite(text, report, report), text);
+    }
+
+    #[test]
+    fn paths_whose_case_folding_changes_length_never_split_a_character() {
+        let f = fixture();
+        let rewriter = Rewriter::new(&[(MOVED.0.into(), MOVED.1.into())], &f.0);
+        let report = "architectures/000001/000004/research.md";
+        // The Kelvin sign lowercases to an ASCII k but takes three bytes: a project path
+        // spelled with it is not this project's path, and must not be sliced mid-character.
+        let root = format!("{}/", f.0.to_string_lossy().replace('\\', "/"));
+        assert!(root.contains('k'));
+        let text = format!(
+            "see {}{}/research.md",
+            root.replace('k', "\u{212A}"),
+            MOVED.0
+        );
+        assert_eq!(rewriter.rewrite(&text, report, report), text);
     }
 
     #[test]

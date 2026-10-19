@@ -223,6 +223,9 @@ struct ProjectState {
     wake: Condvar,
     /// True while this coordinator's writer is committing (its own pending journal is expected).
     writing: AtomicBool,
+    /// Changes by other processes noticed so far. Their file writes bypass the overlays, so a
+    /// read that overlaps one is answered again under the lock.
+    external: AtomicU64,
     reads: Mutex<ReadLog>,
     /// The writer's catalog kept between batches (see `Resident`).
     resident: Mutex<Option<Resident>>,
@@ -315,6 +318,7 @@ impl Server {
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
             writing: AtomicBool::new(false),
+            external: AtomicU64::new(0),
             resident: Mutex::new(None),
             commits: Mutex::new(CommitLog::default()),
             leases: Mutex::new(leases::Leases::default()),
@@ -385,6 +389,7 @@ impl Server {
         {
             return Ok(current);
         }
+        state.external.fetch_add(1, Ordering::AcqRel);
         let fresh = self.load(&state.id)?;
         Self::replace(state, fresh.clone());
         Ok(fresh)
@@ -400,21 +405,47 @@ impl Server {
             Err(e) => return Answer::of(Err(e)),
         };
         // Another process's transaction in progress: its report writes are not recorded in our
-        // overlays, so answer the way direct mode does, after it finishes.
-        let external =
-            !state.writing.load(Ordering::Acquire) && pending_journal(&self.root, &state.id);
-        let result = if external {
-            research::with_lock_wait(Duration::from_secs(120), || {
+        // overlays, so answer the way direct mode does, after it finishes. The same applies when
+        // one overlaps this read; that is checked afterwards, so reads never wait for this
+        // coordinator's own commits.
+        let locked = || -> Result<(Value, u64), String> {
+            let mut lib = research::with_lock_wait(Duration::from_secs(120), || {
                 Library::read_project(self.root.clone(), &state.id)
-            })
-            .and_then(|mut lib| cli::execute(command, &mut lib))
+            })?;
+            let revision = lib.projects.first().map_or(0, |p| p.revision);
+            let command = cli::parse(arguments)?.command;
+            cli::execute(command, &mut lib).map(|value| (value, revision))
+        };
+        let epoch = state.external.load(Ordering::Acquire);
+        let result = if self.external_activity(state, &snapshot) {
+            locked()
         } else {
             let mut lib = Library::snapshot_view(
                 self.root.clone(),
                 snapshot.project.clone(),
                 snapshot.overlay.clone(),
             );
-            cli::execute(command, &mut lib)
+            // Debug builds only: widens the window in which another process's commit overlaps
+            // this answer, for the regression test of that case.
+            #[cfg(debug_assertions)]
+            if let Some(ms) = std::env::var("SCOPEWORK_COORDINATOR_READ_DELAY_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+            {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
+            let answer = cli::execute(command, &mut lib);
+            let overlapped = state.external.load(Ordering::Acquire) != epoch
+                || self.external_activity(state, &snapshot);
+            if overlapped {
+                locked()
+            } else {
+                answer.map(|value| (value, snapshot.project.revision))
+            }
+        };
+        let (result, revision) = match result {
+            Ok((value, revision)) => (Ok(value), revision),
+            Err(e) => (Err(e), snapshot.project.revision),
         };
         let mut answer = Answer::of(result);
         if let Some(stdout) = answer.stdout.as_mut() {
@@ -427,11 +458,35 @@ impl Server {
             }
             // Array answers keep their shape; objects carry the revision and pending work.
             if stdout.is_object() {
-                stdout["revision"] = json!(snapshot.project.revision);
+                stdout["revision"] = json!(revision);
                 stdout["pending"] = Value::Array(pending);
             }
         }
         answer
+    }
+    /// Whether another process is changing the project's files right now: its catalog
+    /// transaction or import publication is in flight, or it committed a catalog this
+    /// coordinator has not published. Never true for this coordinator's own commits.
+    fn external_activity(&self, state: &ProjectState, snapshot: &Snapshot) -> bool {
+        if state.writing.load(Ordering::Acquire) {
+            return false;
+        }
+        let dir = self.root.join(&state.id);
+        let importing = snapshot
+            .project
+            .active_import
+            .iter()
+            .chain(snapshot.project.last_import.iter())
+            .any(|job| {
+                dir.join("tools/workspaces/import-jobs")
+                    .join(job)
+                    .join("publication/pending.json")
+                    .is_file()
+            });
+        let published = state.snapshot.read().ok().map(|s| s.stamp);
+        pending_journal(&self.root, &state.id)
+            || importing
+            || published.is_some_and(|published| stamp(&dir.join("project.json")) != published)
     }
     /// Queued and running operations that concern `nodes` (all of them when `None`).
     fn pending(&self, state: &ProjectState, nodes: Option<&[u64]>) -> Vec<Value> {
@@ -656,7 +711,21 @@ impl Server {
             }
         }
         state.writing.store(true, Ordering::Release);
-        let answers = self.apply(state, &batch);
+        let answers = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.apply(state, &batch)
+        }))
+        .unwrap_or_else(|_| {
+            // The library may hold anything now: the next batch re-opens from disk, and
+            // readers get what is committed.
+            if let Ok(mut resident) = state.resident.lock() {
+                *resident = None;
+            }
+            if let Some(committed) = self.committed_catalog(&state.id) {
+                self.publish(state, committed);
+            }
+            let error = "writer_failed: the coordinator's writer failed while applying this operation; it may or may not have been applied. Check the record before retrying.";
+            batch.iter().map(|_| Answer::of(Err(error.to_string()))).collect()
+        });
         state.writing.store(false, Ordering::Release);
         for (op, answer) in batch.into_iter().zip(answers) {
             let _ = op.reply.send(answer);
@@ -690,6 +759,10 @@ impl Server {
             },
         };
         let open_time = opening.elapsed();
+        #[cfg(debug_assertions)]
+        if std::env::var("SCOPEWORK_COORDINATOR_FAIL_AT").as_deref() == Ok("apply") {
+            panic!("injected writer failure");
+        }
         research::operations::take_commit_times();
         // Another process committed since the last snapshot: publish its state first, so
         // readers never see our next commit's texts against an older catalog.
@@ -699,6 +772,7 @@ impl Server {
             .map(|s| s.project == lib.projects[0])
             .unwrap_or(false);
         if !unchanged {
+            state.external.fetch_add(1, Ordering::AcqRel);
             self.publish(state, lib.projects[0].clone());
         }
         // Record each file's previous text in every live snapshot before a commit changes it.
@@ -734,7 +808,15 @@ impl Server {
         );
         let current = state.snapshot.read().map(|s| s.project.clone()).ok();
         if current.as_ref() != Some(&lib.projects[0]) {
-            self.publish(state, lib.projects[0].clone());
+            if answers.iter().all(|a| a.exit == 0) {
+                self.publish(state, lib.projects[0].clone());
+            } else if let Some(committed) = self.committed_catalog(&state.id)
+                && current.as_ref() != Some(&committed)
+            {
+                // A failure may leave the in-memory catalog ahead of the disk: readers get
+                // what was actually committed (the lock is still held, so it is current).
+                self.publish(state, committed);
+            }
         }
         let [delta, journal, applied] = research::operations::take_commit_times();
         if let Ok(mut log) = state.commits.lock() {
@@ -756,6 +838,14 @@ impl Server {
             }
         }
         answers
+    }
+}
+
+impl Server {
+    /// The catalog as committed on disk, or `None` if it cannot be read.
+    fn committed_catalog(&self, id: &str) -> Option<Project> {
+        let bytes = std::fs::read(self.root.join(id).join("project.json")).ok()?;
+        serde_json::from_slice(&bytes).ok()
     }
 }
 

@@ -587,3 +587,126 @@ fn the_writer_builds_on_direct_commits_made_between_its_batches() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+#[test]
+fn a_failing_writer_answers_its_operations_and_keeps_serving() {
+    let f = Fixture::new(1);
+    // The coordinator inherits the fault injection from the client that starts it.
+    let o = f
+        .command("required", &["project", "revision", "fixture"])
+        .env("SCOPEWORK_COORDINATOR_FAIL_AT", "apply")
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let save = |body: &str| {
+        let token = f.direct(&["node", "show", "fixture", "3"])["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut command = f.command("required", &[]);
+        command.args(f.save_args(3, &token, body));
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(command.output().unwrap());
+        });
+        result
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the save hung: the writer died")
+    };
+    for body in ["First", "Second"] {
+        let o = save(body);
+        assert!(!o.status.success());
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(stderr.contains("writer_failed"), "{stderr}");
+    }
+    // Nothing ran in direct mode behind the coordinator's back.
+    assert_eq!(f.direct(&["node", "show", "fixture", "3"])["body"], "");
+}
+
+#[test]
+fn wait_idle_waits_for_the_coordinators_queue() {
+    let f = Fixture::new(1);
+    let token = f.direct(&["node", "show", "fixture", "3"])["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.coordinated(&["queue", "fixture"]);
+    // A reader's shared lock: no writer holds the lock, but the queued save cannot commit.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.home.join("projects/.project-locks/fixture.lock"))
+        .unwrap();
+    lock.lock_shared().unwrap();
+    let save = f
+        .command("required", &[])
+        .args(f.save_args(3, &token, "Queued research"))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(800));
+    let waited = f.output("auto", &["wait", "fixture", "--idle", "--timeout", "2"]);
+    assert!(
+        !waited.status.success(),
+        "wait --idle ignored the queued save"
+    );
+    assert!(String::from_utf8_lossy(&waited.stderr).contains("timeout"));
+    lock.unlock().unwrap();
+    assert!(save.wait_with_output().unwrap().status.success());
+    let waited = f.output("auto", &["wait", "fixture", "--idle", "--timeout", "10"]);
+    assert!(
+        waited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&waited.stderr)
+    );
+}
+
+#[test]
+fn reads_never_mix_revisions_with_direct_mode_writers() {
+    let f = std::sync::Arc::new(Fixture::new(1));
+    let initial = f.direct(&["node", "show", "fixture", "3"]);
+    let mut committed = vec![(initial["body"].clone(), initial["node"]["revision"].clone())];
+    // The coordinator inherits a read delay, so direct commits land inside reads.
+    let o = f
+        .command("required", &["queue", "fixture"])
+        .env("SCOPEWORK_COORDINATOR_READ_DELAY_MS", "300")
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let writer = {
+        let f = f.clone();
+        std::thread::spawn(move || {
+            let mut pairs = vec![];
+            for i in 0..15 {
+                let token = f.direct(&["node", "show", "fixture", "3"])["token"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                let body = format!("Direct revision {i} {}", "x".repeat(i * 37));
+                let o = f
+                    .command("off", &[])
+                    .args(f.save_args(3, &token, &body))
+                    .output()
+                    .unwrap();
+                assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+                let shown = f.direct(&["node", "show", "fixture", "3"]);
+                pairs.push((shown["body"].clone(), shown["node"]["revision"].clone()));
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            pairs
+        })
+    };
+    let mut seen = vec![];
+    while !writer.is_finished() {
+        let read = f.coordinated(&["node", "show", "fixture", "3"]);
+        seen.push((read["body"].clone(), read["node"]["revision"].clone()));
+    }
+    committed.extend(writer.join().unwrap());
+    assert!(seen.len() > 5, "too few reads to mean anything");
+    for pair in &seen {
+        assert!(
+            committed.contains(pair),
+            "a read mixed a report text with another revision's record: {pair:?}"
+        );
+    }
+}

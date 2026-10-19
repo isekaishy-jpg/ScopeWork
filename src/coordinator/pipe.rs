@@ -107,23 +107,27 @@ mod imp {
         buf.truncate(len as usize);
         Ok(buf)
     }
-    fn same_user(a: &[u8], b: &[u8]) -> bool {
-        // SAFETY: both buffers hold TOKEN_USER structures returned by GetTokenInformation.
+    /// The SID pointer of a TOKEN_USER held in a byte buffer. A Vec<u8> is only byte-aligned,
+    /// so the structure is read unaligned; the SID it points to lies inside the same buffer.
+    fn sid(token_user: &[u8]) -> *mut core::ffi::c_void {
+        debug_assert!(token_user.len() >= std::mem::size_of::<TOKEN_USER>());
+        // SAFETY: the buffer holds a TOKEN_USER returned by GetTokenInformation.
         unsafe {
-            EqualSid(
-                (*(a.as_ptr() as *const TOKEN_USER)).User.Sid,
-                (*(b.as_ptr() as *const TOKEN_USER)).User.Sid,
-            ) != 0
+            std::ptr::read_unaligned(token_user.as_ptr() as *const TOKEN_USER)
+                .User
+                .Sid
         }
+    }
+    fn same_user(a: &[u8], b: &[u8]) -> bool {
+        // SAFETY: both SIDs point into live buffers returned by GetTokenInformation.
+        unsafe { EqualSid(sid(a), sid(b)) != 0 }
     }
     pub fn current_user_sid() -> Result<String, String> {
         // SAFETY: the pseudo handle of the current process needs no closing.
         let user = token_user(unsafe { GetCurrentProcess() })?;
         let mut text: *mut u16 = std::ptr::null_mut();
         // SAFETY: user holds a TOKEN_USER; text receives a LocalAlloc'd string freed below.
-        let ok = unsafe {
-            ConvertSidToStringSidW((*(user.as_ptr() as *const TOKEN_USER)).User.Sid, &mut text)
-        };
+        let ok = unsafe { ConvertSidToStringSidW(sid(&user), &mut text) };
         if ok == 0 {
             return Err("Cannot format user SID".into());
         }
@@ -400,10 +404,13 @@ mod tests {
         other.extend_from_slice(&system);
         // Point the TOKEN_USER's SID at the substituted bytes.
         let base = other.as_mut_ptr();
-        // SAFETY: `other` is large enough for TOKEN_USER plus the 12-byte SID written above.
+        // SAFETY: `other` is large enough for TOKEN_USER plus the 12-byte SID written above;
+        // the byte buffer is only byte-aligned, so the structure is accessed unaligned.
         unsafe {
             let user = base as *mut windows_sys::Win32::Security::TOKEN_USER;
-            (*user).User.Sid = base.add(sid_offset) as _;
+            let mut value = std::ptr::read_unaligned(user);
+            value.User.Sid = base.add(sid_offset) as _;
+            std::ptr::write_unaligned(user, value);
         }
         assert!(!imp::same_user_bytes(&other, &mine));
     }
