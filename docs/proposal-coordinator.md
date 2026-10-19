@@ -444,6 +444,16 @@ Before a commit touches any report, the writer takes the outgoing snapshot's wri
 
 **Read log.** The coordinator counts reads per record class (App, architecture, chunk, function), and how many of them had a pending entry. `coordinator status` reports the counts, and a daily summary line is appended to `tools/workspaces/history/tooling.jsonl` as kind `coordinator-reads`. This is the measurement research could not make.
 
+### Phase 1 as implemented (2026-10-18)
+
+Phase 1 shipped with these deviations from the text above. Each keeps the requirements (reads never wait for writers, in-flight writes visible to readers, no added risk inside transactions); the tests in `tests/coordinator.rs` cover them.
+
+- **Writer thread.** Each project's writer is a plain thread waiting on a condition variable rather than an `SWOwner`. The queue needs ordering by class and ageing plus merge selection under one lock, which the owner's FIFO lanes do not give. Solworker still runs the parallel work inside commands (hashing, snapshots, imports) on the one shared runtime from phase 0.
+- **No report cache.** Snapshots hold no report texts. A read takes the file from disk and checks the snapshot's overlay before and after. The overlay receives a file's previous text before any commit changes the file, so a reader still sees its own revision. The 32 MB cache can come later if reads show disk cost; the read log now measures that.
+- **GUI writes stay direct.** The GUI's eight write actions run in-process as before. Direct commits are correct beside a coordinator, which picks them up on the next read, and a GUI write waits at most one coordinator batch for the lock. Routing them through argument passthrough would add temporary files for report bodies without changing results.
+- **Polling instead of events.** The footer and status-bar queue panes poll `queue` every 2 s over a kept connection (the lock queue without a coordinator). The `subscribe`/`event` messages are not implemented yet; the protocol version reserves them.
+- **Read classes.** Reads without a record (status, lists, revision) count under a `project` class beside app, architecture, chunk and function. Counts are flushed on the first idle moment of a new UTC day and on shutdown.
+
 ### Phases 2 and 3 (outline)
 
 **Phase 2, tool coordination** (design D8):

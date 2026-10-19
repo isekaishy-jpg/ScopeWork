@@ -376,3 +376,27 @@ research history append example --kind ledger-change --summary "Retyped 14 param
 ```
 
 `history show` lists entries newest first. Catalog entries summarise each transaction receipt (`revision-N/journal.json`): created and removed records, status, parent, name and membership changes, reopened completions, edited reports, moves and sidecars; `--detail` adds the changed records. Tooling entries are appended by project tools to `tools/workspaces/history/tooling.jsonl` with a lowercase hyphenated kind, the nodes and paths concerned, and a diff of what changed rather than a copy of whole files. The `catalog` kind is reserved. Restoring from history remains a manual, reviewed operation.
+
+## Coordinator
+
+Several agents on one research home share one coordinator process. It starts on the first command that needs it, serves every project in the home, and exits after 10 idle minutes. Nothing changes in the commands themselves: the same arguments give the same answers.
+
+- **Reads never wait for writers.** They answer from the last committed revision held in memory. Object answers carry `revision` and `pending`: the queued or running operations that concern the records read (`kind`, `class`, `position`, `submitter`, `nodes`, `waited_ms`). A non-empty `pending` means the record is about to change. Array answers such as `node list` keep their shape.
+- **Writes queue.** Record operations (report saves, review flags, sidecars, metadata) that wait together are merged into one commit and accept or reject exactly what they would one at a time in queue order; expected tokens still guard every save. Structural operations (moves, dependency changes, deletions, ledger changes) commit alone. The GUI's requests go first, operations on more than 32 records run as `bulk`, and anything that has waited 5 seconds moves up a class.
+- **Direct mode stays correct.** Another process (an older Scopework, or `SCOPEWORK_COORDINATOR=off`) can still commit; the coordinator notices and reads the new revision. `research session` runs in its own process, as before.
+
+```powershell
+research queue example            # running and waiting operations; the lock queue without a coordinator
+research coordinator status       # version, uptime, per-project queue and read counts
+research coordinator stop         # stop admitting, finish queued work, exit
+```
+
+`SCOPEWORK_COORDINATOR` selects the behaviour: `auto` (default) uses or starts a coordinator and falls back to direct mode when none can be used; `off` always runs in-process; `required` fails with `coordinator_unavailable` instead of falling back. `SCOPEWORK_SUBMITTER` names the caller in queue entries (default: process ID and command).
+
+If the connection fails after a write was sent, the command fails with `coordinator_lost`: the operation may or may not have been applied, so check the record (its token or revision) before retrying. Reads and writes that could not be sent fall back or fail as above and are safe to retry.
+
+The pipe accepts only the same Windows user on the same machine. A coordinator from an older version retires when a newer client connects; a newer coordinator turns older clients away and they run in direct mode. Windows shutdown and installer upgrades close it gracefully after queued work finishes.
+
+Reads are counted per record class with how many carried a pending entry. `coordinator status` shows the counts, and each day's counts are appended to the tooling history as one `coordinator-reads` entry.
+
+The dashboard footer and the Research records status bar show `Queue: n running, m waiting` for their project; click it for the list.

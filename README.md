@@ -32,7 +32,7 @@ Each task has a fixed scope. Functions establish their own behavior and connecti
 - **Whole-binary inventory:** batch enrollment and reorganization, searchable collapsed records, and explicit context membership.
 - **Visible progress:** project tabs, chunk meters, required and inventory function counts, and a short research-topic header.
 - **GUI and CLI together:** background snapshots update meters; independent draft edits can proceed during additive imports.
-- **Several agents at once:** lock waiting instead of busy failures, advisory work claims, a review queue for records reopened by moves, and a readable project history.
+- **Several agents at once:** a coordinator that answers reads without waiting for writers and merges queued saves into one commit, a write-queue counter in the dashboard footer, advisory work claims, a review queue for records reopened by moves, and a readable project history.
 - **Resumable imports:** durable reservations, preparation checkpoints, pause/resume/cancel, and catalog-last publication.
 - **Local files:** your research home stays under your control and survives uninstall.
 
