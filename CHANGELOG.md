@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.13.1a - 2026-10-18
 
-Fixes from a code review of 0.13.0a:
+Release notes, validation and the commit ledger: [docs/releases/0.13.1a.md](docs/releases/0.13.1a.md). Fixes from a code review of 0.13.0a, whose draft release was not published:
 
 - Relative `--file`, `--body-file`, `--evidence-file` and `--diff-file` paths sent through the coordinator resolve in the caller's directory, not the coordinator's. Previously, a save could read another directory's file of the same name.
 - A coordinated `job run` also takes the resource lock files that direct mode uses, so coordinated and direct-mode jobs on the same resource can no longer run at once.

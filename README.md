@@ -77,14 +77,14 @@ research node show lumen 3                      # report, evidence, tokens and s
 research node save lumen 3 --body-file body.md --evidence-file evidence.md --expect <token>
 research node complete lumen 3 --expect <completion_token> --reviewed
 research status lumen --summary
-research --version                              # Scopework 0.13.0a (Build 000001)
+research --version                              # Scopework 0.13.1a (Build 000003)
 ```
 
 Tokens make every write conditional on what the writer last read, so concurrent agents cannot silently overwrite each other. The [CLI guide](docs/cli.md) covers batches, prerequisites, claims, the review queue, history, the coordinator and tool leases.
 
 ## Status
 
-Scopework is **alpha** software (0.13.0a) under active development. Its formats and interfaces may still change between versions, and every change is recorded in the [changelog](CHANGELOG.md). The installers are not code-signed. Completion records are attestations of understanding made by people or agents, not an automatic judgement of research quality.
+Scopework is **alpha** software (0.13.1a) under active development. Its formats and interfaces may still change between versions, and every change is recorded in the [changelog](CHANGELOG.md). The installers are not code-signed. Completion records are attestations of understanding made by people or agents, not an automatic judgement of research quality.
 
 ## Documentation
 
@@ -94,7 +94,7 @@ Scopework is **alpha** software (0.13.0a) under active development. Its formats 
 | [Research model](docs/research-model.md) | The hierarchy, evidence, completion and prerequisites |
 | [Agent CLI](docs/cli.md) | Every command, batches, concurrency, the coordinator and tool leases |
 | [Build guide](docs/building.md) | Building from source, packaging, versions and build numbers |
-| [Changelog](CHANGELOG.md) and [release notes](docs/releases/0.13.0a.md) | What changed in each version |
+| [Changelog](CHANGELOG.md) and [release notes](docs/releases/0.13.1a.md) | What changed in each version |
 | [Coordinator design](docs/proposal-coordinator.md) | How reads, queued writes and tool work are coordinated, with measurements |
 
 ## Contributing
