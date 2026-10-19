@@ -29,6 +29,28 @@ Recorded 2026-10-18 from the research-home `complaints/` folder (reports filed a
 - [x] **Sidecar conflicts during a pending batch.** A ledger write to `tools/profiles/annotations.json` from tooling outside the project lock, made while a `node batch` that recorded it as a sidecar is pending, makes every `research` command on the project (including `status`, `project show`, `node show` and `read-batch`) fail with `Sidecar changed during batch`. The error names no conflicting operation or recovery. Manual recovery required restoring the journal's exact `before` bytes; `before` kept CRLF while `after` used LF. Consider: sidecar writes under the project lock (or a CLI append command), merging the batch's sidecar edit instead of refusing, a supported resolve command with a diagnostic, and reads of unaffected reports staying available. Related: repeated Windows `os error 32` failures during completion and readback. Complaints: `2026-10-18-agent-sidecar-write-during-batch-blocks-project.md`, `2026-10-18-audit-repairs-sidecar-recovery-blocks-reads.md`.
 - [x] **Resolve report paths across moves.** A move changes a function's canonical report path (it depends on chunk placement), which strands tool references such as annotation ledger rows. The export then fails for every session with an error that does not name the offending path. The journal records the moves, but the CLI cannot map an old report path to its current one. Consider a `node resolve <old report path>` command (or a move-stable report identity), old→new report path pairs in the `node batch` result, and path-validation errors that name the path. Complaint: `2026-10-18-agent-moved-report-paths-strand-references.md`.
 - [ ] **Adopt Solarity versioning and Conventional Commits.** Confirmed by the user 2026-10-18; the general workflow is in `grimoire/DESIGN.md`, with the conventions defined in the Solarity client's `docs/releasing.md` and `STYLE.md`. Commits from now on use `<type>[scope][!]: <imperative summary>` with a body. Product versions take a stage suffix (`a`, `b`, `rc`, `s`). A separate, never-reused build number is reserved for each packaged build and displayed as `Scopework X.Y.Za (Build 000001)`. Go through research, design and proposal before implementing. Open questions: which stage the current 0.8.0 maps to; how a suffixed version maps onto the MSI ProductVersion while keeping the UpgradeCode and major-upgrade ordering; build-number storage and reservation across checkouts; `--version`/`--build-info` for the GUI and CLI; release notes covering the whole commit range; and the tag pattern in `release.yml`.
+
+  **Next version decided (2026-10-18): 0.13.0a** (Cargo `0.13.0-alpha`, Build 000001 as the first numbered package). The user left the number to the agent; it recalculates the path from 0.1.0 with SemVer's pre-1.0 rule (a minor bump for any new feature or breaking change, a patch bump for fixes only), using the changelog of each historical release:
+
+  | Released as | Contents | Recalculated |
+  | --- | --- | --- |
+  | 0.1.0 | Initial dashboard, hierarchy, CLI, MSI | 0.1.0 |
+  | 0.2.0 | Research-scope metadata | 0.2.0 |
+  | 0.2.1 | Scope label shown above the meters (new feature) | 0.3.0 |
+  | 0.3.0 | Scopework name, setup wizard, shared research home | 0.4.0 |
+  | 0.4.0 | Desktop shortcut, icon, public repository | 0.5.0 |
+  | 0.4.1 | Empty new homes, samples removed (fix) | 0.5.1 |
+  | 0.4.2 | Nested folders with migration (layout change) | 0.6.0 |
+  | 0.4.3 | Batch organisation, catalog format 3 (breaking) | 0.7.0 |
+  | 0.4.4 | Scoped loading and on-demand reads (performance) | 0.7.1 |
+  | 0.4.5 | Project locks, read-batch and save-batch | 0.8.0 |
+  | 0.5.0 | Resumable imports, format 4 | 0.9.0 |
+  | 0.6.0 | Delta journals, delete and prune, format 5 | 0.10.0 |
+  | 0.7.0 | Evidence-only saves, review flags, classic windows | 0.11.0 |
+  | 0.8.0 | Lock waiting, claims, review queue, history | 0.12.0 |
+  | Unreleased | Coordinator, tool leases, `fix(catalog)!` (breaking) | **0.13.0** |
+
+  Alpha, because the product is pre-1.0, in daily use and still changing its interfaces (protocol 2, lease adoption pending in the tools). 0.13.0 also sorts above every published MSI (0.8.0), so upgrades keep working. Existing tags and changelog headings stay as published; the release notes for 0.13.0a record this recalculation. Applying it needs this item's design first: `installer/build.ps1` accepts only numeric `X.Y.Z` versions, and `release.yml` expects the tag `v` + the exact Cargo version.
 - [x] **Fix the testing rule in CONTRIBUTING.md.** It tells agents not to add or run tests without a user request. The rule is: research does not get tests, software does. Scopework is software, so behaviour changes get regression tests (as AGENTS.md says).
 
 Work brief, 2026-10-18 (set by the user; the items above are its inputs):
