@@ -149,7 +149,27 @@ fn reads_through_the_coordinator_match_direct_mode() {
             "{args:?}"
         );
     }
-    assert_eq!(f.coordinated(&["coordinator", "status"])["running"], true);
+    let status = f.coordinated(&["coordinator", "status"]);
+    assert_eq!(status["running"], true);
+    let counts = &status["projects"][0]["reads_by_class"];
+    assert_eq!(counts["function"]["reads"], 1, "{status}");
+    assert_eq!(counts["project"]["reads"], 4, "{status}");
+    // Stopping writes the counts to the tooling log as one entry.
+    f.coordinated(&["coordinator", "stop"]);
+    let log = f
+        .home
+        .join("projects/fixture/tools/workspaces/history/tooling.jsonl");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fs::read_to_string(&log).is_ok_and(|t| t.contains("coordinator-reads")) {
+        assert!(
+            Instant::now() < deadline,
+            "no coordinator-reads entry was written"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let entry: Value =
+        serde_json::from_str(fs::read_to_string(&log).unwrap().lines().last().unwrap()).unwrap();
+    assert_eq!(entry["diff"]["reads_by_class"]["function"]["reads"], 1);
 }
 
 #[test]

@@ -108,10 +108,57 @@ struct Queue {
     waiting: Vec<Operation>,
     running: Vec<Value>,
 }
+/// Read counts per record class since the last flush to the tooling log.
 #[derive(Default)]
 struct ReadLog {
-    reads: u64,
-    with_pending: u64,
+    /// Class -> (reads, reads that carried a pending entry).
+    classes: std::collections::BTreeMap<&'static str, (u64, u64)>,
+    /// The UTC day these counts belong to.
+    day: u64,
+}
+impl ReadLog {
+    fn count(&mut self, class: &'static str, pending: bool) {
+        let entry = self.classes.entry(class).or_default();
+        entry.0 += 1;
+        entry.1 += u64::from(pending);
+    }
+    fn totals(&self) -> (u64, u64) {
+        self.classes
+            .values()
+            .fold((0, 0), |(r, p), (reads, pending)| (r + reads, p + pending))
+    }
+    fn view(&self) -> Value {
+        Value::Object(
+            self.classes
+                .iter()
+                .map(|(class, (reads, pending))| {
+                    (
+                        class.to_string(),
+                        json!({"reads": reads, "with_pending": pending}),
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+fn today() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 86_400)
+}
+/// The record class a read concerns: its first node's kind, or the project as a whole.
+fn read_class(project: &Project, nodes: Option<&[u64]>) -> &'static str {
+    let kind = nodes
+        .and_then(|nodes| nodes.first())
+        .and_then(|id| project.nodes.iter().find(|n| n.id == *id))
+        .map(|n| n.kind);
+    match kind {
+        Some(research::Kind::App) => "app",
+        Some(research::Kind::Architecture) => "architecture",
+        Some(research::Kind::Chunk) => "chunk",
+        Some(research::Kind::Function) => "function",
+        None => "project",
+    }
 }
 
 /// One open project: its current snapshot, queue and writer.
@@ -174,7 +221,10 @@ impl Server {
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
             writing: AtomicBool::new(false),
-            reads: Mutex::new(ReadLog::default()),
+            reads: Mutex::new(ReadLog {
+                day: today(),
+                ..ReadLog::default()
+            }),
         });
         projects.insert(id.to_string(), state.clone());
         let server = self.clone();
@@ -266,16 +316,19 @@ impl Server {
             cli::execute(command, &mut lib)
         };
         let mut answer = Answer::of(result);
-        if let Some(stdout) = answer.stdout.as_mut()
-            && stdout.is_object()
-        {
+        if let Some(stdout) = answer.stdout.as_mut() {
             let pending = self.pending(state, nodes.as_deref());
             if let Ok(mut log) = state.reads.lock() {
-                log.reads += 1;
-                log.with_pending += u64::from(!pending.is_empty());
+                log.count(
+                    read_class(&snapshot.project, nodes.as_deref()),
+                    !pending.is_empty(),
+                );
             }
-            stdout["revision"] = json!(snapshot.project.revision);
-            stdout["pending"] = Value::Array(pending);
+            // Array answers keep their shape; objects carry the revision and pending work.
+            if stdout.is_object() {
+                stdout["revision"] = json!(snapshot.project.revision);
+                stdout["pending"] = Value::Array(pending);
+            }
         }
         answer
     }
@@ -363,6 +416,17 @@ impl Server {
                         Ok((q, _)) => q,
                         Err(_) => return,
                     };
+                    // Idle: a new day's first idle moment writes yesterday's read counts.
+                    if queue.waiting.is_empty()
+                        && state.reads.lock().is_ok_and(|log| log.day != today())
+                    {
+                        drop(queue);
+                        self.flush_reads(state);
+                        queue = match state.queue.lock() {
+                            Ok(q) => q,
+                            Err(_) => return,
+                        };
+                    }
                 }
                 let batch = select(&mut queue.waiting, Instant::now());
                 let now = Instant::now();
@@ -379,6 +443,35 @@ impl Server {
             }
             self.touch();
         }
+    }
+
+    /// Appends the read counts gathered so far to the project's tooling log as one
+    /// `coordinator-reads` entry, then starts counting afresh.
+    fn flush_reads(&self, state: &ProjectState) {
+        let Some((day, classes, (reads, with_pending))) = state.reads.lock().ok().map(|mut log| {
+            let taken = std::mem::take(&mut log.classes);
+            let day = std::mem::replace(&mut log.day, today());
+            let view = ReadLog {
+                classes: taken,
+                day,
+            };
+            (day, view.view(), view.totals())
+        }) else {
+            return;
+        };
+        if reads == 0 {
+            return;
+        }
+        let summary = format!(
+            "{reads} reads through the coordinator, {with_pending} with pending writes (day {day})"
+        );
+        let diff = json!({"day_unix": day * 86_400, "reads_by_class": classes});
+        let _ = research::with_lock_wait(Duration::from_secs(10), || {
+            Library::open_project(self.root.clone(), Some(&state.id))
+        })
+        .and_then(|mut lib| {
+            lib.append_history(0, "coordinator-reads", &summary, &[], &[], Some(diff))
+        });
     }
 
     fn commit_batch(&self, state: &Arc<ProjectState>, batch: Vec<Operation>) {
@@ -514,8 +607,14 @@ fn select(waiting: &mut Vec<Operation>, now: Instant) -> Vec<Operation> {
 /// The direct-mode queue view: who holds the project lock and who waits for it.
 pub fn lock_queue(root: &Path, project: &str) -> Result<Value, String> {
     let locks = research::lock_status(root, project)?;
+    // The holder file is advisory: a held lock without one is still a running writer.
+    let running = match (locks["writer_active"].as_bool(), &locks["writer"]) {
+        (Some(true), Value::Object(_)) => vec![locks["writer"].clone()],
+        (Some(true), _) => vec![json!({"command": "another operation"})],
+        _ => vec![],
+    };
     Ok(
-        json!({"project": project, "source": "locks", "running": locks["writer"].as_object().map(|_| vec![locks["writer"].clone()]).unwrap_or_default(), "waiting": locks["waiting"]}),
+        json!({"project": project, "source": "locks", "running": running, "waiting": locks["waiting"]}),
     )
 }
 
@@ -643,6 +742,14 @@ impl Server {
         while !self.queues_empty() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
+        let states: Vec<Arc<ProjectState>> = self
+            .projects
+            .lock()
+            .map(|projects| projects.values().cloned().collect())
+            .unwrap_or_default();
+        for state in states {
+            self.flush_reads(&state);
+        }
         std::process::exit(0)
     }
     fn status(&self) -> Value {
@@ -653,10 +760,10 @@ impl Server {
                 projects
                     .values()
                     .map(|state| {
-                        let (reads, with_pending) = state
+                        let ((reads, with_pending), classes) = state
                             .reads
                             .lock()
-                            .map(|r| (r.reads, r.with_pending))
+                            .map(|r| (r.totals(), r.view()))
                             .unwrap_or_default();
                         let (waiting, running) = state
                             .queue
@@ -664,7 +771,7 @@ impl Server {
                             .map(|q| (q.waiting.len(), q.running.len()))
                             .unwrap_or_default();
                         json!({"project": state.id, "waiting": waiting, "running": running,
-                            "reads": reads, "reads_with_pending": with_pending})
+                            "reads": reads, "reads_with_pending": with_pending, "reads_by_class": classes})
                     })
                     .collect()
             })
