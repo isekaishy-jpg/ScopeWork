@@ -31,7 +31,8 @@ jobs:
       - name: Lint without warnings
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build Windows installer
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1
+        # CI never reserves build numbers; it builds the committed one.
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1 -UseCommittedNumber
       - name: Upload installer and checksum
         uses: actions/upload-artifact@v4
         with:

@@ -1323,6 +1323,21 @@ pub(crate) fn error_kind(error: &str) -> &str {
 /// Entry point of the `research` executable.
 pub fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    // Identity first: these answer without a research home or a subcommand.
+    match raw.as_slice() {
+        [flag] if flag == "--version" || flag == "-V" => {
+            println!("{}", crate::build_info::DISPLAY);
+            return;
+        }
+        [flag] if flag == "--build-info" => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&crate::build_info::json()).unwrap_or_default()
+            );
+            return;
+        }
+        _ => {}
+    }
     let args = Args::parse();
     if matches!(args.command, Command::Session) {
         session(args.home, args.wait);

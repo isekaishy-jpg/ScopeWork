@@ -1,8 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.13.0a - 2026-10-18
 
-See [the proposal](docs/proposal-2026-10-18.md) for measured causes and acceptance criteria.
+Release notes, validation and the full commit ledger: [docs/releases/0.13.0a.md](docs/releases/0.13.0a.md). Versions now follow the Solarity convention: a product version with a stage suffix, plus a numbered build. The number jumps from 0.8.0 because the version path was recalculated from 0.1.0; see the release notes. Measured causes and acceptance criteria for the multi-agent work are in [the proposal](docs/proposal-2026-10-18.md).
+
+- Product versions and numbered builds ([proposal](docs/proposal-versioning.md)):
+  - `Cargo.toml` `0.13.0-alpha` is product `0.13.0a`;
+  - `installer/build.ps1` reserves a never-reused build number (`BUILD_NUMBER`) per package;
+  - `research --version` and `--build-info`, the About dialog and the executables' version resources show `Scopework 0.13.0a (Build 000001)`;
+  - the MSI version is `major.minor.build`, so every package upgrades the previous one;
+  - release tags are `v<product version>`;
+  - coordinators and clients order themselves by build number, or by version and stage.
 
 - Moves and deletions no longer rewrite unrelated reports. A reference changes only when it names a moved folder, or when its report moved and the named project file exists; quoted source strings such as `.\Movement_C.cpp` and `..\src\x.cpp` keep their bytes, so other sessions' completed work is not reopened. Moves read only the reports that mention a moved folder, through a persisted reference index, instead of every report under the lock.
 - The annotation ledger is repathed in place when the catalog commits: only outdated `"report"` values change; formatting and line endings stay. Journals no longer copy the ledger, a tool's concurrent write can no longer block a project, older journals with ledger copies resume the same way, and rows written back with an old path are repaired by the next move. Ledger rows no longer get a `catalog_move` note.

@@ -620,7 +620,7 @@ impl eframe::App for Dashboard {
             .default_size([300.0, 120.0])
             .show(ctx, &mut about, |ui| {
                 ui.add_space(6.0);
-                classic::label(ui, format!("Scopework {}", env!("CARGO_PKG_VERSION")), None);
+                classic::label(ui, research_dashboard::build_info::DISPLAY, None);
                 classic::label(ui, "A workbench for bounded research projects.", None);
                 classic::label(
                     ui,

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build, such as v0.8.0
+        description: Existing tag to build, such as v0.13.0a
         required: true
 
 permissions:
@@ -29,11 +29,16 @@ jobs:
         run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
       - name: Select Rust toolchain
         run: rustup override set 1.98.0
-      - name: Check tag matches Cargo.toml version
+      - name: Check tag, product version and build number
         shell: pwsh
         run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          if ("v$version" -ne $env:TAG) { throw "Tag $env:TAG does not match Cargo.toml version $version" }
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($cargo -notmatch '^(\d+\.\d+\.\d+)(?:-(alpha|beta|rc))?$') { throw "Unsupported Cargo version $cargo" }
+          $suffix = switch ($Matches[2]) { 'alpha' { 'a' } 'beta' { 'b' } 'rc' { 'rc' } default { 's' } }
+          $version = "$($Matches[1])$suffix"
+          if ("v$version" -ne $env:TAG) { throw "Tag $env:TAG does not match the product version $version (Cargo $cargo)" }
+          $build = [int](Get-Content BUILD_NUMBER -Raw).Trim()
+          if ($build -lt 1) { throw 'A release needs a reserved build number: package it locally and commit BUILD_NUMBER first.' }
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
@@ -42,7 +47,7 @@ jobs:
       - name: Lint without warnings
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build Windows installer
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer/build.ps1 -UseCommittedNumber
       - name: Extract release notes
         shell: pwsh
         run: |

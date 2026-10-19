@@ -4,6 +4,8 @@
     <MajorUpgrade DowngradeErrorMessage="A newer Scopework is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- The MSI version is major.minor.build; the product spelling and build appear here. -->
+    <Property Id="ARPCOMMENTS" Value="$(DisplayVersion)" />
     <!-- Skip the system restore point and reduce costing work so progress starts promptly (per-user, small payload). -->
     <Property Id="MSIFASTINSTALL" Value="1" />
     <Icon Id="ScopeworkIcon" SourceFile="$(SourceDir)\assets\scopework.ico" />

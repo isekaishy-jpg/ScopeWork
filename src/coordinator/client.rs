@@ -88,7 +88,7 @@ fn handshake(pipe: std::fs::File, role: &str) -> Result<Handshake, String> {
     let hello = Hello {
         protocol: PROTOCOL,
         version: VERSION.into(),
-        build: 0,
+        build: u64::from(crate::build_info::BUILD),
         role: role.into(),
         submitter: submitter(),
     };

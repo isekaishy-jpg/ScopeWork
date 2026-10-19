@@ -932,17 +932,6 @@ pub struct Hello {
     #[serde(default)]
     pub submitter: String,
 }
-/// `a.b.c` as comparable numbers.
-fn version_key(version: &str) -> Vec<u64> {
-    version
-        .split(['.', '-', '+'])
-        .map(|part| {
-            part.trim_matches(|c: char| !c.is_ascii_digit())
-                .parse()
-                .unwrap_or(0)
-        })
-        .collect()
-}
 
 /// Runs the coordinator for `home` until it is stopped or idle.
 pub fn serve(home: &Path) -> Result<Value, String> {
@@ -1229,19 +1218,26 @@ impl Server {
             send(json!({"hello": {"accepted": false, "reason": "bad-hello"}}));
             return;
         };
-        let theirs = version_key(&hello.version);
-        let ours = version_key(VERSION);
-        if hello.protocol != PROTOCOL || theirs < ours {
+        // Numbered packages order by build number; source builds by version and stage.
+        let theirs = crate::version::compare(
+            &hello.version,
+            u32::try_from(hello.build).unwrap_or(u32::MAX),
+            VERSION,
+            crate::build_info::BUILD,
+        );
+        if hello.protocol != PROTOCOL || theirs.is_lt() {
             send(
                 json!({"hello": {"accepted": false, "reason": "older-client", "version": VERSION}}),
             );
             return;
         }
-        if theirs > ours {
+        if theirs.is_gt() {
             send(json!({"hello": {"accepted": false, "reason": "retiring", "version": VERSION}}));
             self.drain_and_exit();
         }
-        send(json!({"hello": {"accepted": true, "version": VERSION, "build": 0}}));
+        send(
+            json!({"hello": {"accepted": true, "version": VERSION, "build": crate::build_info::BUILD}}),
+        );
         let role = hello.role;
         let submitter = if hello.submitter.is_empty() {
             "unknown".to_string()
@@ -1413,11 +1409,5 @@ mod tests {
             .map(|o| o.id)
             .collect();
         assert_eq!(alone, vec![2]);
-    }
-
-    #[test]
-    fn versions_compare_numerically() {
-        assert!(version_key("0.10.0") > version_key("0.9.3"));
-        assert!(version_key("0.9.0") == version_key("0.9.0"));
     }
 }
