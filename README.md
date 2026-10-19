@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Scopework</h1>
-<p align="center">A local research workbench for people and agents.</p>
+<p align="center"><strong>A local workbench for binary research, shared by people and AI agents.</strong></p>
 <p align="center">
   <a href="https://github.com/isekaishy-jpg/ScopeWork/actions/workflows/windows.yml"><img src="https://github.com/isekaishy-jpg/ScopeWork/actions/workflows/windows.yml/badge.svg" alt="Windows build"></a>
   <a href="https://github.com/isekaishy-jpg/ScopeWork/releases"><img src="https://img.shields.io/github/v/release/isekaishy-jpg/ScopeWork?include_prereleases" alt="Latest release"></a>
@@ -11,66 +11,96 @@
   <img src="https://img.shields.io/badge/platform-Windows_x64-0078D4" alt="Windows x64">
 </p>
 
-Scopework organizes binary research into a hierarchy of canonical reports. A desktop dashboard shows progress; a JSON CLI lets agents use the same records, dependencies and completion rules.
+<p align="center">
+  <a href="docs/installation.md">Install</a> ·
+  <a href="https://github.com/isekaishy-jpg/ScopeWork/releases">Releases</a> ·
+  <a href="docs/research-model.md">Research model</a> ·
+  <a href="docs/cli.md">Agent CLI</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-**[Get started](docs/installation.md)** · **[Releases](https://github.com/isekaishy-jpg/ScopeWork/releases)** · **[CLI guide](docs/cli.md)** · **[Contributing](CONTRIBUTING.md)**
+![The Scopework dashboard: one meter per architecture, made of chunk segments that are green when complete, yellow when in progress and dim red when not started](docs/images/dashboard.png)
 
-## Research that stays bounded
+Reverse engineering a large binary produces a lot of understanding, spread over thousands of functions. Scopework gives that understanding a structure:
+- every function, chunk and subsystem gets one canonical report;
+- completion follows explicit rules;
+- a dashboard shows how far the research has come.
+
+The same records are available to AI agents through a JSON command line, so several agents and people can work on one project at once without stepping on each other.
+
+*The screenshots show a fictional demo project, Lumen Engine.*
+
+## How research is organised
 
 ```text
-App / project understanding
-  Architecture
-    Chunk
-      Function + evidence
+App               what the project set out to understand
+└─ Architecture   a subsystem, such as Rendering or Audio
+   └─ Chunk       a group of related functions
+      └─ Function one routine at one address, with its evidence
 ```
 
-Each task has a fixed scope. Functions establish their own behavior and connections. Chunks synthesize completed functions; architectures synthesize chunks. Completed children make a parent ready for synthesis, but never automatically complete it.
+- **Fixed scopes.** A function report explains that function: its behaviour, inputs, outputs, side effects and connections, with evidence. A chunk synthesises its completed functions, an architecture its chunks, and the app its architectures.
+- **Completion is earned, never inherited.** Completed children make a parent ready for synthesis; they do not complete it. Every parent needs its own report, and completing a record is a deliberate, token-checked attestation.
+- **Changes reopen what they affect.** Prerequisites between functions are explicit. When a report or prerequisite changes, the completed records that relied on it go back to In Progress and into a review queue.
+- **Evidence is classified.** Claims are marked as observed, specification-defined or inferred. A function's captures and exports live in its own `data/` folder, beside its report.
 
-- **Isolated projects:** separate binary identities, reports and supporting data.
-- **One canonical report per item:** supporting captures stay beside the function they explain.
-- **Explicit prerequisites:** shared understanding is referenced, with dependent work reopened when it changes.
-- **Whole-binary inventory:** batch enrollment and reorganization, searchable collapsed records, and explicit context membership.
-- **Visible progress:** project tabs, chunk meters, required and inventory function counts, and a short research-topic header.
-- **GUI and CLI together:** background snapshots update meters; independent draft edits can proceed during additive imports.
-- **Several agents at once:** a coordinator that answers reads without waiting for writers and merges queued saves into one commit, a write-queue counter in the dashboard footer, advisory work claims, a review queue for records reopened by moves, and a readable project history.
-- **Resumable imports:** durable reservations, preparation checkpoints, pause/resume/cancel, and catalog-last publication.
-- **Local files:** your research home stays under your control and survives uninstall.
+![The Research records window: a searchable record tree on the left, and the selected chunk's report and classified evidence on the right](docs/images/research-records.png)
+
+## Features
+
+- **Progress at a glance.** Each project has a tab, each architecture a meter, and each chunk a segment of it. Totals show function and chunk counts and the project's research scope.
+- **Research records window.** Search the whole binary by name or address; write reports and evidence; flag records for review; organise the hierarchy; mark work complete when its requirements are met.
+- **Whole-binary inventories.** Enrol tens of thousands of functions with resumable batch imports and keep context-only code in the inventory without making it required work.
+- **Built for several agents at once:**
+  - A coordinator answers reads without waiting for writes, and merges queued saves into one commit.
+  - Every read says which writes are pending on the records it returned.
+  - The dashboard footer counts queued and running writes.
+  - Agents can claim parts of the tree, and a review queue lists records that other people's changes reopened.
+- **Tool coordination.** Analysis tools can take leases on shared resources such as an annotation database. Requests of the same kind are collected into one run. Changes made outside a lease are recorded as drift.
+- **Recoverable and readable history.** Every change is a journaled transaction that survives crashes, and `research history show` lists what changed, when and why.
+- **Your files, on your machine.** A research home is a plain folder of Markdown reports and JSON. Projects are isolated from each other by exact binary identity, and uninstalling never touches your research.
 
 ## Install
 
-Get a Windows x64 MSI from [Releases](https://github.com/isekaishy-jpg/ScopeWork/releases), or [build it yourself](docs/building.md). The wizard lets you choose the application folder, research home, PATH access and desktop shortcut.
+Download the Windows x64 installer from [Releases](https://github.com/isekaishy-jpg/ScopeWork/releases), or [build it yourself](docs/building.md). The setup wizard asks for the application folder, the research home, PATH access and a desktop shortcut.
 
-Open Scopework from Start or the desktop shortcut. With PATH enabled, open a new terminal:
+Then open Scopework from Start, choose **File > New project...**, and use **View > Research records** to build the hierarchy and write reports.
+
+## Use it from an agent or script
+
+With PATH access enabled, every command answers in JSON:
 
 ```powershell
-research --help
-research home
-research project list
+research project create lumen --name "Lumen Engine" --binary "lumen.exe 2.4.1; SHA-256 ..."
+research node create lumen --parent 0 --name "Rendering"
+research node show lumen 3                      # report, evidence, tokens and status
+research node save lumen 3 --body-file body.md --evidence-file evidence.md --expect <token>
+research node complete lumen 3 --expect <completion_token> --reviewed
+research status lumen --summary
+research --version                              # Scopework 0.13.0a (Build 000001)
 ```
 
-In the app, use **File > New project...** to create a project and **View > Research records** to build and research its hierarchy. Set **Research scope** (Project tab) to a few words such as *Rendering* or *Asset platform*.
+Tokens make every write conditional on what the writer last read, so concurrent agents cannot silently overwrite each other. The [CLI guide](docs/cli.md) covers batches, prerequisites, claims, the review queue, history, the coordinator and tool leases.
 
 ## Status
 
-Scopework is in early development. MSI packages are unsigned. Read each release's validation notes before using it for important work. Completion records are evidence-backed attestations, not automatic proof of research quality. New installations start empty. Create your own projects; dashboard progress comes only from canonical research records.
+Scopework is **alpha** software (0.13.0a) under active development. Its formats and interfaces may still change between versions, and every change is recorded in the [changelog](CHANGELOG.md). The installers are not code-signed. Completion records are attestations of understanding made by people or agents, not an automatic judgement of research quality.
 
 ## Documentation
 
 | Guide | What it covers |
 | --- | --- |
 | [Installation](docs/installation.md) | Setup choices, research locations, upgrades and uninstall |
-| [Research model](docs/research-model.md) | Hierarchy, evidence, completion and prerequisites |
-| [Agent CLI](docs/cli.md) | Creating records, writing reports and managing dependencies |
-| [Build guide](docs/building.md) | Source builds, MSI packaging and repository layout |
-| [Changelog](CHANGELOG.md) | Changes by version |
-| [0.8.0 qualification](docs/qualification-0.8.0.md) | Multi-agent throughput measurements, coverage and known limits |
-| [0.5.0 qualification](docs/qualification-0.5.0.md) | Recovery, concurrency, scale measurements and installer checks |
-| [Concurrent import design](docs/concurrent-import-design.md) | Storage and concurrency design for imports, edits, and responsive snapshots |
+| [Research model](docs/research-model.md) | The hierarchy, evidence, completion and prerequisites |
+| [Agent CLI](docs/cli.md) | Every command, batches, concurrency, the coordinator and tool leases |
+| [Build guide](docs/building.md) | Building from source, packaging, versions and build numbers |
+| [Changelog](CHANGELOG.md) and [release notes](docs/releases/0.13.0a.md) | What changed in each version |
+| [Coordinator design](docs/proposal-coordinator.md) | How reads, queued writes and tool work are coordinated, with measurements |
 
-## Contribute
+## Contributing
 
-Bug reports and focused improvements are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Research datasets, captures and proprietary binaries do not belong in this repository.
+Bug reports and focused improvements are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Please keep research datasets, captures and proprietary binaries out of the repository.
 
 ## License
 
-Scopework is licensed under [MIT](LICENSE). Third-party dependencies retain their respective licenses.
+Scopework is released under the [MIT License](LICENSE). Third-party dependencies keep their own licenses.
