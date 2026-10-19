@@ -143,10 +143,14 @@ pub fn connect(home: &Path, role: &str, start: bool) -> Result<Option<Connection
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match pipe::connect(&name) {
-            Ok(Some(pipe)) => match handshake(pipe, role)? {
-                Handshake::Accepted(connection) => return Ok(Some(connection)),
-                Handshake::Refused => return refuse("The coordinator runs a different version"),
-                Handshake::Retiring => {
+            Ok(Some(pipe)) => match handshake(pipe, role) {
+                Ok(Handshake::Accepted(connection)) => return Ok(Some(connection)),
+                Ok(Handshake::Refused) => {
+                    return refuse("The coordinator runs a different version");
+                }
+                // Nothing was sent yet, so direct mode is safe.
+                Err(e) => return refuse(&format!("The handshake failed: {e}")),
+                Ok(Handshake::Retiring) => {
                     // Wait for the old coordinator to exit, then start ours.
                     std::thread::sleep(Duration::from_millis(100));
                 }

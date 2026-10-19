@@ -194,6 +194,23 @@ impl Library {
         Ok(staged.operations)
     }
     /// Abandons staged operations: restores the catalog from before the first one.
+    /// Runs one operation while staging. If it fails without staging anything, its in-memory
+    /// changes are undone, as they would vanish with its own process; if it staged and then
+    /// failed, the staged part stays, as its commit would have.
+    pub(crate) fn stage_one<R>(
+        &mut self,
+        p: usize,
+        work: impl FnOnce(&mut Self) -> R,
+        failed: impl Fn(&R) -> bool,
+    ) -> R {
+        let checkpoint = self.projects[p].clone();
+        let staged = self.staging.as_ref().map_or(0, |s| s.operations);
+        let result = work(self);
+        if failed(&result) && self.staging.as_ref().map_or(0, |s| s.operations) == staged {
+            self.projects[p] = checkpoint;
+        }
+        result
+    }
     pub(crate) fn discard_staged(&mut self, p: usize) {
         self.overlay = None;
         if let Some(staged) = self.staging.take() {
@@ -311,5 +328,27 @@ mod tests {
         assert!(lib.set_dependencies(0, 4, "1000").is_err());
         lib.discard_staged(0);
         assert!(lib.set_dependencies(0, 4, "1000").is_ok());
+    }
+
+    #[test]
+    fn a_refused_operation_leaves_nothing_in_the_merged_commit() {
+        let (_home, mut lib) = fixture();
+        let before = lib.projects[0].clone();
+        lib.begin_staging(0);
+        let refused = lib.stage_one(0, |l| l.set_dependencies(0, 4, "1000"), Result::is_err);
+        assert!(refused.is_err());
+        // An operation that changes the catalog and then fails before staging.
+        let failed = lib.stage_one(
+            0,
+            |l| {
+                l.projects[0].nodes[3].name = "Half-applied".into();
+                Err::<(), String>("failed after changing the catalog".into())
+            },
+            Result::is_err,
+        );
+        assert!(failed.is_err());
+        assert!(lib.projects[0] == before, "the refused change was undone");
+        lib.commit_staged(0).unwrap();
+        assert!(lib.projects[0] == before);
     }
 }

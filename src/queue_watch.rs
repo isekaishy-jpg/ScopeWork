@@ -76,8 +76,10 @@ impl QueueWatch {
         let shared = Arc::new(Mutex::new(Watched::default()));
         let watched = shared.clone();
         std::thread::spawn(move || {
-            let mut connection = None;
             loop {
+                // One connection per round, closed before sleeping: a held connection would
+                // keep an otherwise idle coordinator running.
+                let mut connection = None;
                 let projects = match watched.lock() {
                     Ok(w) if w.stop => return,
                     Ok(w) => w.projects.clone(),
@@ -90,6 +92,7 @@ impl QueueWatch {
                         (id, view)
                     })
                     .collect();
+                drop(connection);
                 let changed = match watched.lock() {
                     Ok(mut w) => {
                         let changed = w.views != views;
@@ -127,7 +130,7 @@ impl Drop for QueueWatch {
     }
 }
 
-/// The coordinator's queue over a kept connection, or the lock queue without one. The GUI
+/// The coordinator's queue over this round's connection, or the lock queue without one. The GUI
 /// never starts a coordinator just to watch.
 fn poll(
     home: &std::path::Path,

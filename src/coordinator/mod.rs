@@ -518,7 +518,7 @@ impl Server {
                 lib.begin_staging(0);
                 let answers: Vec<Answer> = batch
                     .iter()
-                    .map(|op| execute(&op.arguments, &mut lib))
+                    .map(|op| lib.stage_one(0, |lib| execute(&op.arguments, lib), |a| a.exit != 0))
                     .collect();
                 match lib.commit_staged(0) {
                     Ok(_) => answers,
@@ -706,7 +706,6 @@ pub fn serve(home: &Path) -> Result<Value, String> {
             std::thread::spawn(move || {
                 server.serve_connection(pipe);
                 server.connections.fetch_sub(1, Ordering::AcqRel);
-                server.touch();
             });
         }
     });
@@ -777,7 +776,8 @@ impl Server {
             })
             .unwrap_or_default();
         json!({"running": true, "version": VERSION, "protocol": PROTOCOL, "pid": std::process::id(),
-            "uptime_s": self.started.elapsed().as_secs(), "admitting": self.admitting.load(Ordering::Acquire),
+            "uptime_s": self.started.elapsed().as_secs(),
+            "idle_s": self.last_activity.lock().map_or(0, |last| last.elapsed().as_secs()), "admitting": self.admitting.load(Ordering::Acquire),
             "connections": self.connections.load(Ordering::Acquire), "projects": projects})
     }
 
@@ -824,7 +824,6 @@ impl Server {
             if reader.read_line(&mut line).unwrap_or(0) == 0 {
                 return;
             }
-            self.touch();
             let Ok(request) = serde_json::from_str::<Value>(&line) else {
                 send(json!({"error": "Each line must be a JSON object"}));
                 continue;
@@ -844,6 +843,10 @@ impl Server {
                 .flatten()
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect();
+            // The GUI's queue polls only watch: they never keep an idle coordinator alive.
+            if !(role == "gui" && arguments.first().is_some_and(|a| a == "queue")) {
+                self.touch();
+            }
             let class = match request["class"].as_str() {
                 Some("interactive") if role == "gui" => Class::Interactive,
                 Some("bulk") => Class::Bulk,

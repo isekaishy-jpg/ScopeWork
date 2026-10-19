@@ -459,3 +459,71 @@ fn restart_manager_closes_the_coordinator_gracefully() {
     let status = child.wait().unwrap();
     assert!(status.success(), "the coordinator exited with {status:?}");
 }
+
+#[test]
+fn gui_queue_polls_do_not_keep_an_idle_coordinator_alive() {
+    let f = Fixture::new(0);
+    f.coordinated(&["project", "revision", "fixture"]);
+    let name = research_dashboard::coordinator::pipe::pipe_name(&f.home).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < deadline {
+        let pipe = research_dashboard::coordinator::pipe::connect(&name)
+            .unwrap()
+            .unwrap();
+        let mut reader = BufReader::new(pipe.try_clone().unwrap());
+        let mut writer = pipe;
+        let version = env!("CARGO_PKG_VERSION");
+        writeln!(
+            writer,
+            "{}",
+            json!({"hello": {"protocol": 1, "version": version, "role": "gui"}})
+        )
+        .unwrap();
+        writeln!(
+            writer,
+            "{}",
+            json!({"id": 1, "args": ["queue", "fixture"], "class": "interactive"})
+        )
+        .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(answer["stdout"]["source"], "coordinator", "{answer}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let status = f.coordinated(&["coordinator", "status"]);
+    assert!(status["idle_s"].as_u64().unwrap() >= 2, "{status}");
+}
+
+#[test]
+fn a_failed_handshake_falls_back_to_direct_mode() {
+    let f = Fixture::new(0);
+    // A server that accepts each connection and hangs up before answering the hello.
+    let name = research_dashboard::coordinator::pipe::pipe_name(&f.home).unwrap();
+    let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let started = ready.clone();
+    std::thread::spawn(move || {
+        let mut first = true;
+        loop {
+            let Ok(instance) = research_dashboard::coordinator::pipe::listen(&name, first) else {
+                return;
+            };
+            if first {
+                started.wait();
+                first = false;
+            }
+            if research_dashboard::coordinator::pipe::accept(&instance).is_err() {
+                return;
+            }
+            drop(instance);
+        }
+    });
+    ready.wait();
+    let direct = f.direct(&["project", "revision", "fixture"]);
+    assert_eq!(f.ok("auto", &["project", "revision", "fixture"]), direct);
+    let refused = f.output("required", &["project", "revision", "fixture"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("coordinator_unavailable"));
+}
