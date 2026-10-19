@@ -20,6 +20,26 @@ See [the proposal](docs/proposal-2026-10-18.md) for measured causes and acceptan
 - A completion change reopens only the records whose completion depends on it (ancestors and prerequisite consumers) instead of every App/architecture/chunk revision. A commit serialises its catalog once (about 200 ms to 112 ms per commit on the measured catalog). One Solworker runtime serves each process.
 - CONTRIBUTING.md states the testing rule: research does not get tests; this software does.
 
+### Project tooling: action needed
+
+These are changes to each research project's own tools (`tools/scripts`), made by that project's sessions. Scopework cannot make them. Do them in this order.
+
+1. **Fix shared scratch files for report saves.** A tool that writes report bodies or evidence to a fixed file before calling `node save` can submit another agent's text when two saves overlap; the expected token does not catch it, because the record itself did not change. Write each save's files to a unique temporary name. Example: `catalog.save` in `wow-335a-12340` uses `tools/scratch/canonical-body-input.md` and `canonical-evidence-input.md` for every call.
+2. **Name the caller.** Set `SCOPEWORK_SUBMITTER` (for example the session and tool name) so queue entries, `research queue` and the GUI queue panes show who is waiting.
+3. **Take leases instead of private lock files** ([CLI guide](docs/cli.md#tool-leases)).
+   - Declare the shared resources and kinds of work in `tools/coordinator.toml`, for example `ledger` (with the ledger file, so drift is detected) and `ghidra`.
+   - Replace the project-wide tool lock with a lease on the resources the work needs. During the change-over, take the lease first and then the old lock file, so tools not yet updated still exclude correctly. Remove the old lock once none can remain.
+4. **Let queued work of one kind run once.**
+   - Ledger edits become payloads of one keyed kind (for example `ledger-put`). The holder reads the ledger once, applies the payloads in order (a later row for the same kind and RVA replaces an earlier one), validates each row on its own, and writes once.
+   - A whole-ledger apply needs no payload: duplicates waiting together are covered by one run.
+   - Read-only export batches with the same options can merge their function lists into one headless run.
+   - Each holder must give every payload the result it would have had alone.
+5. **Optional, for less overhead:**
+   - talk to the coordinator's pipe from long-lived tool modules instead of starting `research.exe` per call (two process starts per save today);
+   - move batch requests from schema 1 (project-wide revision) to schema 2 (record-level preconditions), so unrelated commits stop rejecting them.
+
+After installing, use the new build normally for about a week. `coordinator status` and the daily `coordinator-reads` and `coordinator-commits` tooling-history entries gather the measurements that decide the two remaining storage changes ([phase 3](docs/proposal-coordinator-phase3.md), 3.3 and 3.4).
+
 ## 0.8.0 - 2026-10-17
 
 See [qualification and limits](docs/qualification-0.8.0.md).
