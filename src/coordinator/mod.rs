@@ -46,6 +46,14 @@ impl Class {
     fn rank(self) -> u64 {
         self as u64
     }
+    fn name(self) -> &'static str {
+        match self {
+            Class::Interactive => "interactive",
+            Class::Normal => "normal",
+            Class::Bulk => "bulk",
+            Class::Job => "job",
+        }
+    }
 }
 
 /// The answer to one request, as the CLI would print it.
@@ -141,6 +149,44 @@ impl ReadLog {
         )
     }
 }
+/// Commit measurements since the last flush, for the phase 3 gates (batch sizes, fixed commit
+/// cost by stage, queue wait by class).
+#[derive(Default)]
+struct CommitLog {
+    sizes: Vec<u64>,
+    reused: u64,
+    open_us: Vec<u64>,
+    delta_us: Vec<u64>,
+    journal_us: Vec<u64>,
+    apply_us: Vec<u64>,
+    wait_ms: std::collections::BTreeMap<&'static str, Vec<u64>>,
+}
+impl CommitLog {
+    fn view(&self) -> Value {
+        fn spread(values: &[u64]) -> Value {
+            let mut sorted = values.to_vec();
+            sorted.sort_unstable();
+            let at = |q: usize| {
+                sorted
+                    .get((sorted.len() * q / 100).min(sorted.len().saturating_sub(1)))
+                    .copied()
+            };
+            json!({"count": sorted.len(), "median": at(50), "p90": at(90)})
+        }
+        let waits: serde_json::Map<String, Value> = self
+            .wait_ms
+            .iter()
+            .map(|(class, waits)| (class.to_string(), spread(waits)))
+            .collect();
+        json!({"batches": self.sizes.len(), "resident_reused": self.reused,
+            "operations_per_batch": spread(&self.sizes), "open_us": spread(&self.open_us),
+            "delta_us": spread(&self.delta_us), "journal_us": spread(&self.journal_us),
+            "apply_us": spread(&self.apply_us), "wait_ms": waits})
+    }
+}
+fn micros(time: Duration) -> u64 {
+    u64::try_from(time.as_micros()).unwrap_or(u64::MAX)
+}
 fn today() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -172,6 +218,44 @@ struct ProjectState {
     /// True while this coordinator's writer is committing (its own pending journal is expected).
     writing: AtomicBool,
     reads: Mutex<ReadLog>,
+    /// The writer's catalog kept between batches (see `Resident`).
+    resident: Mutex<Option<Resident>>,
+    commits: Mutex<CommitLog>,
+}
+
+/// How long the writer may reuse its in-memory catalog before re-opening it from disk.
+const RESIDENT_FOR: Duration = Duration::from_secs(60);
+/// Within this time of a `project.json` modification, its stamp is not trusted alone.
+const RACY: Duration = Duration::from_secs(2);
+/// The writer's library between batches, without its locks, and the `project.json` stamp it
+/// last wrote or read. Reused only while that stamp still holds under a re-taken lock.
+struct Resident {
+    lib: Library,
+    stamp: Option<(u64, SystemTime)>,
+    opened: Instant,
+}
+impl Resident {
+    /// Re-takes the lock and returns the library if the catalog on disk is still the one held.
+    fn resume(mut self, root: &Path) -> Option<Library> {
+        if self.opened.elapsed() >= RESIDENT_FOR {
+            return None;
+        }
+        research::with_lock_wait(Duration::from_secs(600), || self.lib.relock()).ok()?;
+        let id = self.lib.projects[0].id.clone();
+        let path = root.join(&id).join("project.json");
+        let now = stamp(&path);
+        if pending_journal(root, &id) || now != self.stamp {
+            return None;
+        }
+        // A modification time this recent could hide a same-size rewrite: compare the bytes.
+        let racy =
+            now.is_some_and(|(_, modified)| modified.elapsed().map_or(true, |age| age < RACY));
+        if racy && std::fs::read(&path).ok() != research::catalog_bytes(&self.lib.projects[0]).ok()
+        {
+            return None;
+        }
+        Some(self.lib)
+    }
 }
 
 struct Server {
@@ -221,6 +305,8 @@ impl Server {
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
             writing: AtomicBool::new(false),
+            resident: Mutex::new(None),
+            commits: Mutex::new(CommitLog::default()),
             reads: Mutex::new(ReadLog {
                 day: today(),
                 ..ReadLog::default()
@@ -416,12 +502,12 @@ impl Server {
                         Ok((q, _)) => q,
                         Err(_) => return,
                     };
-                    // Idle: a new day's first idle moment writes yesterday's read counts.
+                    // Idle: a new day's first idle moment writes yesterday's counts.
                     if queue.waiting.is_empty()
                         && state.reads.lock().is_ok_and(|log| log.day != today())
                     {
                         drop(queue);
-                        self.flush_reads(state);
+                        self.flush_logs(state);
                         queue = match state.queue.lock() {
                             Ok(q) => q,
                             Err(_) => return,
@@ -445,9 +531,9 @@ impl Server {
         }
     }
 
-    /// Appends the read counts gathered so far to the project's tooling log as one
-    /// `coordinator-reads` entry, then starts counting afresh.
-    fn flush_reads(&self, state: &ProjectState) {
+    /// Appends the read counts and commit measurements gathered so far to the project's
+    /// tooling log (`coordinator-reads`, `coordinator-commits`), then starts afresh.
+    fn flush_logs(&self, state: &ProjectState) {
         let Some((day, classes, (reads, with_pending))) = state.reads.lock().ok().map(|mut log| {
             let taken = std::mem::take(&mut log.classes);
             let day = std::mem::replace(&mut log.day, today());
@@ -459,22 +545,45 @@ impl Server {
         }) else {
             return;
         };
-        if reads == 0 {
+        let commits = state
+            .commits
+            .lock()
+            .map(|mut log| std::mem::take(&mut *log))
+            .unwrap_or_default();
+        if reads == 0 && commits.sizes.is_empty() {
             return;
         }
-        let summary = format!(
-            "{reads} reads through the coordinator, {with_pending} with pending writes (day {day})"
-        );
-        let diff = json!({"day_unix": day * 86_400, "reads_by_class": classes});
         let _ = research::with_lock_wait(Duration::from_secs(10), || {
             Library::open_project(self.root.clone(), Some(&state.id))
         })
         .and_then(|mut lib| {
-            lib.append_history(0, "coordinator-reads", &summary, &[], &[], Some(diff))
+            if reads > 0 {
+                let summary = format!(
+                    "{reads} reads through the coordinator, {with_pending} with pending writes (day {day})"
+                );
+                let diff = json!({"day_unix": day * 86_400, "reads_by_class": classes});
+                lib.append_history(0, "coordinator-reads", &summary, &[], &[], Some(diff))?;
+            }
+            if !commits.sizes.is_empty() {
+                let summary = format!(
+                    "{} commits of {} operations through the coordinator (day {day})",
+                    commits.sizes.len(),
+                    commits.sizes.iter().sum::<u64>()
+                );
+                let diff = json!({"day_unix": day * 86_400, "commits": commits.view()});
+                lib.append_history(0, "coordinator-commits", &summary, &[], &[], Some(diff))?;
+            }
+            Ok(())
         });
     }
-
     fn commit_batch(&self, state: &Arc<ProjectState>, batch: Vec<Operation>) {
+        if let Ok(mut log) = state.commits.lock() {
+            log.sizes.push(batch.len() as u64);
+            for op in &batch {
+                let waited = u64::try_from(op.queued.elapsed().as_millis()).unwrap_or(u64::MAX);
+                log.wait_ms.entry(op.class.name()).or_default().push(waited);
+            }
+        }
         state.writing.store(true, Ordering::Release);
         let answers = self.apply(state, &batch);
         state.writing.store(false, Ordering::Release);
@@ -490,13 +599,27 @@ impl Server {
                 .map(|_| Answer::of(Err(error.clone())))
                 .collect()
         };
-        let mut lib = match research::with_lock_wait(Duration::from_secs(600), || {
-            Library::open_project(self.root.clone(), Some(&state.id))
+        let opening = Instant::now();
+        let resident = state.resident.lock().ok().and_then(|mut r| r.take());
+        let mut reused = false;
+        let (mut lib, opened) = match resident.and_then(|r| {
+            let opened = r.opened;
+            r.resume(&self.root).map(|lib| (lib, opened))
         }) {
-            Ok(lib) if !lib.projects.is_empty() => lib,
-            Ok(_) => return fail_all(format!("Unknown project: {}", state.id)),
-            Err(e) => return fail_all(e),
+            Some(resumed) => {
+                reused = true;
+                resumed
+            }
+            None => match research::with_lock_wait(Duration::from_secs(600), || {
+                Library::open_project(self.root.clone(), Some(&state.id))
+            }) {
+                Ok(lib) if !lib.projects.is_empty() => (lib, Instant::now()),
+                Ok(_) => return fail_all(format!("Unknown project: {}", state.id)),
+                Err(e) => return fail_all(e),
+            },
         };
+        let open_time = opening.elapsed();
+        research::operations::take_commit_times();
         // Another process committed since the last snapshot: publish its state first, so
         // readers never see our next commit's texts against an older catalog.
         let unchanged = state
@@ -541,6 +664,25 @@ impl Server {
         let current = state.snapshot.read().map(|s| s.project.clone()).ok();
         if current.as_ref() != Some(&lib.projects[0]) {
             self.publish(state, lib.projects[0].clone());
+        }
+        let [delta, journal, applied] = research::operations::take_commit_times();
+        if let Ok(mut log) = state.commits.lock() {
+            log.reused += u64::from(reused);
+            log.open_us.push(micros(open_time));
+            if !applied.is_zero() {
+                log.delta_us.push(micros(delta));
+                log.journal_us.push(micros(journal));
+                log.apply_us.push(micros(applied));
+            }
+        }
+        // Keep the catalog for the next batch unless anything failed: a failure may leave the
+        // in-memory catalog ahead of or behind the disk, so the next batch re-opens instead.
+        if answers.iter().all(|a| a.exit == 0) {
+            let stamp = stamp(&self.root.join(&state.id).join("project.json"));
+            lib.release_locks();
+            if let Ok(mut slot) = state.resident.lock() {
+                *slot = Some(Resident { lib, stamp, opened });
+            }
         }
         answers
     }
@@ -747,7 +889,7 @@ impl Server {
             .map(|projects| projects.values().cloned().collect())
             .unwrap_or_default();
         for state in states {
-            self.flush_reads(&state);
+            self.flush_logs(&state);
         }
         std::process::exit(0)
     }
@@ -770,7 +912,8 @@ impl Server {
                             .map(|q| (q.waiting.len(), q.running.len()))
                             .unwrap_or_default();
                         json!({"project": state.id, "waiting": waiting, "running": running,
-                            "reads": reads, "reads_with_pending": with_pending, "reads_by_class": classes})
+                            "reads": reads, "reads_with_pending": with_pending, "reads_by_class": classes,
+                            "commits": state.commits.lock().map(|log| log.view()).unwrap_or_default()})
                     })
                     .collect()
             })

@@ -513,6 +513,31 @@ pub fn lock_status(projects: &Path, id: &str) -> Result<serde_json::Value> {
         serde_json::json!({"project": id, "writer_active": writer, "readers_active": readers, "writer": holder, "waiting": waiting}),
     )
 }
+/// The legacy library gate (shared unless `exclusive_gate`) plus the project's own lock.
+fn acquire_locks(
+    root: &Path,
+    id: &str,
+    exclusive_gate: bool,
+    write: bool,
+) -> Result<OperationLocks> {
+    let gate = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".library.lock"))
+        .map_err(|e| e.to_string())?;
+    wait_lock(&gate, exclusive_gate).map_err(|_| {
+        "Research library is busy with another operation. Retry shortly.".to_string()
+    })?;
+    Ok(OperationLocks {
+        project: Some(id.into()),
+        writable: write,
+        _project: Some(project_lock(root, id, write)?),
+        _gate: gate,
+        holder: holder_path(root, id, write),
+    })
+}
 fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
     let folder = root.join(".project-locks");
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
@@ -748,6 +773,18 @@ impl Library {
     pub fn open_project(root: PathBuf, selected: Option<&str>) -> Result<Self> {
         Self::open_mode(root, selected, true, true)
     }
+    /// Releases this library's locks while keeping its catalog in memory (the coordinator's
+    /// writer between batches). Only `relock` makes it writable again.
+    pub(crate) fn release_locks(&mut self) {
+        self._lock = None;
+    }
+    /// Re-takes the writable lock of the one project this library holds in memory. The caller
+    /// must then check that the catalog on disk is still the one held.
+    pub(crate) fn relock(&mut self) -> Result<()> {
+        let id = self.projects.first().ok_or("No project held")?.id.clone();
+        self._lock = Some(acquire_locks(&self.root, &id, false, true)?);
+        Ok(())
+    }
     pub fn read_project(root: PathBuf, selected: &str) -> Result<Self> {
         Self::open_mode(root, Some(selected), false, true)
     }
@@ -788,25 +825,8 @@ impl Library {
         if !valid_id(id) {
             return Err("Invalid project identity".into());
         }
-        let acquire = |exclusive_gate: bool, write: bool| -> Result<OperationLocks> {
-            let gate = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(root.join(".library.lock"))
-                .map_err(|e| e.to_string())?;
-            wait_lock(&gate, exclusive_gate).map_err(|_| {
-                "Research library is busy with another operation. Retry shortly.".to_string()
-            })?;
-            Ok(OperationLocks {
-                project: Some(id.into()),
-                writable: write,
-                _project: Some(project_lock(&root, id, write)?),
-                _gate: gate,
-                holder: holder_path(&root, id, write),
-            })
-        };
+        let acquire =
+            |exclusive_gate: bool, write: bool| acquire_locks(&root, id, exclusive_gate, write);
         let mut locks = acquire(false, writable)?;
         let dir = root.join(id);
         if dir.exists() {

@@ -73,10 +73,31 @@ fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
 }
+/// The last catalog this process fingerprinted, with its fingerprint. A commit's after-catalog
+/// is usually the next commit's before-catalog, so its fingerprint is reused instead of
+/// serialising and hashing the catalog again. Reuse requires equality: catalogs serialise
+/// deterministically (no unordered maps), so equal catalogs have equal fingerprints.
+static LAST_FINGERPRINT: std::sync::Mutex<Option<(Project, String)>> = std::sync::Mutex::new(None);
+fn before_fingerprint(before: &Project) -> Result<String> {
+    if let Ok(last) = LAST_FINGERPRINT.lock()
+        && let Some((catalog, hash)) = last.as_ref()
+        && catalog == before
+    {
+        return Ok(hash.clone());
+    }
+    Ok(sha256(&catalog_bytes(before)?))
+}
+fn remember_fingerprint(catalog: &Project, hash: &str) {
+    if let Ok(mut last) = LAST_FINGERPRINT.lock() {
+        *last = Some((catalog.clone(), hash.to_string()));
+    }
+}
 /// The delta receipt plus the after-catalog's bytes (`catalog_bytes`), serialised once and
 /// used both for the after fingerprint and, by `commit`, for writing `project.json`.
 fn delta_with_after(j: &Journal) -> Result<(Value, Vec<u8>)> {
     let after_bytes = catalog_bytes(&j.after)?;
+    let before_hash = before_fingerprint(&j.before)?;
+    let after_hash = sha256(&after_bytes);
     let mut changes = serde_json::Map::new();
     changes.insert(
         "nodes".into(),
@@ -90,8 +111,8 @@ fn delta_with_after(j: &Journal) -> Result<(Value, Vec<u8>)> {
     );
     Ok((
         json!({"schema":1,"kind":"completed-catalog-delta","before":header(&j.before)?,"after":header(&j.after)?,"changes":changes,
-        "before_hash":sha256(&catalog_bytes(&j.before)?),
-        "after_hash":sha256(&after_bytes),
+        "before_hash":before_hash,
+        "after_hash":after_hash,
         "edits":j.edits,"moves":j.moves,"dependencies":j.dependencies,"sidecars":j.sidecars,"ledger":j.ledger}),
         after_bytes,
     ))
@@ -105,6 +126,11 @@ pub(super) fn pending_delta(j: &Journal) -> Result<(Value, Vec<u8>)> {
     let (mut value, after) = delta_with_after(j)?;
     value["kind"] = "pending-catalog-delta".into();
     Ok((value, after))
+}
+/// Records that `catalog` (a commit's after-catalog) has fingerprint `hash`, once that commit
+/// is written.
+pub(super) fn committed(catalog: &Project, hash: &str) {
+    remember_fingerprint(catalog, hash);
 }
 
 pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {

@@ -32,6 +32,27 @@ thread_local! {
     static COMMIT_OBSERVER: std::cell::RefCell<Option<Observer>> =
         const { std::cell::RefCell::new(None) };
 }
+thread_local! {
+    /// Time this thread's commits spent building the delta and fingerprints, writing the
+    /// pending journal, and applying it (files, catalog write and fsync), until taken.
+    static COMMIT_TIMES: std::cell::Cell<[std::time::Duration; 3]> =
+        const { std::cell::Cell::new([std::time::Duration::ZERO; 3]) };
+}
+/// Commit stages timed by `record_commit_time`.
+pub(crate) const DELTA: usize = 0;
+pub(crate) const JOURNAL: usize = 1;
+pub(crate) const APPLY: usize = 2;
+pub(super) fn record_commit_time(stage: usize, time: std::time::Duration) {
+    COMMIT_TIMES.with(|t| {
+        let mut times = t.get();
+        times[stage] += time;
+        t.set(times);
+    });
+}
+/// This thread's commit stage times since the last call, then zero.
+pub(crate) fn take_commit_times() -> [std::time::Duration; 3] {
+    COMMIT_TIMES.with(|t| t.replace([std::time::Duration::ZERO; 3]))
+}
 /// Runs `work` with `observer` notified before each commit on this thread changes files.
 pub(crate) fn with_commit_observer<T>(
     observer: impl Fn(&[(String, Option<String>)]) + 'static,

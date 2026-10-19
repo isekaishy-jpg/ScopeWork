@@ -1,6 +1,6 @@
 # Proposal: coordinator phase 3, storage
 
-Phase 3 of [the coordinator proposal](proposal-coordinator.md): what the coordinator should change about how the catalog is stored and how derived state is computed, now that one process owns every write. Research and proposal are complete; nothing here is implemented. Two parts are gated on measurements that only a released phase 1 can produce. The gates are stated as acceptance prerequisites, not left open.
+Phase 3 of [the coordinator proposal](proposal-coordinator.md): what the coordinator should change about how the catalog is stored and how derived state is computed, now that one process owns every write. Research and proposal are complete. 3.1, 3.2 and 3.5 are implemented (see "As implemented" at the end); 3.3 and 3.4 are gated on measurements that only a released phase 1 can produce. The gates are stated as acceptance prerequisites, not left open.
 
 ## Research
 
@@ -138,3 +138,19 @@ Small fixtures only (at most 100 functions). Catalog-scale timing is measured in
   - the racy-stamp hash and the once-a-minute re-open bound the hand-edit case;
   - phase 2's drift detection records any such edit.
 - **Cache invalidation errors.** Mitigation: the cache is never used by writes, the equality tests above, and a `SCOPEWORK_STATUS_CACHE=off` switch for comparison.
+
+## As implemented (2026-10-18)
+
+3.1, 3.2 and 3.5 are implemented. The measurements below were taken on a copy of the live catalog (release build, best of five).
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Open per batch (parse and index) | 65 ms | 0 when the resident catalog is reused |
+| Journal delta with fingerprints | 134 ms | 62 ms, plus 5.6 ms to remember the after-catalog |
+
+The saving is about 131 ms per batch, against the 80 ms criterion.
+
+Deviations:
+- **3.2 carries fingerprints forward instead of hashing the bytes read at open.** Recovery fingerprints Scopework's own serialisation of the parsed catalog. Hashing the bytes read is valid only after checking that they equal that serialisation, which costs as much as it saves. Instead, each commit remembers its after-catalog and after fingerprint process-wide. A later commit whose before-catalog is equal reuses the fingerprint. This is exact, because catalogs serialise deterministically. It pays off wherever one process commits repeatedly: the coordinator's writer, `research session` and the GUI.
+- **3.1 does not check receipt numbers.** Every Scopework commit rewrites `project.json` and so changes its stamp. Listing the receipts folder, which gains about 20,000 entries a day on the live project, would cost more than the open it saves. The stamp check, the pending-journal check and the racy-window byte comparison remain, and the resident catalog is discarded after 60 s or after any failed answer in a batch.
+- **3.5 measures stages, not fingerprints alone.** The commit log records delta (including fingerprints), journal write and apply (files, catalog write and fsync), plus open time, the resident reuse count, operations per batch and queue wait per class.

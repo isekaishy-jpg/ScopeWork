@@ -186,12 +186,16 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
 /// after-catalog is serialised once for its fingerprint and the catalog write. Returns how
 /// many annotation-ledger report paths it repathed.
 pub(super) fn commit(root: &Path, project: &mut Project, j: &Journal) -> Result<usize> {
+    let started = std::time::Instant::now();
     let (delta, after_bytes) = journal_history::pending_delta(j)?;
+    operations::record_commit_time(operations::DELTA, started.elapsed());
+    let started = std::time::Instant::now();
     let folder = prepare_pending(root)?;
     atomic(
         &folder.join("journal.json"),
         &serde_json::to_vec(&delta).map_err(|e| e.to_string())?,
     )?;
+    operations::record_commit_time(operations::JOURNAL, started.elapsed());
     #[cfg(debug_assertions)]
     if std::env::var("SCOPEWORK_METADATA_FAIL_AT").as_deref() == Ok("journal") {
         std::process::exit(99);
@@ -217,7 +221,12 @@ pub(super) fn commit(root: &Path, project: &mut Project, j: &Journal) -> Result<
             .map(|s| (s.path.clone(), Some(s.before.clone()))),
     );
     operations::before_commit(&previous);
-    finish(root, project, j, Some((delta, after_bytes)))
+    let after_hash = delta["after_hash"].as_str().unwrap_or_default().to_string();
+    let started = std::time::Instant::now();
+    let repathed = finish(root, project, j, Some((delta, after_bytes)))?;
+    operations::record_commit_time(operations::APPLY, started.elapsed());
+    journal_history::committed(&j.after, &after_hash);
+    Ok(repathed)
 }
 
 /// Applies a pending journal's reports, moves, sidecars and catalog, then turns the pending
@@ -1455,6 +1464,39 @@ mod tests {
             let recovered = journal_history::read_pending(&pending, current).unwrap();
             assert!(same(&recovered.before, &before) && same(&recovered.after, &after));
         }
+    }
+
+    #[test]
+    fn remembered_fingerprints_equal_the_catalog_hash() {
+        use sha2::{Digest, Sha256};
+        let hash = |p: &Project| format!("{:x}", Sha256::digest(catalog_bytes(p).unwrap()));
+        let workspace = Workspace::new();
+        let lib = workspace.populate("alpha");
+        let first = lib.projects[0].clone();
+        let mut second = first.clone();
+        second.nodes[3].name = "Renamed".into();
+        second.revision += 1;
+        let mut third = second.clone();
+        third.nodes[3].name = "Renamed again".into();
+        third.revision += 1;
+        let journal = |before: &Project, after: &Project| Journal {
+            before: before.clone(),
+            after: after.clone(),
+            edits: vec![],
+            moves: vec![],
+            dependencies: vec![],
+            sidecars: vec![],
+            ledger: false,
+        };
+        let (a, _) = journal_history::pending_delta(&journal(&first, &second)).unwrap();
+        journal_history::committed(&second, a["after_hash"].as_str().unwrap());
+        // The next commit starts where the last ended: its before fingerprint is reused.
+        let (b, _) = journal_history::pending_delta(&journal(&second, &third)).unwrap();
+        assert_eq!(b["before_hash"], a["after_hash"]);
+        assert_eq!(b["before_hash"], hash(&second));
+        // A different before-catalog is hashed, never matched to the remembered one.
+        let (c, _) = journal_history::pending_delta(&journal(&first, &third)).unwrap();
+        assert_eq!(c["before_hash"], hash(&first));
     }
 
     #[test]

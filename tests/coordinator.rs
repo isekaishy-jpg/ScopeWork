@@ -527,3 +527,63 @@ fn a_failed_handshake_falls_back_to_direct_mode() {
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("coordinator_unavailable"));
 }
+
+#[test]
+fn the_writer_builds_on_direct_commits_made_between_its_batches() {
+    let f = Fixture::new(3);
+    let save = |mode: &str, node: u64, body: &str| {
+        let token = f.direct(&["node", "show", "fixture", &node.to_string()])["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let o = f
+            .command(mode, &[])
+            .args(f.save_args(node, &token, body))
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{mode} save {node}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    };
+    save("required", 3, "Through the coordinator");
+    save("off", 4, "Written directly");
+    // Twice: the first may re-open after the direct commit, the second reuses its catalog.
+    save("required", 5, "Through the coordinator again");
+    save("required", 3, "Through the coordinator, revised");
+    let status = |node: u64| f.direct(&["node", "show", "fixture", &node.to_string()]);
+    for (node, body) in [
+        (3, "Through the coordinator, revised"),
+        (4, "Written directly"),
+        (5, "Through the coordinator again"),
+    ] {
+        let shown = status(node);
+        assert_eq!(shown["body"], body, "{shown}");
+        assert_eq!(
+            shown["node"]["status"], "InProgress",
+            "node {node} lost its status: {shown}"
+        );
+    }
+    // Commit metrics: three coordinated commits, the last one on the resident catalog.
+    let status = f.coordinated(&["coordinator", "status"]);
+    let commits = &status["projects"][0]["commits"];
+    assert_eq!(commits["batches"], 3, "{status}");
+    assert!(
+        commits["resident_reused"].as_u64().unwrap() >= 1,
+        "{status}"
+    );
+    assert_eq!(commits["delta_us"]["count"], 3, "{status}");
+    f.coordinated(&["coordinator", "stop"]);
+    let log = f
+        .home
+        .join("projects/fixture/tools/workspaces/history/tooling.jsonl");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fs::read_to_string(&log).is_ok_and(|t| t.contains("coordinator-commits")) {
+        assert!(
+            Instant::now() < deadline,
+            "no coordinator-commits entry was written"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
