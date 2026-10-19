@@ -4,6 +4,7 @@
 
 Release notes, validation and the full commit ledger: [docs/releases/0.13.0a.md](docs/releases/0.13.0a.md). Versions now follow the Solarity convention: a product version with a stage suffix, plus a numbered build. The number jumps from 0.8.0 because the version path was recalculated from 0.1.0; see the release notes. Measured causes and acceptance criteria for the multi-agent work are in [the proposal](docs/proposal-2026-10-18.md).
 
+- Project tabs on the dashboard widen to fit long project names instead of being overdrawn by the next tab.
 - Product versions and numbered builds ([proposal](docs/proposal-versioning.md)):
   - `Cargo.toml` `0.13.0-alpha` is product `0.13.0a`;
   - `installer/build.ps1` reserves a never-reused build number (`BUILD_NUMBER`) per package;

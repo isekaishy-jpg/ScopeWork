@@ -315,9 +315,12 @@ impl eframe::App for Dashboard {
                 }
                 let panel = r(3.0, 64.0, w - 6.0, h - 91.0);
                 bevel(&p, panel, false);
+                let mut tab_x = 5.0;
                 for (i, project) in self.projects.iter().enumerate() {
                     let name=&project.name;
-                    let tab = r(5.0 + i as f32 * 61.0, 43.0, 61.0, 22.0);
+                    let label = p.layout_no_wrap(name.to_string(), egui::FontId::proportional(11.0), ink).size().x;
+                    let width = tab_width(label);
+                    let tab = r(tab_x, 43.0, width, 22.0);
                     p.rect_filled(tab, 0.0, bg);
                     bevel(&p, tab, false);
                     if self.project == i {
@@ -326,7 +329,8 @@ impl eframe::App for Dashboard {
                             egui::Stroke::new(2.0_f32, bg),
                         );
                     }
-                    t(17.0 + i as f32 * 61.0, 54.0, name.to_string());
+                    t(tab_x + 12.0, 54.0, name.to_string());
+                    tab_x += width;
                     if ui
                         .interact(tab, ui.id().with(("tab", i)), egui::Sense::click())
                         .clicked()
@@ -638,6 +642,12 @@ impl eframe::App for Dashboard {
     }
 }
 
+/// A project tab's width for a label of `label` pixels: the label plus its padding, never
+/// narrower than the classic 61-pixel tab.
+fn tab_width(label: f32) -> f32 {
+    (label + 24.0).max(61.0)
+}
+
 fn main() -> eframe::Result {
     let icon_image = image::load_from_memory(include_bytes!("../assets/scopework.png"))
         .expect("bundled icon")
@@ -699,7 +709,14 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod meter_tests {
-    use super::meter_rows;
+    use super::{meter_rows, tab_width};
+    #[test]
+    fn project_tabs_fit_their_names() {
+        // Short names keep the classic tab; long ones widen it instead of being overdrawn.
+        assert_eq!(tab_width(20.0), 61.0);
+        assert_eq!(tab_width(70.0), 94.0);
+        assert!(tab_width(70.0) >= 70.0 + 12.0 * 2.0);
+    }
     #[test]
     fn packs_to_exact_viewport_then_wraps() {
         let (positions, width, rows) = meter_rows(&[100.0; 5], 436.0, 12.0);
