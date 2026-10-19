@@ -10,6 +10,7 @@ Fixes from a code review of 0.13.0a:
 - A `job run` exits non-zero when its own payload's result is an error, whether it ran the command, joined another's run or ran without a coordinator; a missing result is `no result`.
 - The dashboard counts functions in progress and not started by each function's own status, instead of by its chunk's colour.
 - The coordinator is started without inheriting any of its caller's handles, so a script or test reading a command's output is never kept waiting by it.
+- If a coordinator cannot be started, commands under `SCOPEWORK_COORDINATOR=auto` fall back to direct mode instead of failing.
 
 ## 0.13.0a - 2026-10-18
 

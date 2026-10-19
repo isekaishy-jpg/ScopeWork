@@ -284,6 +284,34 @@ mod imp {
         line.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes));
         line.push(u16::from(b'"'));
     }
+    /// A Unicode environment block without `remove`: name=value pairs sorted by name ignoring
+    /// case (as CreateProcess documents), each NUL-terminated, ending in one more NUL.
+    pub fn environment_block(
+        variables: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+        remove: &str,
+    ) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        let mut pairs: Vec<(Vec<u16>, Vec<u16>)> = variables
+            .filter(|(name, _)| !name.to_string_lossy().eq_ignore_ascii_case(remove))
+            .map(|(name, value)| (name.encode_wide().collect(), value.encode_wide().collect()))
+            .collect();
+        let upper = |name: &[u16]| -> Vec<u16> {
+            String::from_utf16_lossy(name)
+                .to_uppercase()
+                .encode_utf16()
+                .collect()
+        };
+        pairs.sort_by_cached_key(|(name, _)| upper(name));
+        let mut block = vec![];
+        for (name, value) in pairs {
+            block.extend(name);
+            block.push(u16::from(b'='));
+            block.extend(value);
+            block.push(0);
+        }
+        block.push(0);
+        block
+    }
     pub fn spawn_detached(
         executable: &std::path::Path,
         arguments: &[&std::ffi::OsStr],
@@ -302,18 +330,7 @@ mod imp {
             quote(argument, &mut line);
         }
         line.push(0);
-        // Name=value pairs, each NUL-terminated, the block ending in one more NUL.
-        let mut environment: Vec<u16> = vec![];
-        for (name, value) in std::env::vars_os() {
-            if name.to_string_lossy().eq_ignore_ascii_case(remove) {
-                continue;
-            }
-            environment.extend(name.encode_wide());
-            environment.push(u16::from(b'='));
-            environment.extend(value.encode_wide());
-            environment.push(0);
-        }
-        environment.push(0);
+        let environment = environment_block(std::env::vars_os(), remove);
         // SAFETY: zeroed STARTUPINFOW with its size set is a valid "no special settings" value.
         let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
         startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -484,6 +501,24 @@ mod tests {
         let client = connect(&name).unwrap();
         assert!(client.is_some());
         drop(server.join().unwrap());
+    }
+
+    #[test]
+    fn environment_blocks_are_sorted_without_the_removed_variable() {
+        use std::ffi::OsString;
+        let block = imp::environment_block(
+            [
+                ("b", "2"),
+                ("SCOPEWORK_COORDINATOR", "off"),
+                ("A", "1"),
+                ("c", "3"),
+            ]
+            .into_iter()
+            .map(|(n, v)| (OsString::from(n), OsString::from(v))),
+            "scopework_coordinator",
+        );
+        let text = String::from_utf16(&block).unwrap();
+        assert_eq!(text, "A=1\0b=2\0c=3\0\0");
     }
 
     #[test]

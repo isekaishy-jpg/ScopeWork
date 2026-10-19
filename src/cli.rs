@@ -1364,10 +1364,7 @@ fn through_coordinator(raw: &[String], args: &Args) -> Option<i32> {
     }
     let write = matches!(route, Route::Write(_));
     let home = paths::home(args.home.clone()).ok()?;
-    let raw = match std::env::current_dir() {
-        Ok(cwd) => absolute_file_arguments(raw, &cwd),
-        Err(_) => return None,
-    };
+    let raw = absolute_file_arguments(raw);
     let raw = raw.as_slice();
     let mut connection = match crate::coordinator::client::connect(&home, "cli", true) {
         Ok(Some(connection)) => connection,
@@ -1404,18 +1401,16 @@ fn through_coordinator(raw: &[String], args: &Args) -> Option<i32> {
     }
 }
 
-/// Input-file arguments made absolute against `cwd`. The coordinator opens them from its own
-/// process, whose working directory is not the caller's, so a relative path would name another
-/// file there (or none). Both `--flag value` and `--flag=value` forms are handled.
-pub(crate) fn absolute_file_arguments(raw: &[String], cwd: &std::path::Path) -> Vec<String> {
+/// Input-file arguments made absolute in this process. The coordinator opens them from its
+/// own process, whose working directories (including Windows' per-drive ones, for paths such
+/// as `D:body.md`) are not the caller's, so a relative path would name another file there (or
+/// none). Both `--flag value` and `--flag=value` forms are handled.
+pub(crate) fn absolute_file_arguments(raw: &[String]) -> Vec<String> {
     const FILE_FLAGS: [&str; 4] = ["--file", "--body-file", "--evidence-file", "--diff-file"];
     let absolute = |value: &str| -> String {
-        let path = std::path::Path::new(value);
-        if path.is_absolute() {
-            value.to_string()
-        } else {
-            cwd.join(path).to_string_lossy().into_owned()
-        }
+        std::path::absolute(value)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| value.to_string())
     };
     let mut out = Vec::with_capacity(raw.len());
     let mut arguments = raw.iter();
@@ -1660,4 +1655,56 @@ pub(crate) fn route(command: &Command) -> Route {
 pub(crate) fn parse(arguments: &[String]) -> Result<Args, String> {
     Args::try_parse_from(std::iter::once("research".to_string()).chain(arguments.iter().cloned()))
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod file_argument_tests {
+    use super::absolute_file_arguments;
+
+    #[test]
+    fn every_relative_file_argument_becomes_absolute() {
+        let raw: Vec<String> = [
+            "node",
+            "save",
+            "p",
+            "3",
+            "--body-file",
+            "body.md",
+            "--evidence-file=sub/e.md",
+            "--expect",
+            "d4:x",
+            "--file",
+            r"\rooted.json",
+            "--diff-file",
+            "C:drive-relative.json",
+        ]
+        .map(String::from)
+        .to_vec();
+        let out = absolute_file_arguments(&raw);
+        let value = |flag: &str| {
+            out.iter()
+                .position(|a| a == flag)
+                .map(|i| out[i + 1].clone())
+                .or_else(|| {
+                    out.iter()
+                        .find_map(|a| a.strip_prefix(&format!("{flag}=")).map(String::from))
+                })
+                .unwrap()
+        };
+        for flag in ["--body-file", "--evidence-file", "--file", "--diff-file"] {
+            assert!(
+                std::path::Path::new(&value(flag)).is_absolute(),
+                "{flag}: {out:?}"
+            );
+        }
+        // Everything else is untouched, and absolute paths stay as written.
+        assert_eq!(value("--expect"), "d4:x");
+        assert_eq!(&out[..4], &raw[..4]);
+        let absolute = std::env::temp_dir()
+            .join("x.md")
+            .to_string_lossy()
+            .into_owned();
+        let kept = absolute_file_arguments(&["--file".into(), absolute.clone()]);
+        assert_eq!(kept[1], absolute);
+    }
 }

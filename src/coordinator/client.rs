@@ -158,7 +158,9 @@ pub fn connect(home: &Path, role: &str, start: bool) -> Result<Option<Connection
                     return Ok(None);
                 }
                 if !started {
-                    spawn(home)?;
+                    if let Err(e) = spawn(home) {
+                        return refuse(&format!("Cannot start a coordinator: {e}"));
+                    }
                     started = true;
                 }
                 std::thread::sleep(Duration::from_millis(25));
