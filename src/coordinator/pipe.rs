@@ -33,11 +33,17 @@ pub fn accept(instance: &File) -> Result<(), String> {
 pub fn connect(name: &str) -> Result<Option<File>, String> {
     imp::connect(name)
 }
-/// Stops this process's standard handles from being inherited, so a coordinator started from
-/// here does not hold the caller's output pipe open (a script reading this command's output
-/// would otherwise wait until the coordinator exits).
-pub fn keep_standard_handles() {
-    imp::keep_standard_handles()
+/// Starts `executable` with `arguments` as a detached background process that inherits no
+/// handles at all, and without `remove` in its environment. A child normally inherits every
+/// inheritable handle of its parent, including pipes the parent itself inherited (a script's
+/// or test harness's output); a coordinator holding one would keep that reader waiting until
+/// the coordinator exits.
+pub fn spawn_detached(
+    executable: &Path,
+    arguments: &[&std::ffi::OsStr],
+    remove: &str,
+) -> Result<(), String> {
+    imp::spawn_detached(executable, arguments, remove)
 }
 /// Starts the hidden window thread. `on_query` runs when Windows asks whether the process may
 /// end (stop admitting work); `on_end` runs when it will end (finish and exit).
@@ -248,21 +254,103 @@ mod imp {
         Ok(Some(pipe))
     }
 
-    pub fn keep_standard_handles() {
-        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
-        use windows_sys::Win32::System::Console::{
-            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-        };
-        for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-            // SAFETY: GetStdHandle returns this process's handle or null; clearing the inherit
-            // flag on a valid handle has no other effect.
-            unsafe {
-                let handle = GetStdHandle(which);
-                if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
-                    SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
-                }
-            }
+    /// One argument quoted for a Windows command line (the MSVC runtime's parsing rules).
+    fn quote(argument: &std::ffi::OsStr, line: &mut Vec<u16>) {
+        use std::os::windows::ffi::OsStrExt;
+        let units: Vec<u16> = argument.encode_wide().collect();
+        let plain = !units.is_empty()
+            && !units
+                .iter()
+                .any(|&u| u == u16::from(b' ') || u == u16::from(b'\t') || u == u16::from(b'"'));
+        if plain {
+            line.extend(units);
+            return;
         }
+        line.push(u16::from(b'"'));
+        let mut backslashes = 0;
+        for unit in units {
+            if unit == u16::from(b'\\') {
+                backslashes += 1;
+            } else {
+                if unit == u16::from(b'"') {
+                    // Double the backslashes before a quote, then escape the quote.
+                    line.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes + 1));
+                }
+                backslashes = 0;
+            }
+            line.push(unit);
+        }
+        // Backslashes before the closing quote are doubled.
+        line.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes));
+        line.push(u16::from(b'"'));
+    }
+    pub fn spawn_detached(
+        executable: &std::path::Path,
+        arguments: &[&std::ffi::OsStr],
+        remove: &str,
+    ) -> Result<(), String> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+            DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
+        };
+        let application: Vec<u16> = executable.as_os_str().encode_wide().chain([0]).collect();
+        let mut line = vec![];
+        quote(executable.as_os_str(), &mut line);
+        for argument in arguments {
+            line.push(u16::from(b' '));
+            quote(argument, &mut line);
+        }
+        line.push(0);
+        // Name=value pairs, each NUL-terminated, the block ending in one more NUL.
+        let mut environment: Vec<u16> = vec![];
+        for (name, value) in std::env::vars_os() {
+            if name.to_string_lossy().eq_ignore_ascii_case(remove) {
+                continue;
+            }
+            environment.extend(name.encode_wide());
+            environment.push(u16::from(b'='));
+            environment.extend(value.encode_wide());
+            environment.push(0);
+        }
+        environment.push(0);
+        // SAFETY: zeroed STARTUPINFOW with its size set is a valid "no special settings" value.
+        let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        // SAFETY: filled in by CreateProcessW; its handles are closed below.
+        let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: every buffer is NUL-terminated and outlives the call; bInheritHandles is 0,
+        // so the child receives no handles from this process.
+        let ok = unsafe {
+            CreateProcessW(
+                application.as_ptr(),
+                line.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                CREATE_NO_WINDOW
+                    | DETACHED_PROCESS
+                    | CREATE_NEW_PROCESS_GROUP
+                    | CREATE_UNICODE_ENVIRONMENT,
+                environment.as_ptr() as _,
+                std::ptr::null(),
+                &startup,
+                &mut process,
+            )
+        };
+        if ok == 0 {
+            return Err(format!(
+                "Cannot start {}: {}",
+                executable.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: both handles were returned by CreateProcessW and are not used afterwards.
+        unsafe {
+            CloseHandle(process.hProcess);
+            CloseHandle(process.hThread);
+        }
+        Ok(())
     }
     /// The query-end-session and end-session handlers.
     type Callbacks = (fn(), fn());
@@ -360,7 +448,13 @@ mod imp {
         Ok(None)
     }
     pub fn shutdown_window(_: fn(), _: fn()) {}
-    pub fn keep_standard_handles() {}
+    pub fn spawn_detached(
+        _: &std::path::Path,
+        _: &[&std::ffi::OsStr],
+        _: &str,
+    ) -> Result<(), String> {
+        Err(UNSUPPORTED.into())
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -390,6 +484,48 @@ mod tests {
         let client = connect(&name).unwrap();
         assert!(client.is_some());
         drop(server.join().unwrap());
+    }
+
+    #[test]
+    fn detached_children_inherit_no_handles() {
+        use std::io::Read;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::Pipes::CreatePipe;
+        // An inheritable pipe, like the output pipe a script or test harness hands down.
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let (mut read, mut write): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: valid out pointers and attributes; both handles are closed or owned below.
+        assert_ne!(
+            unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) },
+            0
+        );
+        // A child that lives about three seconds.
+        let system = std::env::var_os("SystemRoot").unwrap();
+        let cmd = std::path::Path::new(&system)
+            .join("System32")
+            .join("cmd.exe");
+        spawn_detached(
+            &cmd,
+            &["/c".as_ref(), "ping -n 4 127.0.0.1 >nul".as_ref()],
+            "SCOPEWORK_COORDINATOR",
+        )
+        .unwrap();
+        // SAFETY: our write end is closed exactly once; the read end is owned by the File.
+        unsafe { CloseHandle(write) };
+        let mut reader = unsafe { std::fs::File::from_raw_handle(read as _) };
+        let started = std::time::Instant::now();
+        let mut rest = vec![];
+        let _ = reader.read_to_end(&mut rest);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1500),
+            "the child kept the inherited pipe open"
+        );
     }
 
     #[test]

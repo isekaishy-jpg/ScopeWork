@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Fixes from a code review of 0.13.0a:
+
+- Relative `--file`, `--body-file`, `--evidence-file` and `--diff-file` paths sent through the coordinator resolve in the caller's directory, not the coordinator's. Previously, a save could read another directory's file of the same name.
+- A coordinated `job run` also takes the resource lock files that direct mode uses, so coordinated and direct-mode jobs on the same resource can no longer run at once.
+- Reads no longer skip their checks for other processes' commits while the coordinator's writer is still waiting for the project lock; the check is suspended only while the writer holds the lock.
+- A `job run` exits non-zero when its own payload's result is an error, whether it ran the command, joined another's run or ran without a coordinator; a missing result is `no result`.
+- The dashboard counts functions in progress and not started by each function's own status, instead of by its chunk's colour.
+- The coordinator is started without inheriting any of its caller's handles, so a script or test reading a command's output is never kept waiting by it.
+
 ## 0.13.0a - 2026-10-18
 
 Release notes, validation and the full commit ledger: [docs/releases/0.13.0a.md](docs/releases/0.13.0a.md). Versions now follow the Solarity convention: a product version with a stage suffix, plus a numbered build. The number jumps from 0.8.0 because the version path was recalculated from 0.1.0; see the release notes. Measured causes and acceptance criteria for the multi-agent work are in [the proposal](docs/proposal-2026-10-18.md).

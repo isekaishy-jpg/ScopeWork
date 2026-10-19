@@ -119,23 +119,13 @@ fn spawn(home: &Path) -> Result<(), String> {
             "research"
         })
     };
-    let mut command = std::process::Command::new(executable);
-    command
-        .arg("--home")
-        .arg(home)
-        .arg("serve")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env_remove("SCOPEWORK_COORDINATOR");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // No window, detached, its own process group: it outlives this command.
-        command.creation_flags(0x0800_0000 | 0x0000_0008 | 0x0000_0200);
-    }
-    pipe::keep_standard_handles();
-    command.spawn().map(|_| ()).map_err(|e| e.to_string())
+    // Detached, windowless, its own process group and no inherited handles: it outlives this
+    // command without holding anything of the caller's open.
+    pipe::spawn_detached(
+        &executable,
+        &["--home".as_ref(), home.as_os_str(), "serve".as_ref()],
+        "SCOPEWORK_COORDINATOR",
+    )
 }
 /// Connects to `home`'s coordinator, starting one when allowed. `None` means direct mode.
 pub fn connect(home: &Path, role: &str, start: bool) -> Result<Option<Connection>, String> {

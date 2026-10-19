@@ -17,7 +17,10 @@ if ($Write -ne "") { Set-Content -Path $Write -Value ("written " + [DateTime]::U
 Start-Sleep -Milliseconds $SleepMs
 Add-Content -Path $Log -Value ("end " + $payloads.Count + " " + [DateTime]::UtcNow.Ticks)
 if ($Exit -ne 0) { exit $Exit }
-$results = @($payloads | ForEach-Object { @{ payload_id = $_.payload_id; ok = $_.payload } })
+$results = @($payloads | ForEach-Object {
+    if ($_.payload -and $_.payload.fail) { @{ payload_id = $_.payload_id; error = "failed by request" } }
+    else { @{ payload_id = $_.payload_id; ok = $_.payload } }
+})
 $answer = @{ results = $results; overall = @{ count = $payloads.Count } }
 $answer | ConvertTo-Json -Depth 6 | Set-Content -Path $env:SCOPEWORK_JOB_RESULTS
 "#;
@@ -465,4 +468,103 @@ fn changes_outside_a_lease_are_recorded_as_drift() {
         .unwrap();
     let status: Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status["projects"][0]["drift"]["ledger"], 1, "{status}");
+}
+
+#[test]
+fn coordinated_and_direct_jobs_exclude_each_other_in_both_orders() {
+    let f = Fixture::new();
+    for (first, second) in [("required", "off"), ("off", "required")] {
+        let _ = fs::remove_file(f.log());
+        let a = spawn(f.job(first, &["--resource", "ghidra"], None, 1500, 0, None));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while f.runs().is_empty() {
+            assert!(Instant::now() < deadline, "{first} job never started");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let b = spawn(f.job(second, &["--resource", "ghidra"], None, 0, 0, None));
+        let (a, a_code) = Fixture::answer(a.wait_with_output().unwrap());
+        let (b, b_code) = Fixture::answer(b.wait_with_output().unwrap());
+        assert_eq!((a_code, b_code), (0, 0), "{a} {b}");
+        let order: Vec<String> = f.runs().into_iter().map(|r| r.0).collect();
+        assert_eq!(
+            order,
+            ["start", "end", "start", "end"],
+            "{first} then {second}: the jobs overlapped"
+        );
+    }
+}
+
+#[test]
+fn a_failed_payload_fails_its_request_whatever_the_command_exits() {
+    let f = Fixture::new();
+    // The tool exits 0 but reports this payload as failed: the caller must see a failure,
+    // whether it ran the tool itself (coordinated or direct) or joined another's run.
+    for mode in ["required", "off"] {
+        let (answer, code) = Fixture::answer(
+            f.job(
+                mode,
+                &["--kind", "ledger-put"],
+                Some(json!({"fail": true})),
+                0,
+                0,
+                None,
+            )
+            .output()
+            .unwrap(),
+        );
+        assert_eq!(answer["ran"], true, "{answer}");
+        assert_eq!(answer["result"]["error"], "failed by request", "{answer}");
+        assert_eq!(
+            (code, answer["exit"].as_i64()),
+            (1, Some(1)),
+            "{mode}: {answer}"
+        );
+    }
+    let blocker = spawn(f.job(
+        "required",
+        &["--kind", "ledger-put"],
+        Some(json!({"n": 0})),
+        2000,
+        0,
+        None,
+    ));
+    f.wait_held("ledger");
+    let holder = spawn(f.job(
+        "required",
+        &["--kind", "ledger-put"],
+        Some(json!({"n": 1})),
+        0,
+        0,
+        None,
+    ));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while f.waiting() < 1 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let joined = spawn(f.job(
+        "required",
+        &["--kind", "ledger-put"],
+        Some(json!({"fail": true})),
+        0,
+        0,
+        None,
+    ));
+    while f.waiting() < 2 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(Fixture::answer(blocker.wait_with_output().unwrap()).1, 0);
+    let (holder, holder_code) = Fixture::answer(holder.wait_with_output().unwrap());
+    let (joined, joined_code) = Fixture::answer(joined.wait_with_output().unwrap());
+    assert_eq!(
+        (holder_code, holder["result"].clone()),
+        (0, json!({"ok": {"n": 1}})),
+        "{holder}"
+    );
+    assert_eq!(joined["ran"], false, "{joined}");
+    assert_eq!(
+        (joined_code, joined["result"]["error"].as_str()),
+        (1, Some("failed by request"))
+    );
 }

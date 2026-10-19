@@ -342,15 +342,7 @@ impl eframe::App for Dashboard {
                 let project_view=self.projects.get(self.project).cloned();
                 let live_meters=project_view.as_ref().map(|p|p.meters.clone()).unwrap_or_default();
                 let data:Vec<Row>=live_meters.chunks(4).map(|batch|Row{groups:batch.iter().map(|m|(m.name.clone(),m.functions,if m.states.iter().all(|&s|s==0)&&!m.states.is_empty(){0}else if m.states.iter().any(|&s|s!=2){1}else{2},m.completed_functions)).collect()}).collect();
-                let mut counts = [0usize; 3];
-                for row in &data {
-                    for g in &row.groups {
-                        counts[0] += g.3;
-                        if g.2 != 0 {
-                            counts[g.2] += g.1 - g.3;
-                        }
-                    }
-                }
+                let counts = function_counts(&live_meters);
                 let total: usize = counts.iter().sum();
                 let project_counts:Vec<usize>=live_meters.iter().map(|m|m.states.len()).collect();
                 let total_chunks:usize=project_counts.iter().sum();
@@ -642,6 +634,17 @@ impl eframe::App for Dashboard {
     }
 }
 
+/// Required functions by their own effective status: complete, in progress, not started.
+fn function_counts(meters: &[research::Meter]) -> [usize; 3] {
+    meters.iter().fold([0; 3], |[done, started, open], m| {
+        [
+            done + m.completed_functions,
+            started + m.in_progress_functions,
+            open + m.functions - m.completed_functions - m.in_progress_functions,
+        ]
+    })
+}
+
 /// A project tab's width for a label of `label` pixels: the label plus its padding, never
 /// narrower than the classic 61-pixel tab.
 fn tab_width(label: f32) -> f32 {
@@ -709,7 +712,27 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod meter_tests {
-    use super::{meter_rows, tab_width};
+    use super::{function_counts, meter_rows, tab_width};
+    #[test]
+    fn function_totals_count_each_function_by_its_own_status() {
+        // One chunk holds a function in progress and one not started: one of each, not two in
+        // progress because the chunk is in progress.
+        let meter = |functions, completed_functions, in_progress_functions| {
+            research_dashboard::research::Meter {
+                id: 1,
+                name: "A".into(),
+                functions,
+                completed_functions,
+                in_progress_functions,
+                states: vec![1],
+            }
+        };
+        assert_eq!(function_counts(&[meter(2, 0, 1)]), [0, 1, 1]);
+        assert_eq!(
+            function_counts(&[meter(13, 7, 1), meter(6, 0, 0)]),
+            [7, 1, 11]
+        );
+    }
     #[test]
     fn project_tabs_fit_their_names() {
         // Short names keep the classic tab; long ones widen it instead of being overdrawn.

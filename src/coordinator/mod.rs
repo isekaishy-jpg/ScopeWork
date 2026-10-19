@@ -221,7 +221,7 @@ struct ProjectState {
     live: Mutex<Vec<Weak<Snapshot>>>,
     queue: Mutex<Queue>,
     wake: Condvar,
-    /// True while this coordinator's writer is committing (its own pending journal is expected).
+    /// True while this coordinator's writer holds the project lock (see `Writing`).
     writing: AtomicBool,
     /// Changes by other processes noticed so far. Their file writes bypass the overlays, so a
     /// read that overlaps one is answered again under the lock.
@@ -710,7 +710,6 @@ impl Server {
                 log.wait_ms.entry(op.class.name()).or_default().push(waited);
             }
         }
-        state.writing.store(true, Ordering::Release);
         let answers = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.apply(state, &batch)
         }))
@@ -726,7 +725,6 @@ impl Server {
             let error = "writer_failed: the coordinator's writer failed while applying this operation; it may or may not have been applied. Check the record before retrying.";
             batch.iter().map(|_| Answer::of(Err(error.to_string()))).collect()
         });
-        state.writing.store(false, Ordering::Release);
         for (op, answer) in batch.into_iter().zip(answers) {
             let _ = op.reply.send(answer);
         }
@@ -759,6 +757,8 @@ impl Server {
             },
         };
         let open_time = opening.elapsed();
+        // Declared after `lib`, so it is dropped first: the flag is down before the lock goes.
+        let writing = Writing::start(&state.writing);
         #[cfg(debug_assertions)]
         if std::env::var("SCOPEWORK_COORDINATOR_FAIL_AT").as_deref() == Ok("apply") {
             panic!("injected writer failure");
@@ -832,12 +832,31 @@ impl Server {
         // in-memory catalog ahead of or behind the disk, so the next batch re-opens instead.
         if answers.iter().all(|a| a.exit == 0) {
             let stamp = stamp(&self.root.join(&state.id).join("project.json"));
+            drop(writing);
             lib.release_locks();
             if let Ok(mut slot) = state.resident.lock() {
                 *slot = Some(Resident { lib, stamp, opened });
             }
         }
         answers
+    }
+}
+
+/// `ProjectState::writing` for exactly as long as this writer holds the project lock: raised
+/// once the lock is taken and lowered before it is released, also when unwinding. Readers skip
+/// their checks for outside writers only then, when every file change is this coordinator's
+/// and recorded in its overlays; while the writer still waits for the lock, another process may
+/// be mid-commit.
+struct Writing<'a>(&'a AtomicBool);
+impl<'a> Writing<'a> {
+    fn start(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag)
+    }
+}
+impl Drop for Writing<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 

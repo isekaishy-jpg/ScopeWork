@@ -1607,8 +1607,11 @@ impl ResearchUi {
 pub struct Meter {
     pub id: u64,
     pub name: String,
+    /// Required functions, and how many are complete or in progress by their own effective
+    /// status; the rest are not started.
     pub functions: usize,
     pub completed_functions: usize,
+    pub in_progress_functions: usize,
     pub states: Vec<usize>,
 }
 #[derive(Clone)]
@@ -2127,7 +2130,7 @@ impl Library {
             .map(|(p, project)| {
                 let index = catalog_index::Index::new(project);
                 let states_all = index.states(&lib.dir(p));
-                let mut counts = std::collections::HashMap::<u64, (usize, usize)>::new();
+                let mut counts = std::collections::HashMap::<u64, (usize, usize, usize)>::new();
                 let mut inventory_functions = 0;
                 let mut required_functions = 0;
                 for n in &project.nodes {
@@ -2139,6 +2142,7 @@ impl Library {
                                 let count = counts.entry(arch).or_default();
                                 count.0 += 1;
                                 count.1 += usize::from(states_all[&n.id] == Status::Complete);
+                                count.2 += usize::from(states_all[&n.id] == Status::InProgress);
                             }
                         }
                     }
@@ -2148,7 +2152,7 @@ impl Library {
                     .iter()
                     .filter(|n| n.kind == Kind::Architecture)
                     .map(|a| {
-                        let (functions, completed_functions) =
+                        let (functions, completed_functions, in_progress_functions) =
                             counts.get(&a.id).copied().unwrap_or_default();
                         let states = index
                             .children
@@ -2171,6 +2175,7 @@ impl Library {
                             },
                             functions,
                             completed_functions,
+                            in_progress_functions,
                             states,
                         }
                     })

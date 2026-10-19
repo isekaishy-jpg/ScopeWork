@@ -710,3 +710,117 @@ fn reads_never_mix_revisions_with_direct_mode_writers() {
         );
     }
 }
+
+#[test]
+fn relative_input_files_resolve_in_the_callers_directory_in_every_mode() {
+    let f = Fixture::new(3);
+    let (a, b) = (f.home.join("dir-a"), f.home.join("dir-b"));
+    for (dir, text) in [(&a, "From A"), (&b, "From B")] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("body.md"), text).unwrap();
+        fs::write(dir.join("evidence.md"), format!("{text} evidence")).unwrap();
+    }
+    // The coordinator starts from directory A.
+    let o = f
+        .command("required", &["queue", "fixture"])
+        .current_dir(&a)
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    for (node, mode) in [(3, "required"), (4, "auto"), (5, "off")] {
+        let token = f.direct(&["node", "show", "fixture", &node.to_string()])["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let o = f
+            .command(
+                mode,
+                &[
+                    "node",
+                    "save",
+                    "fixture",
+                    &node.to_string(),
+                    "--expect",
+                    &token,
+                    "--body-file",
+                    "body.md",
+                    "--evidence-file=evidence.md",
+                ],
+            )
+            .current_dir(&b)
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let shown = f.direct(&["node", "show", "fixture", &node.to_string()]);
+        assert_eq!(
+            shown["body"], "From B",
+            "{mode} read the coordinator's directory"
+        );
+        assert_eq!(shown["evidence"], "From B evidence", "{mode}");
+    }
+}
+
+#[test]
+fn a_waiting_coordinator_writer_does_not_hide_another_processes_commit_from_reads() {
+    let f = Fixture::new(2);
+    let initial = f.coordinated(&["node", "show", "fixture", "3"]);
+    // Taken now: any direct read after the interrupted save below would recover it.
+    let token4 = f.direct(&["node", "show", "fixture", "4"])["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // A direct-mode writer stops after replacing the report and before the catalog: its
+    // transaction is pending, as if it were still running.
+    let token = f.direct(&["node", "show", "fixture", "3"])["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let o = f
+        .command("off", &[])
+        .args(f.save_args(3, &token, "Written by another process"))
+        .env("SCOPEWORK_CATALOG_FAIL_AT", "reports")
+        .output()
+        .unwrap();
+    assert_eq!(
+        o.status.code(),
+        Some(99),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    // That writer still holds the project lock ...
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.home.join("projects/.project-locks/fixture.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    // ... while a coordinator write waits for it ...
+    let queued = f
+        .command("required", &[])
+        .args(f.save_args(4, &token4, "Queued behind the lock"))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(800));
+    // ... and a coordinator read arrives.
+    let reader = {
+        let mut command = f.command("required", &["node", "show", "fixture", "3"]);
+        command.stdout(std::process::Stdio::piped());
+        command.spawn().unwrap()
+    };
+    std::thread::sleep(Duration::from_millis(800));
+    lock.unlock().unwrap();
+    let read: Value = serde_json::from_slice(&reader.wait_with_output().unwrap().stdout).unwrap();
+    assert!(queued.wait_with_output().unwrap().status.success());
+    let last = f.direct(&["node", "show", "fixture", "3"]);
+    let pair = |v: &Value| (v["body"].clone(), v["node"]["revision"].clone());
+    assert!(
+        pair(&read) == pair(&initial) || pair(&read) == pair(&last),
+        "the read mixed the other process's report with an older record: {:?}",
+        pair(&read)
+    );
+}

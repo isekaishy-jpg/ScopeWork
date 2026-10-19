@@ -1364,6 +1364,11 @@ fn through_coordinator(raw: &[String], args: &Args) -> Option<i32> {
     }
     let write = matches!(route, Route::Write(_));
     let home = paths::home(args.home.clone()).ok()?;
+    let raw = match std::env::current_dir() {
+        Ok(cwd) => absolute_file_arguments(raw, &cwd),
+        Err(_) => return None,
+    };
+    let raw = raw.as_slice();
     let mut connection = match crate::coordinator::client::connect(&home, "cli", true) {
         Ok(Some(connection)) => connection,
         Ok(None) => return None,
@@ -1397,6 +1402,38 @@ fn through_coordinator(raw: &[String], args: &Args) -> Option<i32> {
             Some(1)
         }
     }
+}
+
+/// Input-file arguments made absolute against `cwd`. The coordinator opens them from its own
+/// process, whose working directory is not the caller's, so a relative path would name another
+/// file there (or none). Both `--flag value` and `--flag=value` forms are handled.
+pub(crate) fn absolute_file_arguments(raw: &[String], cwd: &std::path::Path) -> Vec<String> {
+    const FILE_FLAGS: [&str; 4] = ["--file", "--body-file", "--evidence-file", "--diff-file"];
+    let absolute = |value: &str| -> String {
+        let path = std::path::Path::new(value);
+        if path.is_absolute() {
+            value.to_string()
+        } else {
+            cwd.join(path).to_string_lossy().into_owned()
+        }
+    };
+    let mut out = Vec::with_capacity(raw.len());
+    let mut arguments = raw.iter();
+    while let Some(argument) = arguments.next() {
+        if FILE_FLAGS.contains(&argument.as_str()) {
+            out.push(argument.clone());
+            if let Some(value) = arguments.next() {
+                out.push(absolute(value));
+            }
+        } else if let Some((flag, value)) = argument.split_once('=')
+            && FILE_FLAGS.contains(&flag)
+        {
+            out.push(format!("{flag}={}", absolute(value)));
+        } else {
+            out.push(argument.clone());
+        }
+    }
+    out
 }
 
 /// How a command travels when a coordinator serves the research home.

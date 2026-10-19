@@ -384,6 +384,7 @@ Several agents on one research home share one coordinator process. It starts on 
 - **Reads never wait for writers.** They answer from the last committed revision held in memory. Object answers carry `revision` and `pending`: the queued or running operations that concern the records read (`kind`, `class`, `position`, `submitter`, `nodes`, `waited_ms`). A non-empty `pending` means the record is about to change. Array answers such as `node list` keep their shape.
 - **Writes queue.** Record operations (report saves, review flags, sidecars, metadata) that wait together are merged into one commit and accept or reject exactly what they would one at a time in queue order; expected tokens still guard every save. Structural operations (moves, dependency changes, deletions, ledger changes) commit alone. The GUI's requests go first, operations on more than 32 records run as `bulk`, and anything that has waited 5 seconds moves up a class.
 - **Direct mode stays correct.** Another process (an older Scopework, or `SCOPEWORK_COORDINATOR=off`) can still commit; the coordinator notices and reads the new revision. `research session` runs in its own process, as before.
+- **Relative file paths mean the caller's directory.** The command makes `--file`, `--body-file`, `--evidence-file` and `--diff-file` absolute before sending them, so a coordinator started elsewhere opens the same files direct mode would.
 
 ```powershell
 research queue example            # running and waiting operations; the lock queue without a coordinator
@@ -436,15 +437,16 @@ research tools audit example
 - `SCOPEWORK_JOB_PAYLOADS` names a JSON array of `{"payload_id", "submitter", "kind", "payload"}`, this request's own first.
 - Write `{"results": [{"payload_id": n, "ok": ...} or {"payload_id": n, "error": "..."}], "overall": ...}` to the path in `SCOPEWORK_JOB_RESULTS`. A payload without a result is answered `no result`.
 - A non-zero exit fails every payload with `job_failed`.
+- Each request's own result decides its exit code, whether it ran the command, joined another's run or ran without a coordinator: the command's non-zero exit, otherwise 1 when its result is an `error` (including `no result`), otherwise 0.
 - `SCOPEWORK_JOB_LEASE` holds the lease number.
 
 **Leases end with the holder.** A lease lasts as long as its holder's connection, so a holder that dies releases it at once. Requests that had joined it and were not yet answered wait again at their original place, and may run themselves next.
 
 **Several resources** are granted together or not at all, and a waiting request reserves its resources against later ones. Nobody holds a resource while waiting, and requests cannot starve.
 
-**Without a coordinator** (`SCOPEWORK_COORDINATOR=off`, or none can start), `job run` takes exclusive lock files per resource, in name order, under `.project-locks/`. `research locks` shows them under `resources`. Every request then runs alone with its own payload, so results are the same, only without joining.
+**Exclusion is the same in every mode.** A `job run` always takes exclusive lock files per resource, in name order, under `.project-locks/` (`research locks` shows them under `resources`). With a coordinator it takes them once its lease is granted, so the lease decides order and joining and the files exclude jobs started with `SCOPEWORK_COORDINATOR=off`. Without a coordinator (`off`, or none can start), the files alone order the requests. Every request then runs alone with its own payload, so results are the same, only without joining.
 
-**Pipe clients.** A tool that keeps a connection, such as a Python module, can lease directly. After the hello (role `tool`), it sends:
+**Pipe clients.** A tool that keeps a connection, such as a Python module, can lease directly. Once granted, it must also hold the resource lock files described above while it works, as `job run` does, or direct-mode jobs could run beside it. After the hello (role `tool`), it sends:
 - `{"id": n, "lease": {"project", "resources": [...], "key", "class", "kind", "payload"}}`, and waits for one of:
   - `{"granted": {"lease", "payloads"}}`;
   - `{"done": {"by", "result"}}`;
