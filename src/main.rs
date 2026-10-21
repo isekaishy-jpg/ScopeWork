@@ -565,6 +565,7 @@ impl eframe::App for Dashboard {
                             1 => &[("Dark mode", self.dark), ("Always on top", self.on_top)],
                             2 => &[
                                 ("Research records...", false),
+                                ("Project history...", false),
                                 ("Refresh research progress", false),
                                 ("Clear chunk selection", false),
                             ],
@@ -593,7 +594,8 @@ impl eframe::App for Dashboard {
                     }));
                 }
                 (2, Some(0)) => self.research.open = true,
-                (2, Some(1)) => self.research.refresh_library(),
+                (2, Some(1)) => self.research.open_history(),
+                (2, Some(2)) => self.research.refresh_library(),
                 (2, Some(_)) => self.selection = None,
                 (_, Some(_)) => self.about = true,
                 (_, None) => {}

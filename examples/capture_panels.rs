@@ -1,19 +1,22 @@
-//! Manual visual qualification: renders the Research records window and its dialogs against an
+//! Manual visual qualification: renders the Research records and Project history windows and the
+//! records dialogs against an
 //! explicitly selected fixture home and saves screenshots (light and dark) as PNG files.
 //!
 //! RESEARCH_DASHBOARD_HOME=<fixture home> SCOPEWORK_CAPTURE_DIR=<folder> cargo run --example capture_panels
 use eframe::egui;
 use research_dashboard::{classic, research::ResearchUi};
 
-/// (file name, dark mode, tab, confirm-complete dialog, new-project dialog)
-const SHOTS: &[(&str, bool, usize, bool, bool)] = &[
-    ("report-light", false, 0, false, false),
-    ("organize-light", false, 1, false, false),
-    ("project-light", false, 2, false, false),
-    ("complete-light", false, 0, true, false),
-    ("new-project-light", false, 0, false, true),
-    ("report-dark", true, 0, false, false),
-    ("organize-dark", true, 1, false, false),
+/// (file name, dark mode, tab, confirm-complete dialog, new-project dialog, history window)
+const SHOTS: &[(&str, bool, usize, bool, bool, bool)] = &[
+    ("report-light", false, 0, false, false, false),
+    ("organize-light", false, 1, false, false, false),
+    ("project-light", false, 2, false, false, false),
+    ("complete-light", false, 0, true, false, false),
+    ("new-project-light", false, 0, false, true, false),
+    ("report-dark", true, 0, false, false, false),
+    ("organize-dark", true, 1, false, false, false),
+    ("history-light", false, 0, false, false, true),
+    ("history-dark", true, 0, false, false, true),
 ];
 
 struct Capture {
@@ -50,7 +53,7 @@ impl eframe::App for Capture {
                 }
             }
         }
-        let (_, dark, tab, confirm, new_project) = SHOTS[self.shot];
+        let (_, dark, tab, confirm, new_project, history) = SHOTS[self.shot];
         if ctx.style().visuals.dark_mode != dark {
             ctx.set_visuals(classic::visuals(dark));
         }
@@ -65,6 +68,16 @@ impl eframe::App for Capture {
             self.selected = true;
         }
         self.ui.qualification_view(tab, confirm, new_project);
+        if history {
+            // The history window alone, following the fixture's first project.
+            self.ui.open = false;
+            if let Some(id) = first.as_deref() {
+                self.ui.follow_project(id);
+            }
+            if self.frames == 0 {
+                self.ui.open_history();
+            }
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(classic::face(dark)))
             .show(ctx, |_| {});

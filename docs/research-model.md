@@ -2,7 +2,7 @@
 
 ## Research records
 
-Create a project with **File > New project...** and open **View > Research records...** to work on it. New homes contain no preset projects. The window follows the project tab selected on the dashboard. The records list is on the left. The selected record is on the right, with three tabs: **Report** (the understanding and evidence editors, **Save**, **Mark complete...**, **Discard changes**, and **Reopen** once complete), **Organize** (add children, prerequisites, context-only membership, review flag, files) and **Project** (research scope, binary identity, folders, inventory import). The status bar shows messages, background work and unsaved edits.
+Create a project with **File > New project...** and open **View > Research records...** to work on it. New homes contain no preset projects. The window follows the project tab selected on the dashboard. The records list is on the left. The selected record is on the right, with three tabs: **Report** (the understanding and evidence editors, **Save**, **Mark complete...**, **Discard changes**, and **Reopen** once complete), **Organize** (add children, prerequisites, context-only membership, review flag, files) and **Project** (research scope, binary identity, folders, inventory import). The status bar shows messages, background work and unsaved edits. **View > Project history...** lists the project's catalog transactions and tooling entries, newest first, with filters by kind, record, RVA and day.
 
 Each project owns a complete hierarchy:
 

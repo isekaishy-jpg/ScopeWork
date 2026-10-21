@@ -19,6 +19,7 @@ impl ResearchUi {
     }
     /// Keeps the window on the dashboard's selected project while nothing is unsaved.
     pub fn follow_project(&mut self, id: &str) {
+        self.history.follow(id);
         if id == self.project_id || self.requested.is_some() || self.load_task.is_some() {
             return;
         }
@@ -110,6 +111,7 @@ impl ResearchUi {
     pub fn show(&mut self, ctx: &egui::Context) {
         self.show_new_project(ctx);
         self.show_queue(ctx);
+        self.show_history(ctx);
         if !self.open {
             return;
         }

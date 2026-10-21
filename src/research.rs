@@ -106,6 +106,8 @@ pub mod coordination;
 mod edit_tokens;
 #[path = "history.rs"]
 pub mod history;
+#[path = "history_ui.rs"]
+mod history_ui;
 #[path = "imports.rs"]
 pub mod imports;
 #[path = "layout.rs"]
@@ -1599,6 +1601,8 @@ pub struct ResearchUi {
     queue: Option<crate::queue_watch::QueueWatch>,
     /// The project whose queue list is open.
     queue_open: Option<String>,
+    /// The Project history window.
+    history: history_ui::HistoryView,
 }
 impl Default for ResearchUi {
     fn default() -> Self {
@@ -1656,6 +1660,7 @@ impl ResearchUi {
             new_project_open: false,
             queue: None,
             queue_open: None,
+            history: Default::default(),
         }
     }
     fn load(&mut self, p: usize, id: u64) {
