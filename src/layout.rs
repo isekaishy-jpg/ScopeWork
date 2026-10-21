@@ -297,7 +297,8 @@ pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
                     ));
                 }
                 fs::create_dir_all(to.parent().unwrap()).map_err(|e| e.to_string())?;
-                fs::rename(&from, &to).map_err(|e| e.to_string())?;
+                rename_retrying(&from, &to)
+                    .map_err(|e| format!("Cannot move {}: {e}", from.display()))?;
             }
         }
         atomic(&root.join(&r.new), r.rewritten.as_bytes())?;

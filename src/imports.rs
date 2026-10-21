@@ -557,7 +557,7 @@ fn install_folder(root: &Path, workspace: &Path, job: &Job, unit: &Prepared) -> 
         if !target.parent().ok_or("Missing parent directory")?.is_dir() {
             return Err("Missing committed/prepared parent directory".into());
         }
-        fs::rename(&stage, &target)
+        rename_retrying(&stage, &target)
             .map_err(|e| format!("Cannot install {}: {e}", target.display()))?;
     }
     Ok(())
@@ -768,7 +768,9 @@ pub(super) fn recover(root: &Path, project: &mut Project) -> Result<()> {
     job.error = None;
     checkpoint(&folder, &job)?;
     json(&folder.join("receipt.json"), &job)?;
-    fs::rename(&pending, folder.join("publication/committed.json")).map_err(|e| e.to_string())?;
+    let committed = folder.join("publication/committed.json");
+    rename_retrying(&pending, &committed)
+        .map_err(|e| format!("Cannot replace {}: {e}", committed.display()))?;
     Ok(())
 }
 fn cancel_preparation(root: &Path, job: &mut Job, folder: &Path) -> Result<()> {

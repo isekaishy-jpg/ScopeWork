@@ -223,10 +223,55 @@ pub(super) fn commit(root: &Path, project: &mut Project, j: &Journal) -> Result<
     operations::before_commit(&previous);
     let after_hash = delta["after_hash"].as_str().unwrap_or_default().to_string();
     let started = std::time::Instant::now();
-    let repathed = finish(root, project, j, Some((delta, after_bytes)))?;
+    // The pending journal is durable from here: the change is committed, and recovery applies it
+    // before any other operation. A failure now (usually a file another process holds open) is
+    // retried here, and if it persists the answer says the change is recorded, not that it failed.
+    let repathed = match finish(root, project, j, Some((delta, after_bytes))) {
+        Ok(repathed) => repathed,
+        Err(first) => apply_pending_retrying(root, project, j, first)?,
+    };
     operations::record_commit_time(operations::APPLY, started.elapsed());
     journal_history::committed(&j.after, &after_hash);
     Ok(repathed)
+}
+
+/// Retries applying a committed (journaled) transaction for a bounded time, then reports
+/// `commit_pending`: the change is recorded and Scopework applies it before any other operation
+/// on the project, so the caller must not repeat the request.
+fn apply_pending_retrying(
+    root: &Path,
+    project: &mut Project,
+    j: &Journal,
+    first: String,
+) -> Result<usize> {
+    let budget = commit_retry_budget();
+    let deadline = std::time::Instant::now() + budget;
+    let mut pause = std::time::Duration::from_millis(100);
+    let mut last = first;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(
+            pause.min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+        pause = (pause * 2).min(std::time::Duration::from_secs(1));
+        match finish(root, project, j, None) {
+            Ok(repathed) => return Ok(repathed),
+            Err(e) => last = e,
+        }
+    }
+    Err(format!(
+        "commit_pending: the change is recorded in the transaction journal and Scopework applies it before any other operation on this project ({last}). Do not repeat the request; read the record back once the file is released."
+    ))
+}
+/// How long a committed transaction's apply step is retried before `commit_pending`.
+fn commit_retry_budget() -> std::time::Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("SCOPEWORK_COMMIT_RETRY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return std::time::Duration::from_millis(ms);
+    }
+    std::time::Duration::from_secs(20)
 }
 
 /// Applies a pending journal's reports, moves, sidecars and catalog, then turns the pending

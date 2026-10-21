@@ -1106,7 +1106,8 @@ impl Library {
         let text = catalog_index::Index::new(&project).render(&project, 0, "", "");
         atomic(&stage.join("app.md"), text.as_bytes())?;
         atomic(&stage.join("project.json"), &catalog_bytes(&project)?)?;
-        fs::rename(&stage, &dir).map_err(|e| e.to_string())?;
+        rename_retrying(&stage, &dir)
+            .map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
         self.projects.push(project);
         Ok(())
     }

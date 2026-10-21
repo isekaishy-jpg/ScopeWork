@@ -248,7 +248,9 @@ Use schema 2 to omit a global revision precondition while retaining all-or-nothi
 
 Submit with `research node save-batch PROJECT --file INPUT.json`. An optional `expect_revision` adds a deliberately strict project-wide precondition. Schema 1 still requires it. Every input is checked against the same starting snapshot before any report changes. Draft batches never attest completion.
 
-Errors retain the JSON `error` message on stderr and include a machine-readable `kind` (for example `record_conflict`, `structural_job_conflict`, `busy`, or `operation_failed`). Successful JSON stays on stdout. See [0.5.0 qualification](qualification-0.5.0.md) for large-catalog latency limits.
+Errors retain the JSON `error` message on stderr and include a machine-readable `kind` (for example `record_conflict`, `structural_job_conflict`, `busy`, or `operation_failed`). Successful JSON stays on stdout.
+
+Three kinds say what happened to a write. `operation_failed` (and the conflict kinds) means nothing was applied; fix the cause and retry. `commit_pending` means the change is recorded in the transaction journal but a file could not be replaced yet (usually another process held it open past the retries); Scopework applies it before any other operation on the project, so do not repeat the request, and read the record back later. `coordinator_lost` and `writer_failed` are the only unknown outcomes: check the record before retrying. See [0.5.0 qualification](qualification-0.5.0.md) for large-catalog latency limits. See [0.5.0 qualification](qualification-0.5.0.md) for large-catalog latency limits.
 
 ## Node deletion and empty-node pruning (0.6.0)
 
