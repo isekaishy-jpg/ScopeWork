@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+Maintenance from the 2026-10-21 TODO pass; each item has its proposal in `docs/`.
+
+- **Quarantine** ([proposal](docs/proposal-quarantine.md)): `node quarantine` / `unquarantine` / `quarantined` mark a chunk or function as complete and sealed. Moves, renames, reorders, membership changes and new prerequisites touching it need `--directed-by` the human's instruction, which history records. Prerequisites on it count as satisfied; report text stays editable. The GUI marks it ⊘ with a **Quarantined** filter.
+- **Renames reach every citation** ([proposal](docs/proposal-rename-citations.md)): a `node batch` rename rewrites every exact `` `OldName` (`VA`) `` citation in all reports, syntheses included. Reports changed only by renames keep their completion and their annotation-ledger pins follow. The result lists `citations`, `unrewritten` bare mentions and `kept_complete`. Structural changes in the same batch still reopen as before.
+- **History** ([proposal](docs/proposal-history-view.md)): catalog receipts record their commit time (`at_unix`; older receipts use their journal's modification time, which `journal --compact` keeps). `history show --rva` and `--from`/`--to` (UTC days) filter; `history kinds` lists the known tooling kinds, and `history append` refuses a known kind without its required `--node` or `--ref`. New **View > Project history...** window.
+- **Definite commit outcomes on Windows** ([proposal](docs/proposal-commit-outcomes.md)): a commit whose apply step keeps meeting sharing violations retries for 20 s and then fails with `commit_pending` instead of an ambiguous error; renames retry everywhere.
+- **CLI** ([proposal](docs/proposal-cli-papercuts.md)): `node prune` explains skipped records; `project set-binary --expect-revision` amends the binary identity and keeps accepted hashes; `ready_for_review` excludes Not Started records and `status --ready-for-synthesis` lists chunks and architectures ready for their synthesis.
+- **Crash log** ([proposal](docs/proposal-gui-crash-log.md)): the dashboard writes `logs/gui.log` in the research home (start line, panics with backtrace, abnormal exits; rotated at 1 MiB).
+- The coordinator creates its shutdown window before accepting clients, so an installer or Windows shutdown during startup cannot miss it.
+- Completion throughput was measured: a member completion costs about 0.4 s, and the time went to project tools, not the app ([findings](docs/proposal-completion-throughput.md)).
+
 ## 0.13.1a - 2026-10-18
 
 Release notes, validation and the commit ledger: [docs/releases/0.13.1a.md](docs/releases/0.13.1a.md). Fixes from a code review of 0.13.0a, whose draft release was not published:
