@@ -30,7 +30,7 @@ research criteria app
 research status example
 ```
 
-Use the actual IDs returned by creation; the numbers above illustrate a fresh project. App is always node 0. A new project appears as a dashboard tab after **View > Refresh research progress**. Set binary identity before adding functions; it becomes locked once functions exist. A function has one canonical owner and one unique RVA per project. RVAs are hexadecimal; node IDs are decimal.
+Use the actual IDs returned by creation; the numbers above illustrate a fresh project. App is always node 0. A new project appears as a dashboard tab after **View > Refresh research progress**. Set binary identity before adding functions; it becomes locked once functions exist. After that, `project set-binary` accepts only an amendment, with `--expect-revision` from `project show`: every SHA-256 and every `0x` value of the current identity must remain, and new wording or mappings may be added. An amendment re-renders the report headers without reopening anything: completed records stay complete, and annotation-ledger rows pinned to those reports are re-pinned. `--expect-revision` is also accepted before enrolment, to reject concurrent identity edits. A function has one canonical owner and one unique RVA per project. RVAs are hexadecimal; node IDs are decimal.
 
 ## Project research scope
 
@@ -250,7 +250,7 @@ Submit with `research node save-batch PROJECT --file INPUT.json`. An optional `e
 
 Errors retain the JSON `error` message on stderr and include a machine-readable `kind` (for example `record_conflict`, `structural_job_conflict`, `busy`, or `operation_failed`). Successful JSON stays on stdout.
 
-Three kinds say what happened to a write. `operation_failed` (and the conflict kinds) means nothing was applied; fix the cause and retry. `commit_pending` means the change is recorded in the transaction journal but a file could not be replaced yet (usually another process held it open past the retries); Scopework applies it before any other operation on the project, so do not repeat the request, and read the record back later. `coordinator_lost` and `writer_failed` are the only unknown outcomes: check the record before retrying. See [0.5.0 qualification](qualification-0.5.0.md) for large-catalog latency limits. See [0.5.0 qualification](qualification-0.5.0.md) for large-catalog latency limits.
+Three kinds say what happened to a write. `operation_failed` (and the conflict kinds) means nothing was applied; fix the cause and retry. `commit_pending` means the change is recorded in the transaction journal but a file could not be replaced yet (usually another process held it open past the retries); Scopework applies it before any other operation on the project, so do not repeat the request, and read the record back later. `coordinator_lost` and `writer_failed` are the only unknown outcomes: check the record before retrying. See [0.5.0 qualification](qualification-0.5.0.md) for large-catalog latency limits.
 
 ## Node deletion and empty-node pruning (0.6.0)
 
@@ -279,6 +279,8 @@ research node prune PROJECT --file prune.json --expect PREVIEW_TOKEN
 ```
 
 An empty organization node is an Architecture or Chunk with no remaining child nodes. Functions are never prune candidates. By default, authored body/evidence or extra supporting files also protect a childless scope. `include_authored:true` explicitly permits their archival. `ids` limits eligible IDs (empty means all); `keep` always protects listed nodes. `name_prefix` and `context_only` further restrict candidates. `recursive:true` considers ancestors that become empty, but **all filters still apply to ancestors**. Without it, only nodes that were already childless are selected. Intentionally open source scopes can be retained with `keep`, selection filters, or the default authored-content protection.
+
+Previews and applied results list `excluded`: for each requested ID (or, when `ids` is empty, up to 50 skipped scopes) the rule that kept it: `kind`, `keep`, `context-filter`, `name-prefix`, `has-children` (with the remaining `children`), `authored-content` (body, evidence or both) or `extra-files` (with up to five `files` and a `count`).
 
 Removed node directories are moved, not destroyed, to `tools/workspaces/deleted-nodes/revision-N/ID/`. Supporting files retain their bytes. Links in canonical reports that point into removed folders, and schema-1 annotation report references, follow the archive (other report text is untouched); original annotation review hashes are retained and require review before reapplication. Completed records the removal reopens enter the review queue; review flags, claims and queue entries of removed records are dropped in the same transaction. Opaque paths in custom scripts or supporting files are not rewritten. Archived generated dependency files are historical snapshots. Live dependency edges involving deleted nodes are removed, surviving generated dependency views are synchronized, and affected consumers/ancestors are reopened. Active imports block structural removal.
 
@@ -327,7 +329,8 @@ On Windows, a file replacement that collides with another process briefly holdin
 ```powershell
 research project revision example                 # binary, revision, next_id; no catalog
 research status example --summary                 # counts by kind and status
-research status example --ready                   # only records ready for review
+research status example --ready                   # only records ready for review (written, unblocked)
+research status example --ready-for-synthesis     # parents whose children are complete and own report is empty
 research status example --parent 12 --kind function --status in-progress
 research node list example --parent 12
 ```

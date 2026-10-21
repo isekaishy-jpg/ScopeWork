@@ -142,6 +142,7 @@ impl Library {
         if !j.moves.is_empty()
             || !j.dependencies.is_empty()
             || j.ledger
+            || j.repin_ledger
             || j.edits
                 .iter()
                 .any(|e| e.old.as_deref() != Some(e.new.as_str()))
@@ -210,6 +211,7 @@ impl Library {
                 })
                 .collect(),
             ledger: false,
+            repin_ledger: false,
         };
         if let Err(e) = catalog_batch::commit(&root, &mut self.projects[p], &j) {
             // Nothing staged may outlive a failed commit in memory.

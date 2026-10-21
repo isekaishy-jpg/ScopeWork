@@ -91,9 +91,12 @@ pub(crate) enum Command {
         project: String,
         #[command(flatten)]
         filter: RecordFilter,
-        /// Only records ready for review (incomplete, unflagged, nothing blocking).
+        /// Only records ready for review: written research (not Not Started), incomplete, unflagged, nothing blocking.
         #[arg(long)]
         ready: bool,
+        /// Only parents ready for synthesis: every required child complete, own report not started.
+        #[arg(long, conflicts_with = "ready")]
+        ready_for_synthesis: bool,
         /// Counts by kind and status instead of per-record output.
         #[arg(long)]
         summary: bool,
@@ -262,11 +265,15 @@ pub(crate) enum ProjectCommand {
     Revision {
         project: String,
     },
-    /// Set build/hash/image base before creating any functions.
+    /// Set build/hash/image base. Once functions exist, only an amendment that keeps every
+    /// SHA-256 and 0x value is accepted, and it keeps all completion.
     SetBinary {
         project: String,
         #[arg(long)]
         binary: String,
+        /// Revision from project show; rejects concurrent project edits (required for amendments).
+        #[arg(long)]
+        expect_revision: Option<u64>,
     },
     /// Set the short research-topic label displayed above the meters.
     SetScope {
@@ -888,10 +895,13 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             ProjectCommand::SetBinary {
                 project: id,
                 binary,
+                expect_revision,
             } => {
                 let p = project(lib, &id)?;
-                lib.set_binary(p, &binary)?;
-                Ok(json!({"project":id,"binary":binary}))
+                lib.set_binary(p, &binary, expect_revision)?;
+                Ok(
+                    json!({"project":id,"binary":lib.projects[p].binary,"revision":lib.projects[p].revision}),
+                )
             }
             ProjectCommand::SetScope {
                 project: id,
@@ -1100,6 +1110,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             project: id,
             filter,
             ready,
+            ready_for_synthesis: synthesis_only,
             summary,
         } => {
             let p = project(lib, &id)?;
@@ -1126,16 +1137,23 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 std::collections::BTreeMap<String, usize>,
             > = Default::default();
             let mut ready_count = 0usize;
+            let mut synthesis_count = 0usize;
             let records:Vec<_>=lib.projects[p].nodes.iter().filter(|n| filter.keeps(n, states[&n.id])).filter_map(|n|{
                 let children = kids.get(&n.id).cloned().unwrap_or_default();
                 let blocked_children:Vec<_>=children.iter().copied().filter(|id|states[id]!=Status::Complete).collect();
                 let blocked_prerequisites:Vec<_>=deps.get(&n.id).into_iter().flatten().copied().filter(|id|states[id]!=Status::Complete).collect();
-                let ready_for_review = states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty());
+                // Review needs written research: the record's own report has been started. A parent whose
+                // children are all complete but whose own report is empty is ready for synthesis instead.
+                let unblocked = states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty());
+                let ready_for_review = unblocked&&n.status!=Status::NotStarted;
+                let ready_for_synthesis = unblocked&&n.status==Status::NotStarted&&n.kind!=Kind::Function;
                 if ready && !ready_for_review { return None; }
+                if synthesis_only && !ready_for_synthesis { return None; }
                 ready_count += usize::from(ready_for_review);
+                synthesis_count += usize::from(ready_for_synthesis);
                 *counts.entry(format!("{:?}", n.kind)).or_default().entry(format!("{:?}", states[&n.id])).or_default() += 1;
                 (!summary).then(|| json!({"id":n.id,"name":n.name,"kind":n.kind,"status":states[&n.id],"required_research":required.contains(&n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
-                    "ready_for_review":ready_for_review,"review_flag":flags.get(&n.id),
+                    "ready_for_review":ready_for_review,"ready_for_synthesis":ready_for_synthesis,"review_flag":flags.get(&n.id),
                     "claimed_by":covered.get(&n.id).map(|(at, owner)| json!({"node": at, "owner": owner})),
                     "review_queue":queue.get(&n.id)}))
             }).collect();
@@ -1153,6 +1171,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             if summary {
                 out["counts"] = json!(counts);
                 out["ready_for_review"] = json!(ready_count);
+                out["ready_for_synthesis"] = json!(synthesis_count);
             } else {
                 out["records"] = json!(records);
             }

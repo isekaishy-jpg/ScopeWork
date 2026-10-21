@@ -1,6 +1,7 @@
 //! Explicit branch removal and conservative, previewed organizational pruning.
 use super::*;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,29 +65,72 @@ impl Library {
             }
         }
         let mut removed = HashSet::new();
+        // Why each requested node (or, without `ids`, up to 50 scopes) was not selected, so an empty preview
+        // explains itself. The last reason seen wins; a node removed in a later recursive pass is dropped.
+        let mut excluded: BTreeMap<u64, Value> = BTreeMap::new();
+        let report_exclusion = |excluded: &mut BTreeMap<u64, Value>, n: &Node, reason: Value| {
+            if request.ids.contains(&n.id)
+                || (request.ids.is_empty()
+                    && matches!(n.kind, Kind::Architecture | Kind::Chunk)
+                    && (excluded.len() < 50 || excluded.contains_key(&n.id)))
+            {
+                excluded.insert(n.id, reason);
+            }
+        };
         if prune {
+            for id in &request.ids {
+                if let Some(n) = before.nodes.iter().find(|n| n.id == *id)
+                    && !matches!(n.kind, Kind::Architecture | Kind::Chunk)
+                {
+                    excluded.insert(n.id, json!({"reason":"kind","detail":"only architectures and chunks can be pruned"}));
+                }
+            }
             loop {
                 let previous = removed.len();
                 for n in before.nodes.iter().rev() {
                     if !matches!(n.kind, Kind::Architecture | Kind::Chunk)
                         || removed.contains(&n.id)
-                        || request.keep.contains(&n.id)
                         || (!request.ids.is_empty() && !request.ids.contains(&n.id))
-                        || (request.context_only && !n.context_only)
-                        || request
-                            .name_prefix
-                            .as_ref()
-                            .is_some_and(|prefix| !n.name.starts_with(prefix))
                     {
                         continue;
                     }
+                    if request.keep.contains(&n.id) {
+                        report_exclusion(&mut excluded, n, json!({"reason":"keep"}));
+                        continue;
+                    }
+                    if request.context_only && !n.context_only {
+                        report_exclusion(
+                            &mut excluded,
+                            n,
+                            json!({"reason":"context-filter","detail":"not a context-only branch"}),
+                        );
+                        continue;
+                    }
+                    if let Some(prefix) = request.name_prefix.as_ref()
+                        && !n.name.starts_with(prefix)
+                    {
+                        report_exclusion(
+                            &mut excluded,
+                            n,
+                            json!({"reason":"name-prefix","detail":format!("name does not start with {prefix:?}")}),
+                        );
+                        continue;
+                    }
                     let kids = old.children.get(&n.id).cloned().unwrap_or_default();
-                    let empty = if request.recursive {
-                        kids.iter().all(|id| removed.contains(id))
+                    let remaining: Vec<u64> = if request.recursive {
+                        kids.iter()
+                            .copied()
+                            .filter(|id| !removed.contains(id))
+                            .collect()
                     } else {
-                        kids.is_empty()
+                        kids.clone()
                     };
-                    if !empty {
+                    if !remaining.is_empty() {
+                        report_exclusion(
+                            &mut excluded,
+                            n,
+                            json!({"reason":"has-children","children":remaining}),
+                        );
                         continue;
                     }
                     let path = root.join(&old.paths[&n.id]);
@@ -95,23 +139,47 @@ impl Library {
                     let (body, evidence) = parts(&text)?;
                     if !request.include_authored {
                         if !body.trim().is_empty() || !evidence.trim().is_empty() {
+                            let which = match (body.trim().is_empty(), evidence.trim().is_empty()) {
+                                (false, false) => "body and evidence",
+                                (false, true) => "body",
+                                _ => "evidence",
+                            };
+                            report_exclusion(
+                                &mut excluded,
+                                n,
+                                json!({"reason":"authored-content","detail":which}),
+                            );
                             continue;
                         }
                         let child_folders: HashSet<_> = kids
                             .iter()
                             .map(|id| root.join(&old.paths[id]).parent().unwrap().to_path_buf())
                             .collect();
-                        let extra = fs::read_dir(path.parent().unwrap())
+                        let extra: Vec<String> = fs::read_dir(path.parent().unwrap())
                             .map_err(|e| e.to_string())?
                             .map(|entry| entry.map(|entry| entry.path()).map_err(|e| e.to_string()))
                             .collect::<Result<Vec<_>>>()?
-                            .iter()
-                            .any(|entry| entry != &path && !child_folders.contains(entry));
-                        if extra {
+                            .into_iter()
+                            .filter(|entry| entry != &path && !child_folders.contains(entry))
+                            .map(|entry| {
+                                entry
+                                    .file_name()
+                                    .map(|f| f.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                            })
+                            .collect();
+                        if !extra.is_empty() {
+                            let shown: Vec<_> = extra.iter().take(5).collect();
+                            report_exclusion(
+                                &mut excluded,
+                                n,
+                                json!({"reason":"extra-files","files":shown,"count":extra.len()}),
+                            );
                             continue;
                         }
                     }
                     removed.insert(n.id);
+                    excluded.remove(&n.id);
                 }
                 if !request.recursive || previous == removed.len() {
                     break;
@@ -319,6 +387,7 @@ impl Library {
             after,
             edits,
             ledger: !removed.is_empty(),
+            repin_ledger: false,
             moves,
             dependencies,
             sidecars,
@@ -349,7 +418,7 @@ impl Library {
             }
         }
         Ok(
-            json!({"project":self.projects[p].id,"binary":self.projects[p].binary,"revision":self.projects[p].revision,"applied":expect.is_some(),"token":token,"candidates":candidates,"removed_dependencies":removed_dependencies,"requires_review":reopened,"archive":archive}),
+            json!({"project":self.projects[p].id,"binary":self.projects[p].binary,"revision":self.projects[p].revision,"applied":expect.is_some(),"token":token,"candidates":candidates,"excluded":excluded.iter().map(|(id, why)| { let mut v = why.clone(); v["id"] = json!(id); v }).collect::<Vec<_>>(),"removed_dependencies":removed_dependencies,"requires_review":reopened,"archive":archive}),
         )
     }
 }

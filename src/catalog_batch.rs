@@ -114,6 +114,10 @@ pub(super) struct Journal {
     /// (which include archived nodes), then canonical resolution against `after`. See `ledger.rs`.
     #[serde(default)]
     pub(super) ledger: bool,
+    /// Mechanical rewrites (identity amendments, citation renames): re-pin ledger rows whose
+    /// `report_sha256` is an edited report's old hash to its new hash when the catalog commits.
+    #[serde(default)]
+    pub(super) repin_ledger: bool,
 }
 
 fn parts(text: &str) -> Result<(&str, &str)> {
@@ -386,6 +390,14 @@ fn finish(
     for file in j.sidecars.iter().filter(|f| f.path != ledger::LEDGER) {
         atomic(&root.join(&file.path), file.after.as_bytes())?;
     }
+    if j.repin_ledger {
+        let pairs: Vec<(String, String)> = j
+            .edits
+            .iter()
+            .filter_map(|e| Some((hash(e.before.as_ref()?), hash(&e.after))))
+            .collect();
+        ledger::repin(root, &pairs)?;
+    }
     let ledger_rows = if repath_ledger {
         let moved: Vec<(String, String)> = j
             .moves
@@ -517,6 +529,7 @@ impl Library {
                 after: flags_text(&flags)?,
             }],
             ledger: false,
+            repin_ledger: false,
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -553,6 +566,7 @@ impl Library {
                 after: after_text,
             }],
             ledger: false,
+            repin_ledger: false,
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -628,6 +642,19 @@ impl Library {
         reports: Vec<(u64, String, String)>,
         dependencies: Vec<u64>,
     ) -> Result<()> {
+        self.commit_metadata_with(p, before, after, reports, dependencies, false)
+    }
+    /// `commit_metadata`, optionally re-pinning annotation-ledger rows of the rewritten reports
+    /// (for mechanical rewrites that keep completion).
+    pub(super) fn commit_metadata_with(
+        &mut self,
+        p: usize,
+        before: Project,
+        after: Project,
+        reports: Vec<(u64, String, String)>,
+        dependencies: Vec<u64>,
+        repin_ledger: bool,
+    ) -> Result<()> {
         let index = catalog_index::Index::new(&before);
         let edits = reports
             .into_iter()
@@ -650,6 +677,7 @@ impl Library {
             dependencies,
             sidecars: vec![],
             ledger: false,
+            repin_ledger,
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -763,6 +791,7 @@ impl Library {
             dependencies: vec![],
             sidecars: vec![],
             ledger: false,
+            repin_ledger: false,
         };
         self.commit_or_stage(p, journal)?;
         Ok(changed)
@@ -1124,6 +1153,7 @@ impl Library {
             after,
             edits,
             ledger: !moves.is_empty(),
+            repin_ledger: false,
             moves,
             dependencies: dependencies.into_iter().collect(),
             sidecars,
@@ -1367,6 +1397,7 @@ mod tests {
             dependencies: vec![],
             sidecars: vec![],
             ledger: false,
+            repin_ledger: false,
         };
         atomic(
             &receipt.join("journal.json"),
@@ -1422,6 +1453,7 @@ mod tests {
             dependencies: vec![],
             sidecars: vec![],
             ledger: false,
+            repin_ledger: false,
         };
         let bytes = journal_history::pending_bytes(&j).unwrap();
         assert!(
@@ -1446,6 +1478,7 @@ mod tests {
             dependencies: vec![],
             sidecars: vec![],
             ledger: false,
+            repin_ledger: false,
         };
         let bytes = journal_history::pending_bytes(&deletion).unwrap();
         assert!(
@@ -1472,6 +1505,7 @@ mod tests {
             dependencies: vec![],
             sidecars: vec![],
             ledger: false,
+            repin_ledger: false,
         };
         let bytes = journal_history::pending_bytes(&rearranged).unwrap();
         for current in [&rearranged.before, &rearranged.after] {
@@ -1497,6 +1531,7 @@ mod tests {
             dependencies: vec![],
             sidecars: vec![],
             ledger: false,
+            repin_ledger: false,
         };
         let (delta, bytes) = journal_history::pending_delta(&j).unwrap();
         assert_eq!(bytes, catalog_bytes(&after).unwrap());
@@ -1532,6 +1567,7 @@ mod tests {
             dependencies: vec![],
             sidecars: vec![],
             ledger: false,
+            repin_ledger: false,
         };
         let (a, _) = journal_history::pending_delta(&journal(&first, &second)).unwrap();
         journal_history::committed(&second, a["after_hash"].as_str().unwrap());
@@ -1558,6 +1594,7 @@ mod tests {
             dependencies: vec![],
             sidecars: vec![],
             ledger: false,
+            repin_ledger: false,
         };
         let receipt = lib.dir(0).join(format!(
             "tools/workspaces/catalog-transactions-v4/revision-{}/journal.json",

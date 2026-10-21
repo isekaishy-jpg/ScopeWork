@@ -128,6 +128,20 @@ fn hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
+/// The values a binary identity pins: SHA-256 digests (64 hex digits) and hexadecimal `0x`
+/// values such as image bases and mappings, lowercased for comparison.
+fn identity_pins(binary: &str) -> Vec<String> {
+    static PINS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pins = PINS
+        .get_or_init(|| regex::Regex::new(r"\b[0-9A-Fa-f]{64}\b|\b0[xX][0-9A-Fa-f]+\b").unwrap());
+    let mut out: Vec<String> = pins
+        .find_iter(binary)
+        .map(|m| m.as_str().to_ascii_lowercase())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
 fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let temp = path.with_extension(format!("{}.pending", uuid::Uuid::new_v4()));
@@ -757,20 +771,53 @@ impl Library {
         *self = fresh;
         Ok(())
     }
-    pub fn set_binary(&mut self, p: usize, binary: &str) -> Result<()> {
+    /// Sets the binary identity. Before any function exists it may change freely. Afterwards
+    /// only an amendment is accepted: every SHA-256 and every `0x` value of the current identity
+    /// must remain, so what each RVA means cannot change. An amendment re-renders the report
+    /// headers mechanically and keeps every completion (accepted hashes, prerequisite stamps
+    /// and annotation-ledger pins move from the old header to the new one).
+    pub fn set_binary(
+        &mut self,
+        p: usize,
+        binary: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<()> {
         if !self.writable(p) {
-            return self.write_project(p, |l, p| l.set_binary(p, binary));
+            return self.write_project(p, |l, p| l.set_binary(p, binary, expected_revision));
         }
         self.ensure_structural(p)?;
+        if let Some(expected) = expected_revision
+            && self.projects[p].revision != expected
+        {
+            return Err(
+                "Project changed. Reload and review its binary identity before saving.".into(),
+            );
+        }
         if binary.trim().is_empty() {
             return Err("Binary identity cannot be empty.".into());
         }
-        if self.projects[p]
+        let amendment = self.projects[p]
             .nodes
             .iter()
-            .any(|n| n.kind == Kind::Function)
-        {
-            return Err("Binary identity is locked after adding functions.".into());
+            .any(|n| n.kind == Kind::Function);
+        if amendment {
+            if expected_revision.is_none() {
+                return Err("Binary identity is locked after adding functions. To amend its description, pass --expect-revision from project show; every SHA-256 and 0x value must stay.".into());
+            }
+            let kept = identity_pins(binary);
+            let missing: Vec<String> = identity_pins(&self.projects[p].binary)
+                .into_iter()
+                .filter(|pin| !kept.contains(pin))
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Binary identity is locked after adding functions: an amendment must keep every pinned value; missing {}.",
+                    missing.join(", ")
+                ));
+            }
+            if self.projects[p].binary == binary {
+                return Ok(());
+            }
         }
         let before = self.projects[p].clone();
         let mut after = before.clone();
@@ -790,6 +837,29 @@ impl Library {
                 original.clone(),
                 index.render(&after, node.id, body, evidence),
             ));
+        }
+        if amendment {
+            // Only the generated header changed: carry every acceptance over to the new text.
+            let hashes: std::collections::HashMap<u64, (String, String)> = reports
+                .iter()
+                .map(|(id, original, rendered)| (*id, (hash(original), hash(rendered))))
+                .collect();
+            let revisions: std::collections::HashMap<u64, u64> =
+                before.nodes.iter().map(|n| (n.id, n.revision)).collect();
+            for node in &mut after.nodes {
+                let (old, new) = &hashes[&node.id];
+                if node.accepted_hash.as_ref() == Some(old) {
+                    node.accepted_hash = Some(new.clone());
+                }
+                for (id, stamp) in &mut node.accepted_prerequisites {
+                    if let (Some((old, new)), Some(revision)) = (hashes.get(id), revisions.get(id))
+                        && *stamp == format!("{revision}:{old}")
+                    {
+                        *stamp = format!("{revision}:{new}");
+                    }
+                }
+            }
+            return self.commit_metadata_with(p, before, after, reports, vec![], true);
         }
         for node in &mut after.nodes {
             node.accepted_hash = None;

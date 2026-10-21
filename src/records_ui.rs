@@ -594,7 +594,7 @@ impl ResearchUi {
                 {
                     let binary = self.binary.clone();
                     self.mutate(move |lib, p, id| {
-                        lib.set_binary(p, &binary)?;
+                        lib.set_binary(p, &binary, None)?;
                         Ok(id)
                     });
                 }

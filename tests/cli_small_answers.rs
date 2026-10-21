@@ -79,13 +79,93 @@ fn status_and_list_filters() {
     assert_eq!(functions.as_array().unwrap().len(), 2);
     let children = f.ok(&["node", "list", "fixture", "--parent", "2"]);
     assert_eq!(children.as_array().unwrap().len(), 2);
+    // Nothing is written yet, so nothing is ready for review (a record needs research to review).
     let ready = f.ok(&["status", "fixture", "--ready"])["records"].clone();
-    // Only the two functions are ready: the chunk and above still wait on them.
-    assert_eq!(ready.as_array().unwrap().len(), 2);
+    assert!(ready.as_array().unwrap().is_empty());
     let summary = f.ok(&["status", "fixture", "--summary"]);
     assert!(summary.get("records").is_none());
     assert_eq!(summary["counts"]["Function"]["NotStarted"], 2);
-    assert_eq!(summary["ready_for_review"], 2);
+    assert_eq!(summary["ready_for_review"], 0);
+    assert_eq!(summary["ready_for_synthesis"], 0);
     let complete = f.ok(&["node", "list", "fixture", "--status", "complete"]);
     assert!(complete.as_array().unwrap().is_empty());
+}
+
+impl Fixture {
+    fn write_report(&self, id: &str) {
+        let body = self.home.join(format!("body-{id}.md"));
+        let evidence = self.home.join(format!("evidence-{id}.md"));
+        fs::write(&body, format!("Report for {id}.")).unwrap();
+        fs::write(&evidence, "Fixture evidence.").unwrap();
+        let token = self.ok(&["node", "show", "fixture", id])["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        self.ok(&[
+            "node",
+            "save",
+            "fixture",
+            id,
+            "--body-file",
+            body.to_str().unwrap(),
+            "--evidence-file",
+            evidence.to_str().unwrap(),
+            "--expect",
+            &token,
+        ]);
+    }
+    fn complete(&self, id: &str) {
+        let token = self.ok(&["node", "show", "fixture", id])["completion_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        self.ok(&[
+            "node",
+            "complete",
+            "fixture",
+            id,
+            "--expect",
+            &token,
+            "--reviewed",
+        ]);
+    }
+}
+
+#[test]
+fn readiness_needs_written_research_and_parents_wait_for_synthesis() {
+    let f = Fixture::new();
+    f.write_report("3");
+    let ready = f.ok(&["status", "fixture", "--ready"])["records"].clone();
+    let ids: Vec<_> = ready
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [3],
+        "only the function with a written report is ready for review"
+    );
+    f.write_report("4");
+    f.complete("3");
+    f.complete("4");
+    // Both functions are complete and the chunk's own report is empty: ready for synthesis, not review.
+    let summary = f.ok(&["status", "fixture", "--summary"]);
+    assert_eq!(summary["ready_for_review"], 0);
+    assert_eq!(summary["ready_for_synthesis"], 1);
+    let synthesis = f.ok(&["status", "fixture", "--ready-for-synthesis"])["records"].clone();
+    let ids: Vec<_> = synthesis
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, [2]);
+    assert_eq!(synthesis[0]["ready_for_review"], false);
+    // Once the chunk's report is written it is ready for review instead.
+    f.write_report("2");
+    let summary = f.ok(&["status", "fixture", "--summary"]);
+    assert_eq!(summary["ready_for_review"], 1);
+    assert_eq!(summary["ready_for_synthesis"], 0);
 }

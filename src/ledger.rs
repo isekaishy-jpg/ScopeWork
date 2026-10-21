@@ -186,6 +186,68 @@ pub(super) fn apply(
     Ok(0)
 }
 
+/// Replaces `"report_sha256"` values equal to an old hash in `pairs` with the matching new hash.
+/// A report hash identifies one exact report text, so the replacement only touches rows that
+/// were pinned to a report this transaction rewrote mechanically. Returns the new text and count.
+pub(super) fn repin_text(text: &str, pairs: &[(String, String)]) -> (String, usize) {
+    static PIN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pin =
+        PIN.get_or_init(|| regex::Regex::new(r#""report_sha256"\s*:\s*"([0-9a-f]{64})""#).unwrap());
+    let map: HashMap<&str, &str> = pairs
+        .iter()
+        .filter(|(old, new)| old != new)
+        .map(|(old, new)| (old.as_str(), new.as_str()))
+        .collect();
+    if map.is_empty() {
+        return (text.to_string(), 0);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut replaced = 0;
+    for captures in pin.captures_iter(text) {
+        let value = captures.get(1).unwrap();
+        if let Some(new) = map.get(value.as_str()) {
+            out.push_str(&text[last..value.start()]);
+            out.push_str(new);
+            last = value.end();
+            replaced += 1;
+        }
+    }
+    out.push_str(&text[last..]);
+    (out, replaced)
+}
+
+/// Applies [`repin_text`] to the project's ledger, with the same reread-on-change rule as
+/// [`apply`], so a tool's concurrent write is never overwritten with an older copy.
+pub(super) fn repin(root: &Path, pairs: &[(String, String)]) -> Result<usize> {
+    let path = root.join(LEDGER);
+    let stamp = |path: &Path| {
+        fs::metadata(path)
+            .ok()
+            .map(|m| (m.len(), m.modified().ok()))
+    };
+    for _ in 0..5 {
+        let Some(before) = stamp(&path) else {
+            return Ok(0);
+        };
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(format!("Cannot read {LEDGER}: {e}")),
+        };
+        let (updated, replaced) = repin_text(&text, pairs);
+        if replaced == 0 {
+            return Ok(0);
+        }
+        if stamp(&path) != Some(before) {
+            continue;
+        }
+        atomic(&path, updated.as_bytes())?;
+        return Ok(replaced);
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
