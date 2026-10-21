@@ -652,6 +652,15 @@ fn tab_width(label: f32) -> f32 {
 }
 
 fn main() -> eframe::Result {
+    // Standard error and panics go to the research home's logs/gui.log (a windowed process
+    // would otherwise lose them); without a usable home the GUI runs without the log.
+    if let Ok(home) = research_dashboard::paths::home(None) {
+        research_dashboard::crash_log::install(&home);
+    }
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SCOPEWORK_GUI_PANIC_TEST").is_some() {
+        panic!("deliberate test panic (SCOPEWORK_GUI_PANIC_TEST)");
+    }
     let icon_image = image::load_from_memory(include_bytes!("../assets/scopework.png"))
         .expect("bundled icon")
         .into_rgba8();
@@ -661,7 +670,7 @@ fn main() -> eframe::Result {
         height: icon_image.height(),
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Research Dashboard",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
@@ -707,7 +716,14 @@ fn main() -> eframe::Result {
             }
             Ok(Box::new(app))
         }),
-    )
+    );
+    if let Err(error) = &result {
+        eprintln!(
+            "{} the dashboard stopped with an error: {error}",
+            research_dashboard::crash_log::timestamp(std::time::SystemTime::now())
+        );
+    }
+    result
 }
 
 #[cfg(test)]

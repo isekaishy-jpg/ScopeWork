@@ -34,6 +34,10 @@ Selection precedence is:
 
 Changing the selected home opens another library. Scopework never automatically imports historical research or moves projects between homes.
 
+## If the dashboard closes unexpectedly
+
+The dashboard writes `logs/gui.log` in your research home: one line per start with the version and build, and the reason if it stops abnormally (a panic with its location and backtrace, or the standard library's own message, such as a failed memory allocation). The log is kept small: above 1 MiB it moves to `logs/gui.log.1` at the next start. Include it when you report a problem.
+
 ## Upgrades and removal
 
 Close Scopework (the dashboard and any `research.exe` workers) before upgrading, so files are not in use. Setup skips the system restore point (`MSIFASTINSTALL`). When the PATH option is on, Windows broadcasts the environment change to open windows at the end of setup; an unresponsive application can make that last step look stalled for a short time. If setup seems to hang, run `msiexec /i Scopework-<version>-x64.msi /l*v install.log` and check which action is slow.
