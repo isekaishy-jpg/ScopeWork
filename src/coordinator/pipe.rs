@@ -45,8 +45,10 @@ pub fn spawn_detached(
 ) -> Result<(), String> {
     imp::spawn_detached(executable, arguments, remove)
 }
-/// Starts the hidden window thread. `on_query` runs when Windows asks whether the process may
-/// end (stop admitting work); `on_end` runs when it will end (finish and exit).
+/// Starts the hidden window thread and returns once its window exists (or could not be created).
+/// `on_query` runs when Windows asks whether the process may end (stop admitting work); `on_end`
+/// runs when it will end (finish and exit). Call it before the pipe accepts clients: Restart Manager
+/// and session end can only close the process gracefully through this window.
 pub fn shutdown_window(on_query: fn(), on_end: fn()) {
     imp::shutdown_window(on_query, on_end)
 }
@@ -397,7 +399,8 @@ mod imp {
         if CALLBACKS.set((on_query, on_end)).is_err() {
             return;
         }
-        std::thread::spawn(|| {
+        let (created, ready) = std::sync::mpsc::sync_channel::<()>(1);
+        std::thread::spawn(move || {
             let class = wide("ScopeworkCoordinator");
             // SAFETY: standard window-class registration and a never-shown top-level window,
             // with a message loop on this thread for its lifetime.
@@ -410,6 +413,7 @@ mod imp {
                     ..std::mem::zeroed()
                 };
                 if RegisterClassW(&wc) == 0 {
+                    let _ = created.send(());
                     return;
                 }
                 let hwnd = CreateWindowExW(
@@ -426,6 +430,7 @@ mod imp {
                     instance,
                     std::ptr::null(),
                 );
+                let _ = created.send(());
                 if hwnd.is_null() {
                     return;
                 }
@@ -436,6 +441,8 @@ mod imp {
                 }
             }
         });
+        // Bounded: a window that cannot be created within this time must not stop the coordinator.
+        let _ = ready.recv_timeout(std::time::Duration::from_secs(5));
     }
     #[cfg(test)]
     pub fn same_user_bytes(a: &[u8], b: &[u8]) -> bool {

@@ -966,6 +966,20 @@ pub fn serve(home: &Path) -> Result<Value, String> {
     if lock.try_lock().is_err() {
         return Ok(json!({"serving": false, "reason": "another coordinator serves this home"}));
     }
+    // The shutdown window must exist before the first pipe instance: a client that can connect may
+    // start Restart Manager or a session end immediately, and both need the window to close us gracefully.
+    pipe::shutdown_window(
+        || {
+            if let Some(server) = SERVER.get() {
+                server.admitting.store(false, Ordering::Release);
+            }
+        },
+        || {
+            if let Some(server) = SERVER.get() {
+                server.drain_and_exit();
+            }
+        },
+    );
     let first = match pipe::listen(&name, true) {
         Ok(instance) => instance,
         Err(e) if e.starts_with("pipe_taken") => {
@@ -983,18 +997,6 @@ pub fn serve(home: &Path) -> Result<Value, String> {
         next_operation: AtomicU64::new(1),
     });
     let _ = SERVER.set(server.clone());
-    pipe::shutdown_window(
-        || {
-            if let Some(server) = SERVER.get() {
-                server.admitting.store(false, Ordering::Release);
-            }
-        },
-        || {
-            if let Some(server) = SERVER.get() {
-                server.drain_and_exit();
-            }
-        },
-    );
     let accepting = server.clone();
     std::thread::spawn(move || {
         let mut instance = Some(first);
