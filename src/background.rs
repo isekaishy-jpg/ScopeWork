@@ -216,7 +216,16 @@ pub(super) fn snapshot(
                 let flags =
                     super::catalog_batch::read_flags(&flag_root.join(&p.id)).unwrap_or_default();
                 let queued = super::coordination::open_queue(&flag_root.join(&p.id), p);
-                Arc::new(catalog_browser::BrowserData::new(p, &flags, &queued))
+                let quarantined = super::quarantine::descriptions(
+                    p,
+                    &super::quarantine::read_records(&flag_root.join(&p.id)),
+                );
+                Arc::new(catalog_browser::BrowserData::new(
+                    p,
+                    &flags,
+                    &queued,
+                    &quarantined,
+                ))
             })
             .collect()
     })?)?;

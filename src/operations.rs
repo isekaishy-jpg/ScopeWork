@@ -212,6 +212,7 @@ impl Library {
                 .collect(),
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         if let Err(e) = catalog_batch::commit(&root, &mut self.projects[p], &j) {
             // Nothing staged may outlive a failed commit in memory.

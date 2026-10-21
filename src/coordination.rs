@@ -172,6 +172,7 @@ impl Library {
         if !matches!(node.kind, Kind::Architecture | Kind::Chunk) {
             return Err("Claims apply to architectures and chunks.".into());
         }
+        self.refuse_quarantined(p, id, "a claim")?;
         let owner = owner.trim();
         if owner.is_empty() {
             return Err("A claim needs an owner.".into());

@@ -114,6 +114,8 @@ mod layout;
 mod ledger;
 #[path = "operations.rs"]
 pub(crate) mod operations;
+#[path = "quarantine.rs"]
+pub mod quarantine;
 #[path = "records_ui.rs"]
 mod records_ui;
 #[path = "reopen.rs"]
@@ -123,6 +125,7 @@ mod report_hashes;
 pub use catalog_batch::Batch;
 pub use catalog_batch::Removal;
 pub use catalog_batch::ReviewFlag;
+pub use quarantine::Quarantine;
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 fn hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -1225,6 +1228,7 @@ impl Library {
     }
     pub fn effective_all(&self, p: usize) -> std::collections::HashMap<u64, Status> {
         catalog_index::Index::new(&self.projects[p])
+            .with_quarantine(self.quarantined(p))
             .states_all_with(&self.dir(p), &|| self.hash_overrides())
     }
     pub fn required_nodes(&self, p: usize) -> std::collections::HashSet<u64> {
@@ -1241,10 +1245,15 @@ impl Library {
         let Some(n) = self.projects[p].nodes.iter().find(|n| n.id == id) else {
             return Status::NotStarted;
         };
+        let quarantined = self.quarantined(p);
+        if quarantined.contains(&id) {
+            return Status::Complete;
+        }
         if n.kind == Kind::Function && n.status != Status::Complete {
             return n.status;
         }
         catalog_index::Index::new(&self.projects[p])
+            .with_quarantine(quarantined)
             .states_with(&self.dir(p), [id], &|| self.hash_overrides())
             .get(&id)
             .copied()
@@ -1315,13 +1324,26 @@ impl Library {
             )
             .chain([id]);
         catalog_index::Index::new(project)
+            .with_quarantine(self.quarantined(p))
             .states_with(&self.dir(p), inputs, &|| self.hash_overrides())
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
+        self.add_directed(p, parent, name, rva, None)
+    }
+    /// `add`, accepting a quarantined parent when the human directed it.
+    pub fn add_directed(
+        &mut self,
+        p: usize,
+        parent: u64,
+        name: &str,
+        rva: &str,
+        directed_by: Option<&str>,
+    ) -> Result<u64> {
         if !self.writable(p) {
-            return self.write_project(p, |l, p| l.add(p, parent, name, rva));
+            return self.write_project(p, |l, p| l.add_directed(p, parent, name, rva, directed_by));
         }
         self.ensure_structural(p)?;
+        self.check_seal(p, [parent], directed_by, "Creating a record in")?;
         if name.trim().is_empty() {
             return Err("Enter a name.".into());
         }
@@ -1361,6 +1383,7 @@ impl Library {
             }],
             update: vec![],
             reorder: vec![],
+            directed_by: directed_by.map(str::to_string),
             repair_legacy_links: false,
         };
         self.batch(p, &batch)?
@@ -1381,6 +1404,9 @@ impl Library {
             return self.write_project(p, |l, p| {
                 l.save_report(p, id, body, evidence, complete, expected)
             });
+        }
+        if complete {
+            self.refuse_quarantined(p, id, "completion")?;
         }
         self.check_edit_token(
             p,
@@ -2099,10 +2125,34 @@ impl Library {
             .collect()
     }
     pub fn set_dependencies(&mut self, p: usize, id: u64, rvas: &str) -> Result<()> {
+        self.set_dependencies_directed(p, id, rvas, None)
+    }
+    /// `set_dependencies`, accepting quarantined records when the human directed it.
+    pub fn set_dependencies_directed(
+        &mut self,
+        p: usize,
+        id: u64,
+        rvas: &str,
+        directed_by: Option<&str>,
+    ) -> Result<()> {
         if !self.writable(p) {
-            return self.write_project(p, |l, p| l.set_dependencies(p, id, rvas));
+            return self.write_project(p, |l, p| {
+                l.set_dependencies_directed(p, id, rvas, directed_by)
+            });
         }
         self.ensure_structural(p)?;
+        let prerequisites: Vec<u64> = rvas
+            .split(',')
+            .filter_map(|t| u32::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok())
+            .filter_map(|rva| self.projects[p].nodes.iter().find(|n| n.rva == Some(rva)))
+            .map(|n| n.id)
+            .collect();
+        self.check_seal(
+            p,
+            std::iter::once(id).chain(prerequisites),
+            directed_by,
+            "Changing prerequisites of",
+        )?;
         if !self.projects[p]
             .nodes
             .iter()
@@ -2199,7 +2249,7 @@ impl Library {
             .iter()
             .enumerate()
             .map(|(p, project)| {
-                let index = catalog_index::Index::new(project);
+                let index = catalog_index::Index::new(project).with_quarantine(lib.quarantined(p));
                 let states_all = index.states(&lib.dir(p));
                 let mut counts = std::collections::HashMap::<u64, (usize, usize, usize)>::new();
                 let mut inventory_functions = 0;

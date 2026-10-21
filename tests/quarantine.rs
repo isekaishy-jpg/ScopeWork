@@ -1,0 +1,411 @@
+//! Quarantined records count as complete, are sealed against structural changes unless the
+//! human directed them, keep editable text, and return to their own status when lifted.
+use serde_json::Value;
+use std::{fs, path::PathBuf, time::Duration, time::Instant};
+
+struct Fixture {
+    home: PathBuf,
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = self.run_in("auto", &["coordinator", "stop"]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fs::remove_dir_all(&self.home).is_err() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+impl Fixture {
+    /// Architecture 1 with chunk 2 (function 3, 0x1000, not started) and chunk 4 (function 5,
+    /// 0x2000, completed).
+    fn new() -> Self {
+        let home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("quarantine-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let f = Self { home };
+        f.ok(&[
+            "project",
+            "create",
+            "fixture",
+            "--name",
+            "Fixture",
+            "--binary",
+            "synthetic",
+        ]);
+        f.ok(&[
+            "node", "create", "fixture", "--parent", "0", "--name", "Arch",
+        ]);
+        f.ok(&[
+            "node", "create", "fixture", "--parent", "1", "--name", "Voice",
+        ]);
+        f.ok(&[
+            "node", "create", "fixture", "--parent", "2", "--name", "F1", "--rva", "1000",
+        ]);
+        f.ok(&[
+            "node", "create", "fixture", "--parent", "1", "--name", "Other",
+        ]);
+        f.ok(&[
+            "node", "create", "fixture", "--parent", "4", "--name", "F2", "--rva", "2000",
+        ]);
+        f.save("5", "F2 behaviour.");
+        f.complete("5");
+        f.save("4", "Other synthesis.");
+        f.complete("4");
+        f
+    }
+    fn run_in(&self, mode: &str, args: &[&str]) -> std::process::Output {
+        std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+            .env("SCOPEWORK_COORDINATOR", mode)
+            .arg("--home")
+            .arg(&self.home)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+    fn ok(&self, args: &[&str]) -> Value {
+        let o = self.run_in("off", args);
+        assert!(
+            o.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        serde_json::from_slice(&o.stdout).unwrap()
+    }
+    fn refused(&self, args: &[&str]) -> String {
+        let o = self.run_in("off", args);
+        assert!(!o.status.success(), "{args:?} unexpectedly succeeded");
+        String::from_utf8_lossy(&o.stderr).into_owned()
+    }
+    fn status(&self, id: &str) -> String {
+        self.ok(&["node", "show", "fixture", id])["effective_status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+    fn save(&self, id: &str, body: &str) {
+        let b = self.home.join(format!("body-{id}.md"));
+        let e = self.home.join(format!("evidence-{id}.md"));
+        fs::write(&b, body).unwrap();
+        fs::write(&e, "Fixture evidence.").unwrap();
+        let token = self.ok(&["node", "show", "fixture", id])["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        self.ok(&[
+            "node",
+            "save",
+            "fixture",
+            id,
+            "--body-file",
+            b.to_str().unwrap(),
+            "--evidence-file",
+            e.to_str().unwrap(),
+            "--expect",
+            &token,
+        ]);
+    }
+    fn complete(&self, id: &str) {
+        let token = self.ok(&["node", "show", "fixture", id])["completion_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        self.ok(&[
+            "node",
+            "complete",
+            "fixture",
+            id,
+            "--expect",
+            &token,
+            "--reviewed",
+        ]);
+    }
+    fn batch(&self, request: Value, directed: Option<&str>) -> std::process::Output {
+        let path = self.home.join("batch.json");
+        fs::write(&path, request.to_string()).unwrap();
+        let mut args = vec!["node", "batch", "fixture", "--file", path.to_str().unwrap()];
+        if let Some(d) = directed {
+            args.extend(["--directed-by", d]);
+        }
+        self.run_in("off", &args)
+    }
+    fn revision(&self) -> u64 {
+        self.ok(&["project", "revision", "fixture"])["revision"]
+            .as_u64()
+            .unwrap()
+    }
+}
+
+#[test]
+fn a_quarantined_chunk_counts_as_complete_and_its_parent_can_complete() {
+    let f = Fixture::new();
+    f.save("1", "Architecture synthesis.");
+    let token = f.ok(&["node", "show", "fixture", "1"])["completion_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let blocked = f.refused(&[
+        "node",
+        "complete",
+        "fixture",
+        "1",
+        "--expect",
+        &token,
+        "--reviewed",
+    ]);
+    assert!(blocked.contains("required child"), "{blocked}");
+    f.ok(&["node", "flag", "fixture", "2", "--reason", "Old audit flag"]);
+    let shown = f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "human",
+        "--reason",
+        "Voice code only",
+        "--by",
+        "tester",
+    ]);
+    assert_eq!(shown["effective_status"], "Complete");
+    assert_eq!(shown["quarantine"]["origin"], "human");
+    assert!(
+        shown["review_flag"].is_null(),
+        "quarantining clears the record's flag"
+    );
+    assert_eq!(f.status("3"), "Complete", "the chunk covers its function");
+    assert_eq!(
+        f.ok(&["node", "show", "fixture", "3"])["quarantine"]["node"],
+        2
+    );
+    let summary = f.ok(&["status", "fixture", "--summary"]);
+    assert_eq!(summary["quarantined"], 2);
+    assert_eq!(
+        summary["ready_for_review"], 1,
+        "only the architecture's written report waits"
+    );
+    f.complete("1");
+    assert_eq!(f.status("1"), "Complete");
+    let listed = f.ok(&["node", "quarantined", "fixture"]);
+    assert_eq!(listed["quarantined"][0]["id"], 2);
+    assert_eq!(listed["quarantined"][0]["by"], "tester");
+}
+
+#[test]
+fn structural_changes_need_the_humans_direction() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "cyber-stop",
+        "--reason",
+        "Stopped by a safety classifier",
+    ]);
+    // Creating inside it.
+    let error = f.refused(&[
+        "node", "create", "fixture", "--parent", "2", "--name", "F3", "--rva", "3000",
+    ]);
+    assert!(
+        error.contains("\"kind\":\"quarantined\"") && error.contains("--directed-by"),
+        "{error}"
+    );
+    f.ok(&[
+        "node",
+        "create",
+        "fixture",
+        "--parent",
+        "2",
+        "--name",
+        "F3",
+        "--rva",
+        "3000",
+        "--directed-by",
+        "The human: collect the ComSat helper here",
+    ]);
+    assert_eq!(
+        f.status("6"),
+        "Complete",
+        "a record created in it is quarantined with it"
+    );
+    // Moving another function into it.
+    let binary = f.ok(&["project", "revision", "fixture"])["binary"].clone();
+    let rev5 = f.ok(&["node", "show", "fixture", "5"])["node"]["revision"]
+        .as_u64()
+        .unwrap();
+    let request = serde_json::json!({"schema":2,"binary":binary,"update":[{"id":5,"parent":2,"expect_node_revision":rev5}]});
+    let o = f.batch(request.clone(), None);
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("quarantined"));
+    let o = f.batch(request, Some("The human: F2 is voice code"));
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let history = f.ok(&["history", "show", "fixture", "--limit", "5"]);
+    assert!(
+        history["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["directed_by"] == "The human: F2 is voice code"),
+        "the instruction is recorded with the change: {history}"
+    );
+    // Prerequisites touching it.
+    let structural = f.ok(&["node", "show", "fixture", "3"])["structural_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let error = f.refused(&[
+        "deps",
+        "set",
+        "fixture",
+        "3",
+        "2000",
+        "--expect",
+        &structural,
+    ]);
+    assert!(error.contains("quarantined"), "{error}");
+    // A creation-only import into it.
+    let request = serde_json::json!({"schema":1,"binary":binary,"expect_revision":f.revision(),
+        "create":[{"parent":2,"name":"F4","rva":4096}]});
+    let o = f.batch(request, None);
+    assert!(
+        !o.status.success() && String::from_utf8_lossy(&o.stderr).contains("quarantined"),
+        "imports respect the seal: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+#[test]
+fn text_stays_editable_and_lifting_restores_the_own_status() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "human",
+        "--reason",
+        "Voice code only",
+    ]);
+    f.save("3", "Notes kept for the record.");
+    assert_eq!(f.status("3"), "Complete", "editing text never reopens it");
+    let error = f.refused(&["node", "flag", "fixture", "3", "--reason", "check"]);
+    assert!(error.contains("quarantined"), "{error}");
+    let token = f.ok(&["node", "show", "fixture", "3"])["completion_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let error = f.refused(&[
+        "node",
+        "complete",
+        "fixture",
+        "3",
+        "--expect",
+        &token,
+        "--reviewed",
+    ]);
+    assert!(error.contains("already counts as complete"), "{error}");
+    let error = f.refused(&["node", "unquarantine", "fixture", "3", "--reason", "x"]);
+    assert!(error.contains("lift the chunk"), "{error}");
+    f.ok(&[
+        "node",
+        "unquarantine",
+        "fixture",
+        "2",
+        "--reason",
+        "The human lifted it",
+        "--by",
+        "tester",
+    ]);
+    assert_eq!(
+        f.status("3"),
+        "InProgress",
+        "back to its own status (a saved report)"
+    );
+    assert_eq!(f.status("2"), "InProgress");
+    let file: Value = serde_json::from_str(
+        &fs::read_to_string(f.home.join("projects/fixture/quarantine.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(file["records"].as_object().unwrap().is_empty());
+    assert_eq!(file["lifted"][0]["node"], 2);
+    assert_eq!(file["lifted"][0]["reason"], "The human lifted it");
+    let error = f.refused(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "1",
+        "--origin",
+        "human",
+        "--reason",
+        "x",
+    ]);
+    assert!(error.contains("Only chunks and functions"), "{error}");
+}
+
+#[test]
+fn quarantine_works_through_the_coordinator() {
+    let f = Fixture::new();
+    let o = f.run_in(
+        "required",
+        &[
+            "node",
+            "quarantine",
+            "fixture",
+            "2",
+            "--origin",
+            "human",
+            "--reason",
+            "Voice code only",
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let o = f.run_in("required", &["status", "fixture", "--summary"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let summary: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(summary["quarantined"], 2);
+    assert_eq!(f.status("3"), "Complete");
+}
+
+#[test]
+fn deleting_a_quarantined_chunk_drops_its_record() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "human",
+        "--reason",
+        "Voice code only",
+    ]);
+    let binary = f.ok(&["project", "revision", "fixture"])["binary"].clone();
+    let request =
+        serde_json::json!({"schema":1,"binary":binary,"expect_revision":f.revision(),"ids":[2]});
+    let path = f.home.join("delete.json");
+    fs::write(&path, request.to_string()).unwrap();
+    let preview = f.ok(&[
+        "node",
+        "delete",
+        "fixture",
+        "--file",
+        path.to_str().unwrap(),
+    ]);
+    let token = preview["token"].as_str().unwrap().to_string();
+    f.ok(&[
+        "node",
+        "delete",
+        "fixture",
+        "--file",
+        path.to_str().unwrap(),
+        "--expect",
+        &token,
+    ]);
+    let listed = f.ok(&["node", "quarantined", "fixture"]);
+    assert!(
+        listed["quarantined"].as_array().unwrap().is_empty(),
+        "{listed}"
+    );
+}

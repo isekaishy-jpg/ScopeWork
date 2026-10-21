@@ -332,6 +332,10 @@ pub(crate) enum NodeCommand {
         project: String,
         #[arg(long)]
         file: PathBuf,
+        /// The human's instruction, required when the batch touches quarantined records
+        /// (overrides the request's `directed_by`).
+        #[arg(long)]
+        directed_by: Option<String>,
     },
     /// Records with their effective status, optionally narrowed by parent, kind or status.
     List {
@@ -348,6 +352,9 @@ pub(crate) enum NodeCommand {
         name: String,
         #[arg(long)]
         rva: Option<String>,
+        /// The human's instruction, required to create a record in a quarantined chunk.
+        #[arg(long)]
+        directed_by: Option<String>,
     },
     /// Read the report, scope criteria, paths and current optimistic edit token.
     Show { project: String, node: u64 },
@@ -376,6 +383,31 @@ pub(crate) enum NodeCommand {
     Unflag { project: String, node: u64 },
     /// List flagged records.
     Flagged { project: String },
+    /// Quarantine a chunk or function: it counts as complete, never appears as open work and
+    /// is sealed against structural changes (a chunk covers its functions).
+    Quarantine {
+        project: String,
+        node: u64,
+        /// Why: the human asked for it, or Claude issued a cyber (safety) stop.
+        #[arg(long, value_parser = ["human", "cyber-stop"])]
+        origin: String,
+        #[arg(long)]
+        reason: String,
+        /// Who records it (an agent name or the human).
+        #[arg(long, default_value = "")]
+        by: String,
+    },
+    /// Lift a quarantine; the record returns to its own status.
+    Unquarantine {
+        project: String,
+        node: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "")]
+        by: String,
+    },
+    /// List quarantined records.
+    Quarantined { project: String },
     /// Return In Progress records to Not Started from a JSON request (ids or all_in_progress).
     ResetStatus {
         project: String,
@@ -490,6 +522,9 @@ pub(crate) enum DepsCommand {
         #[arg(long)]
         expect: String,
         rvas: Vec<String>,
+        /// The human's instruction, required when the node or a prerequisite is quarantined.
+        #[arg(long)]
+        directed_by: Option<String>,
     },
 }
 
@@ -739,9 +774,17 @@ fn run(args: Args) -> Result<Value, String> {
             *compact_sidecars,
         );
     }
-    if let Command::Node(NodeCommand::Batch { project, file }) = &args.command {
-        let batch: Batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+    if let Command::Node(NodeCommand::Batch {
+        project,
+        file,
+        directed_by,
+    }) = &args.command
+    {
+        let mut batch: Batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
+        if directed_by.is_some() {
+            batch.directed_by = directed_by.clone();
+        }
         if batch.schema == 1
             && !batch.create.is_empty()
             && batch.update.is_empty()
@@ -782,6 +825,9 @@ fn run(args: Args) -> Result<Value, String> {
             | NodeCommand::Flag { project, .. }
             | NodeCommand::Unflag { project, .. }
             | NodeCommand::Flagged { project, .. }
+            | NodeCommand::Quarantine { project, .. }
+            | NodeCommand::Unquarantine { project, .. }
+            | NodeCommand::Quarantined { project, .. }
             | NodeCommand::Complete { project, .. }
             | NodeCommand::Reopen { project, .. },
         ) => Some(project.as_str()),
@@ -808,6 +854,7 @@ fn run(args: Args) -> Result<Value, String> {
                     | NodeCommand::ReadBatch { .. }
                     | NodeCommand::Resolve { .. }
                     | NodeCommand::Flagged { .. }
+                    | NodeCommand::Quarantined { .. }
                     | NodeCommand::Delete { expect: None, .. }
                     | NodeCommand::Prune { expect: None, .. }
             )
@@ -955,10 +1002,18 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 lib.batch(p, &batch)?;
                 Ok(json!({"project":id,"revision":lib.projects[p].revision}))
             }
-            NodeCommand::Batch { project: id, file } => {
+            NodeCommand::Batch {
+                project: id,
+                file,
+                directed_by,
+            } => {
                 let p = project(lib, &id)?;
-                let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+                let mut batch: Batch =
+                    serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())?;
+                if directed_by.is_some() {
+                    batch.directed_by = directed_by;
+                }
                 let outcome = lib.apply_batch(p, &batch)?;
                 let revision = lib.projects[p].revision;
                 // Report what this batch reopened and whose claimed work that touches.
@@ -1001,6 +1056,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 parent,
                 name,
                 rva,
+                directed_by,
             } => {
                 let p = project(lib, &id)?;
                 let parent_kind = lib.projects[p]
@@ -1012,7 +1068,13 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 if (parent_kind == Kind::Chunk) != rva.is_some() {
                     return Err("Supply --rva only when creating a function under a chunk.".into());
                 }
-                let node = lib.add(p, parent, &name, rva.as_deref().unwrap_or(""))?;
+                let node = lib.add_directed(
+                    p,
+                    parent,
+                    &name,
+                    rva.as_deref().unwrap_or(""),
+                    directed_by.as_deref(),
+                )?;
                 node_view(lib, p, node)
             }
             NodeCommand::Show { project: id, node } => {
@@ -1050,6 +1112,38 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 let p = project(lib, &id)?;
                 lib.set_review_flag(p, node, None)?;
                 node_view(lib, p, node)
+            }
+            NodeCommand::Quarantine {
+                project: id,
+                node,
+                origin,
+                reason,
+                by,
+            } => {
+                let p = project(lib, &id)?;
+                lib.set_quarantine(p, node, Some(&origin), &reason, &by)?;
+                node_view(lib, p, node)
+            }
+            NodeCommand::Unquarantine {
+                project: id,
+                node,
+                reason,
+                by,
+            } => {
+                let p = project(lib, &id)?;
+                lib.set_quarantine(p, node, None, &reason, &by)?;
+                node_view(lib, p, node)
+            }
+            NodeCommand::Quarantined { project: id } => {
+                let p = project(lib, &id)?;
+                let records = lib.quarantines(p)?;
+                let covered = lib.quarantined(p);
+                let rows: Vec<_> = records.iter().map(|(n, q)| {
+                    let node = lib.projects[p].nodes.iter().find(|x| x.id == *n);
+                    let functions = lib.projects[p].nodes.iter().filter(|x| x.parent == Some(*n)).count();
+                    json!({"id":n,"name":node.map(|x| x.name.as_str()),"kind":node.map(|x| x.kind),"origin":q.origin,"reason":q.reason,"at_revision":q.at_revision,"by":q.by,"covered_children":functions})
+                }).collect();
+                Ok(json!({"project":id,"quarantined":rows,"records_covered":covered.len()}))
             }
             NodeCommand::Flagged { project: id } => {
                 let p = project(lib, &id)?;
@@ -1099,10 +1193,11 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 node,
                 expect: token,
                 rvas,
+                directed_by,
             } => {
                 let p = project(lib, &id)?;
                 expect(lib, p, node, &token)?;
-                lib.set_dependencies(p, node, &rvas.join(","))?;
+                lib.set_dependencies_directed(p, node, &rvas.join(","), directed_by.as_deref())?;
                 node_view(lib, p, node)
             }
         },
@@ -1132,6 +1227,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             let claims = lib.claims(p)?;
             let covered = lib.claim_index(p, &claims);
             let queue = lib.review_queue(p, &states)?;
+            let quarantined = lib.quarantined(p);
             let mut counts: std::collections::BTreeMap<
                 String,
                 std::collections::BTreeMap<String, usize>,
@@ -1153,7 +1249,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 synthesis_count += usize::from(ready_for_synthesis);
                 *counts.entry(format!("{:?}", n.kind)).or_default().entry(format!("{:?}", states[&n.id])).or_default() += 1;
                 (!summary).then(|| json!({"id":n.id,"name":n.name,"kind":n.kind,"status":states[&n.id],"required_research":required.contains(&n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
-                    "ready_for_review":ready_for_review,"ready_for_synthesis":ready_for_synthesis,"review_flag":flags.get(&n.id),
+                    "ready_for_review":ready_for_review,"ready_for_synthesis":ready_for_synthesis,"review_flag":flags.get(&n.id),"quarantined":quarantined.contains(&n.id),
                     "claimed_by":covered.get(&n.id).map(|(at, owner)| json!({"node": at, "owner": owner})),
                     "review_queue":queue.get(&n.id)}))
             }).collect();
@@ -1172,6 +1268,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 out["counts"] = json!(counts);
                 out["ready_for_review"] = json!(ready_count);
                 out["ready_for_synthesis"] = json!(synthesis_count);
+                out["quarantined"] = json!(quarantined.len());
             } else {
                 out["records"] = json!(records);
             }
@@ -1555,6 +1652,7 @@ pub(crate) fn route(command: &Command) -> Route {
             NodeCommand::ReadBatch { project, nodes } => read_route(project, Some(nodes.clone())),
             NodeCommand::List { project, .. }
             | NodeCommand::Flagged { project }
+            | NodeCommand::Quarantined { project }
             | NodeCommand::Resolve { project, .. } => read_route(project, None),
             NodeCommand::Delete {
                 project,
@@ -1601,6 +1699,17 @@ pub(crate) fn route(command: &Command) -> Route {
             NodeCommand::Flag { project, node, .. } | NodeCommand::Unflag { project, node } => {
                 write_route(project, "flag", vec![*node], &["flag"], true, 0)
             }
+            // Quarantine changes the effective status of a whole chunk and clears flags and
+            // claims: it commits alone.
+            NodeCommand::Quarantine { project, node, .. }
+            | NodeCommand::Unquarantine { project, node, .. } => write_route(
+                project,
+                "quarantine",
+                vec![*node],
+                &["status", "flag", "claim"],
+                false,
+                0,
+            ),
             NodeCommand::ResetStatus { project, file } => write_route(
                 project,
                 "reset-status",
@@ -1615,7 +1724,7 @@ pub(crate) fn route(command: &Command) -> Route {
             NodeCommand::Create {
                 project, parent, ..
             } => write_route(project, "create", vec![*parent], &["membership"], false, 0),
-            NodeCommand::Batch { project, file } => {
+            NodeCommand::Batch { project, file, .. } => {
                 if import_batch(file) {
                     return Route::Direct;
                 }

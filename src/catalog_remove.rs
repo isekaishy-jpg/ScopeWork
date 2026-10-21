@@ -336,6 +336,19 @@ impl Library {
                 });
             }
         }
+        let quarantine_path = root.join(crate::research::quarantine::QUARANTINE);
+        if !removed.is_empty() && quarantine_path.is_file() {
+            let original = fs::read_to_string(&quarantine_path).map_err(|e| e.to_string())?;
+            if let Some(updated) =
+                crate::research::quarantine::without_removed(&original, &removed)?
+            {
+                sidecars.push(Sidecar {
+                    path: crate::research::quarantine::QUARANTINE.into(),
+                    before: original,
+                    after: updated,
+                });
+            }
+        }
         if !removed.is_empty() {
             after.revision += 1;
             after.structural_epoch += 1;
@@ -388,6 +401,7 @@ impl Library {
             edits,
             ledger: !removed.is_empty(),
             repin_ledger: false,
+            directed_by: None,
             moves,
             dependencies,
             sidecars,

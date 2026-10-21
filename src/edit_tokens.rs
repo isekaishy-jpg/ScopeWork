@@ -61,7 +61,7 @@ impl Library {
     }
     pub fn completion_token(&self, p: usize, id: u64) -> Result<String> {
         let project = &self.projects[p];
-        let index = catalog_index::Index::new(project);
+        let index = catalog_index::Index::new(project).with_quarantine(self.quarantined(p));
         let path = index.paths.get(&id).ok_or("Unknown report")?;
         let own = draft(project, &index, id, &self.text(p, path)?)?;
         self.completion(p, &index, id, &own)
@@ -171,11 +171,13 @@ pub struct RecordRead {
     pub revision: u64,
     pub dependency_rvas: String,
     pub review_flag: Option<super::ReviewFlag>,
+    /// The quarantine covering this record (`node` is the record that carries it).
+    pub quarantine: Option<serde_json::Value>,
 }
 impl Library {
     pub fn record(&self, p: usize, id: u64) -> Result<RecordRead> {
         let project = &self.projects[p];
-        let index = catalog_index::Index::new(project);
+        let index = catalog_index::Index::new(project).with_quarantine(self.quarantined(p));
         let node = index.nodes.get(&id).ok_or("Unknown node")?;
         let report = self.dir(p).join(&index.paths[&id]);
         layout::inside(&self.dir(p), &report)?;
@@ -221,6 +223,10 @@ impl Library {
             revision: project.revision,
             dependency_rvas,
             review_flag: self.review_flags(p)?.remove(&id),
+            quarantine: self.quarantine_of(p, id).map(|(carrier, q)| {
+                serde_json::json!({"node": carrier, "origin": q.origin, "reason": q.reason,
+                    "at_revision": q.at_revision, "by": q.by})
+            }),
         })
     }
 }

@@ -209,6 +209,12 @@ pub fn reserve(root: &Path, project: &str, batch: &Batch) -> Result<Job> {
     let start = Instant::now();
     let mut lib = library_project(root, project, true)?;
     lib.ensure_structural(0)?;
+    lib.check_seal(
+        0,
+        batch.create.iter().map(|c| c.parent),
+        batch.directed_by.as_deref(),
+        "Creating a record in",
+    )?;
     let before = &lib.projects[0];
     if batch.expect_revision != Some(before.revision) {
         return Err("revision_conflict: reload project show before admission".into());

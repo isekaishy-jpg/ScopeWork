@@ -25,6 +25,9 @@ pub struct Batch {
     pub update: Vec<Update>,
     #[serde(default)]
     pub reorder: Vec<Order>,
+    /// The human's instruction when the batch touches quarantined records.
+    #[serde(default)]
+    pub directed_by: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +121,9 @@ pub(super) struct Journal {
     /// `report_sha256` is an edited report's old hash to its new hash when the catalog commits.
     #[serde(default)]
     pub(super) repin_ledger: bool,
+    /// The human's instruction for a change to quarantined records (`--directed-by`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) directed_by: Option<String>,
 }
 
 fn parts(text: &str) -> Result<(&str, &str)> {
@@ -487,6 +493,9 @@ impl Library {
         if !self.projects[p].nodes.iter().any(|n| n.id == id) {
             return Err("Unknown node".into());
         }
+        if reason.is_some() {
+            self.refuse_quarantined(p, id, "a review flag")?;
+        }
         let before_text = match self.text_opt(p, REVIEW_FLAGS)? {
             Some(text) => text,
             None => {
@@ -530,6 +539,7 @@ impl Library {
             }],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -567,6 +577,7 @@ impl Library {
             }],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -678,12 +689,14 @@ impl Library {
             sidecars: vec![],
             ledger: false,
             repin_ledger,
+            directed_by: None,
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
     pub fn read_reports(&self, p: usize, ids: &[u64]) -> Result<serde_json::Value> {
         let project = &self.projects[p];
         let index = catalog_index::Index::new(project);
+        let quarantined = self.quarantined(p);
         let mut reports = Vec::with_capacity(ids.len());
         let mut seen = HashSet::new();
         for id in ids {
@@ -695,7 +708,8 @@ impl Library {
             let text = self.text(p, &index.paths[id])?;
             let (body, evidence) = parts(&text)?;
             reports.push(serde_json::json!({"id":id,"report":path,"body":body,"evidence":evidence,
-                "token":edit_tokens::draft(project,&index,*id,&text)?,"criteria":node.kind.completion_criteria()}));
+                "token":edit_tokens::draft(project,&index,*id,&text)?,"criteria":node.kind.completion_criteria(),
+                "quarantined":quarantined.contains(id)}));
         }
         Ok(
             serde_json::json!({"project":project.id,"binary":project.binary,"revision":project.revision,"reports":reports}),
@@ -792,6 +806,7 @@ impl Library {
             sidecars: vec![],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         self.commit_or_stage(p, journal)?;
         Ok(changed)
@@ -840,6 +855,20 @@ impl Library {
                 }
             }
         }
+        // Quarantined records are sealed: creating in, moving into or out of, renaming,
+        // reordering or changing context needs the human's direction.
+        let touched = batch
+            .create
+            .iter()
+            .map(|c| c.parent)
+            .chain(
+                batch
+                    .update
+                    .iter()
+                    .flat_map(|u| std::iter::once(u.id).chain(u.parent)),
+            )
+            .chain(batch.reorder.iter().map(|o| o.parent));
+        self.check_seal(p, touched, batch.directed_by.as_deref(), "Changing")?;
         let mut after = before.clone();
         let mut positions: HashMap<_, _> = after
             .nodes
@@ -1154,6 +1183,7 @@ impl Library {
             edits,
             ledger: !moves.is_empty(),
             repin_ledger: false,
+            directed_by: batch.directed_by.clone(),
             moves,
             dependencies: dependencies.into_iter().collect(),
             sidecars,
@@ -1398,6 +1428,7 @@ mod tests {
             sidecars: vec![],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         atomic(
             &receipt.join("journal.json"),
@@ -1454,6 +1485,7 @@ mod tests {
             sidecars: vec![],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         let bytes = journal_history::pending_bytes(&j).unwrap();
         assert!(
@@ -1479,6 +1511,7 @@ mod tests {
             sidecars: vec![],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         let bytes = journal_history::pending_bytes(&deletion).unwrap();
         assert!(
@@ -1506,6 +1539,7 @@ mod tests {
             sidecars: vec![],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         let bytes = journal_history::pending_bytes(&rearranged).unwrap();
         for current in [&rearranged.before, &rearranged.after] {
@@ -1532,6 +1566,7 @@ mod tests {
             sidecars: vec![],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         let (delta, bytes) = journal_history::pending_delta(&j).unwrap();
         assert_eq!(bytes, catalog_bytes(&after).unwrap());
@@ -1568,6 +1603,7 @@ mod tests {
             sidecars: vec![],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         let (a, _) = journal_history::pending_delta(&journal(&first, &second)).unwrap();
         journal_history::committed(&second, a["after_hash"].as_str().unwrap());
@@ -1595,6 +1631,7 @@ mod tests {
             sidecars: vec![],
             ledger: false,
             repin_ledger: false,
+            directed_by: None,
         };
         let receipt = lib.dir(0).join(format!(
             "tools/workspaces/catalog-transactions-v4/revision-{}/journal.json",

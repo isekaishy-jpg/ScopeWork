@@ -61,6 +61,7 @@ struct Receipt {
     moves: Vec<Value>,
     sidecars: Vec<PathRef>,
     dependencies: Vec<Value>,
+    directed_by: Option<String>,
 }
 #[derive(Deserialize)]
 struct EditRef {
@@ -80,6 +81,7 @@ impl Receipt {
             "moves": self.moves,
             "sidecars": self.sidecars.into_iter().map(|s| json!({"path": s.path})).collect::<Vec<_>>(),
             "dependencies": self.dependencies,
+            "directed_by": self.directed_by,
         })
     }
 }
@@ -160,7 +162,7 @@ fn summarize(revision: u64, receipt: &Value, filter: &HistoryFilter) -> Option<V
         .iter()
         .map(|s| s["path"].clone())
         .collect();
-    Some(json!({
+    let mut entry = json!({
         "kind": "catalog",
         "revision": revision,
         "records_changed": nodes.len(),
@@ -169,7 +171,12 @@ fn summarize(revision: u64, receipt: &Value, filter: &HistoryFilter) -> Option<V
         "moves": moved,
         "sidecars": sidecars,
         "dependencies_resynced": receipt["dependencies"].as_array().map_or(0, Vec::len),
-    }))
+    });
+    // A change to quarantined records carries the human's instruction that allowed it.
+    if let Some(directed) = receipt["directed_by"].as_str() {
+        entry["directed_by"] = directed.into();
+    }
+    Some(entry)
 }
 
 impl Library {

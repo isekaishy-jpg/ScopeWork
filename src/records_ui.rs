@@ -276,6 +276,15 @@ impl ResearchUi {
                     Some(classic::alert(dark)),
                 );
             }
+            if let Some(reason) = data.quarantined.get(&n.id) {
+                classic::label(
+                    ui,
+                    format!(
+                        "⊘ Quarantined ({reason}). It counts as complete; moves, renames and new prerequisites need the human's direction (--directed-by). Report text stays editable."
+                    ),
+                    Some(classic::alert(dark)),
+                );
+            }
             if let Some(reason) = data.queued.get(&n.id) {
                 classic::label(
                     ui,
@@ -490,6 +499,7 @@ impl ResearchUi {
                             expect_node_revision: Some(n.revision),
                         }],
                         reorder: vec![],
+                        directed_by: None,
                     };
                     self.mutate(move |lib, p, id| {
                         lib.batch(p, &batch)?;

@@ -96,6 +96,25 @@ research node unflag example 12
 
 A flag marks a record for review with a short reason. It does not change status, but it blocks completion until cleared. `node show` returns `review_flag`; `status` reports the flag count and a per-record `review_flag`, and flagged records are not `ready_for_review`. Flags are stored in `review-flags.json` beside `project.json` and change through the catalog journal. Deleting a node removes its flag. In the GUI, flagged records show ⚑ in the browser, the "Flagged for review" filter lists them, and the editor has flag and clear controls.
 
+## Quarantined records
+
+```powershell
+research node quarantine example 152 --origin human --reason "Voice code only; directed by the human" --by solo
+research node quarantined example
+research node unquarantine example 152 --reason "The human lifted it" --by solo
+```
+
+A quarantine takes a chunk or function out of research. Its origin is either the human's request (`human`) or a Claude cyber (safety) stop while researching the record (`cyber-stop`). A quarantined chunk covers its functions, including any added later.
+
+- **Complete everywhere.** A quarantined record's effective status is Complete for parent completion, meters, `status` counts and prerequisites; it is never ready for review or synthesis, and its report hash is not compared, so nothing reopens it.
+- **Sealed.** Creating records in it, moving records into or out of it, renaming or reordering inside it, changing its context membership and new prerequisites touching it are refused (`kind` `quarantined`) unless the request carries the human's instruction: `--directed-by "..."` on `node create`, `node batch` (or `"directed_by"` in the request) and `deps set`. The instruction is stored with the transaction and shown by `research history show` as `directed_by`.
+- **Not applicable.** Completing, flagging or claiming a quarantined record is refused. Quarantining clears the record's review flag, claim and review-queue entries in the same transaction.
+- **Editable.** Report saves are accepted and never reopen the record.
+- **Visible.** `node show` returns `quarantine` (with the carrying `node`), `status` and `read-batch` return `quarantined` per record, and `status --summary` counts them. The GUI marks them with ⊘, lists them with the **Quarantined** filter and shows the reason in the editor.
+- **Lifting** returns the record to its own status. The record moves to the `lifted` log in the journaled `quarantine.json` sidecar beside `project.json`; deleting a node drops its record.
+
+Parent reports' source lists are not annotated, so quarantining never changes report text.
+
 ## Complaints
 
 Put one narrow Markdown report per app issue in the `complaints` path printed by `research home`. Filing the report is the whole process.

@@ -14,6 +14,7 @@ pub(super) struct Browser {
     focus: bool,
     flagged_only: bool,
     queued_only: bool,
+    quarantined_only: bool,
     visible: Vec<(u64, usize)>,
     needs_layout: bool,
     selection: u64,
@@ -31,6 +32,8 @@ pub(super) struct BrowserData {
     pub flags: HashMap<u64, String>,
     /// Records reopened by structural changes and not complete again, with the latest reason.
     pub queued: HashMap<u64, String>,
+    /// Quarantined records (recorded or through their chunk) with a short description.
+    pub quarantined: HashMap<u64, String>,
 }
 struct Row {
     id: u64,
@@ -100,6 +103,10 @@ impl Browser {
                     &mut self.queued_only,
                     format!("Review queue ({})", self.data.queued.len()),
                 ),
+                (
+                    &mut self.quarantined_only,
+                    format!("Quarantined ({})", self.data.quarantined.len()),
+                ),
             ] {
                 if crate::classic::check(ui, true, value, &text).changed() {
                     self.needs_layout = true;
@@ -133,9 +140,10 @@ impl Browser {
             let focus = self.focus;
             let flagged = self.flagged_only;
             let queued = self.queued_only;
+            let quarantined = self.quarantined_only;
             let query = self.query.trim().to_lowercase();
             match background::spawn(solworker::SWExecutionClass::High, move || {
-                data.visible(&expanded, focus, flagged, queued, &query)
+                data.visible(&expanded, focus, (flagged, queued, quarantined), &query)
             }) {
                 Ok(task) => {
                     self.pending = Some((self.generation, task));
@@ -219,6 +227,7 @@ impl BrowserData {
         project: &Project,
         flags: &std::collections::BTreeMap<u64, ReviewFlag>,
         queued: &HashMap<u64, String>,
+        quarantined: &HashMap<u64, String>,
     ) -> Self {
         let index = catalog_index::Index::new(project);
         let mut data = Self {
@@ -239,6 +248,7 @@ impl BrowserData {
             .map(|(id, f)| (*id, f.reason.clone()))
             .collect();
         data.queued = queued.clone();
+        data.quarantined = quarantined.clone();
         data.children = index.children;
         data.rows = project
             .nodes
@@ -247,7 +257,12 @@ impl BrowserData {
                 let address = n.rva.map(|r| format!(" 0x{r:08X}")).unwrap_or_default();
                 let required = index.required.contains(&n.id);
                 let label = format!(
-                    "{}{}{}: {}{}{}",
+                    "{}{}{}{}: {}{}{}",
+                    if quarantined.contains_key(&n.id) {
+                        "⊘ "
+                    } else {
+                        ""
+                    },
                     if flags.contains_key(&n.id) {
                         "⚑ "
                     } else {
@@ -282,23 +297,25 @@ impl BrowserData {
 
         data
     }
+    /// `only` = (flagged, queued, quarantined) filters.
     fn visible(
         &self,
         expanded: &HashSet<u64>,
         focus: bool,
-        flagged: bool,
-        queued: bool,
+        only: (bool, bool, bool),
         query: &str,
     ) -> Vec<(u64, usize)> {
+        let (flagged, queued, quarantined) = only;
         let mut visible = vec![];
-        if flagged || queued {
-            // Flagged and queued records are listed flat so they can be found regardless of expansion.
+        if flagged || queued || quarantined {
+            // Filtered records are listed flat so they can be found regardless of expansion.
             visible.extend(
                 self.rows
                     .iter()
                     .filter(|r| {
                         (!flagged || self.flags.contains_key(&r.id))
                             && (!queued || self.queued.contains_key(&r.id))
+                            && (!quarantined || self.quarantined.contains_key(&r.id))
                             && (!focus || r.required)
                             && r.search.contains(query)
                     })
@@ -385,15 +402,24 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let data = BrowserData::new(&project, &flags, &queued);
+        let quarantined: HashMap<u64, String> =
+            [(2, "human: voice code".to_string())].into_iter().collect();
+        let data = BrowserData::new(&project, &flags, &queued, &quarantined);
         let expanded = HashSet::new();
         let ids = |rows: Vec<(u64, usize)>| rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
         assert_eq!(
-            ids(data.visible(&expanded, false, false, true, "")),
+            ids(data.visible(&expanded, false, (false, true, false), "")),
             vec![2, 3]
         );
-        assert_eq!(ids(data.visible(&expanded, false, true, true, "")), vec![3]);
-        assert!(data.rows[data.positions[&2]].label.starts_with("↻ "));
+        assert_eq!(
+            ids(data.visible(&expanded, false, (true, true, false), "")),
+            vec![3]
+        );
+        assert_eq!(
+            ids(data.visible(&expanded, false, (false, false, true), "")),
+            vec![2]
+        );
+        assert!(data.rows[data.positions[&2]].label.starts_with("⊘ ↻ "));
         assert!(data.rows[data.positions[&3]].label.starts_with("⚑ ↻ "));
     }
 }
