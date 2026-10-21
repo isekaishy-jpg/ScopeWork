@@ -457,7 +457,18 @@ pub(crate) enum HistoryCommand {
         /// Include changed records, not only a summary.
         #[arg(long)]
         detail: bool,
+        /// Only entries about the function with this RVA (hex, `0x` optional).
+        #[arg(long)]
+        rva: Option<String>,
+        /// Only entries on or after this UTC day (YYYY-MM-DD).
+        #[arg(long)]
+        from: Option<String>,
+        /// Only entries on or before this UTC day (YYYY-MM-DD).
+        #[arg(long)]
+        to: Option<String>,
     },
+    /// The tooling kinds the app knows, with what an entry of each must name.
+    Kinds,
     /// Append a tooling entry (for example ledger-change, ghidra-apply, generated-artifact).
     Append {
         project: String,
@@ -760,6 +771,9 @@ fn run(args: Args) -> Result<Value, String> {
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
+    }
+    if let Command::History(HistoryCommand::Kinds) = &args.command {
+        return Ok(crate::research::history::kinds_value());
     }
     if let Command::Journal {
         project,
@@ -1333,8 +1347,24 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             only,
             kind,
             detail,
+            rva,
+            from,
+            to,
         }) => {
             let p = project(lib, &id)?;
+            use crate::research::history::day_start;
+            let rva = rva
+                .map(|r| {
+                    let digits = r.trim().trim_start_matches("0x").trim_start_matches("0X");
+                    u32::from_str_radix(digits, 16)
+                        .map_err(|_| format!("RVAs are hexadecimal: {r}"))
+                })
+                .transpose()?;
+            let from = from.as_deref().map(day_start).transpose()?;
+            let to = to
+                .as_deref()
+                .map(|d| day_start(d).map(|t| t + 86_400))
+                .transpose()?;
             lib.history(
                 p,
                 &crate::research::history::HistoryFilter {
@@ -1346,9 +1376,13 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                     tooling: !matches!(only, Some(HistorySource::Catalog)),
                     detail,
                     kind,
+                    rva,
+                    from,
+                    to,
                 },
             )
         }
+        Command::History(HistoryCommand::Kinds) => Ok(crate::research::history::kinds_value()),
         Command::History(HistoryCommand::Append {
             project: id,
             kind,
@@ -1768,6 +1802,7 @@ pub(crate) fn route(command: &Command) -> Route {
             ClaimCommand::Set { project, node, .. } | ClaimCommand::Release { project, node, .. },
         ) => write_route(project, "claim", vec![*node], &["claim"], true, 0),
         Command::History(HistoryCommand::Show { project, .. }) => read_route(project, None),
+        Command::History(HistoryCommand::Kinds) => Route::Direct,
         Command::History(HistoryCommand::Append { project, nodes, .. }) => {
             write_route(project, "history", nodes.clone(), &[], false, 0)
         }

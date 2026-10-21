@@ -452,15 +452,19 @@ fn finish(
         return Err("Batch receipt already exists; preserve the pending journal.".into());
     }
     rename_retrying(&folder, &receipt).map_err(|e| at(&folder, e))?;
+    let committed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
     match delta {
         Some(mut delta) => {
             delta["kind"] = "completed-catalog-delta".into();
+            delta["at_unix"] = committed_at.into();
             atomic(
                 &receipt.join("journal.json"),
                 &serde_json::to_vec(&delta).map_err(|e| e.to_string())?,
             )?;
         }
-        None => journal_history::compact(&receipt.join("journal.json"), j)?,
+        None => journal_history::compact(&receipt.join("journal.json"), j, committed_at)?,
     }
     Ok(ledger_rows)
 }

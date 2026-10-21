@@ -25,9 +25,250 @@ pub struct HistoryFilter {
     /// Include the changed records themselves, not only a summary.
     pub detail: bool,
     pub kind: Option<String>,
+    /// Only entries about the function with this RVA (resolved to its node).
+    pub rva: Option<u32>,
+    /// Only entries at or after this Unix time.
+    pub from: Option<u64>,
+    /// Only entries before this Unix time.
+    pub to: Option<u64>,
 }
 
-fn receipts(root: &Path) -> Vec<(u64, PathBuf)> {
+/// A tooling kind the app knows: what it records and what an entry must name.
+pub struct KnownKind {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub needs_node: bool,
+    pub needs_ref: bool,
+}
+const fn kind(
+    name: &'static str,
+    label: &'static str,
+    description: &'static str,
+    needs_node: bool,
+    needs_ref: bool,
+) -> KnownKind {
+    KnownKind {
+        name,
+        label,
+        description,
+        needs_node,
+        needs_ref,
+    }
+}
+/// The first-class tooling kinds. Other kinds may still be appended.
+pub const KINDS: &[KnownKind] = &[
+    kind(
+        "reviewed-type",
+        "Reviewed type",
+        "A struct or enum definition reviewed into the annotation ledger; refs name the type.",
+        false,
+        true,
+    ),
+    kind(
+        "typed-signature",
+        "Typed signature",
+        "A function signature typed from research; nodes name the functions.",
+        true,
+        false,
+    ),
+    kind(
+        "behaviour-artifact-review",
+        "Behaviour artifact review",
+        "A behaviour artifact (1:1 Rust or Lua reconstruction) reviewed against its records; nodes name them, refs the artifact.",
+        true,
+        true,
+    ),
+    kind(
+        "dependency-list",
+        "Dependency list",
+        "The project's dependency list changed; refs name the list file.",
+        false,
+        true,
+    ),
+    kind(
+        "ledger-change",
+        "Ledger change",
+        "Annotation ledger rows changed.",
+        false,
+        false,
+    ),
+    kind(
+        "ghidra-apply",
+        "Ghidra apply",
+        "The annotation ledger was applied to the analysis project.",
+        false,
+        false,
+    ),
+    kind(
+        "generated-artifact",
+        "Generated artifact",
+        "A generated file was written or replaced.",
+        false,
+        false,
+    ),
+    kind(
+        "tooling-upgrade",
+        "Tooling upgrade",
+        "Project tooling adopted a new version or behaviour.",
+        false,
+        false,
+    ),
+    kind(
+        "coordinator-commits",
+        "Coordinator commits",
+        "Daily commit figures of the coordinator (written by the app).",
+        false,
+        false,
+    ),
+    kind(
+        "coordinator-reads",
+        "Coordinator reads",
+        "Daily read figures of the coordinator (written by the app).",
+        false,
+        false,
+    ),
+    kind(
+        "drift",
+        "Drift",
+        "A coordinated file changed outside the coordinator (written by the app).",
+        false,
+        false,
+    ),
+    kind(
+        "coordinator-leases",
+        "Coordinator leases",
+        "Daily tool-lease figures of the coordinator (written by the app).",
+        false,
+        false,
+    ),
+];
+
+/// The known kinds as the CLI lists them.
+pub fn kinds_value() -> Value {
+    json!({"kinds": KINDS.iter().map(|k| json!({
+        "kind": k.name,
+        "label": k.label,
+        "description": k.description,
+        "needs_node": k.needs_node,
+        "needs_ref": k.needs_ref,
+    })).collect::<Vec<_>>()})
+}
+
+/// Unix time of a UTC calendar day `YYYY-MM-DD` at midnight.
+pub fn day_start(text: &str) -> Result<u64> {
+    let bad = || format!("Dates are YYYY-MM-DD (UTC): {text}");
+    let mut parts = text.trim().splitn(3, '-');
+    let mut next = || -> Result<i64> {
+        parts
+            .next()
+            .and_then(|p| p.parse::<i64>().ok())
+            .ok_or_else(bad)
+    };
+    let (y, m, d) = (next()?, next()?, next()?);
+    let days_in = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        2 => 28,
+        _ => return Err(bad()),
+    };
+    if !(1970..=9999).contains(&y) || !(1..=days_in).contains(&d) {
+        return Err(bad());
+    }
+    // Days since 1970-01-01 from a civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Ok(((era * 146_097 + doe - 719_468) * 86_400) as u64)
+}
+
+/// One line for an entry: revision, UTC time, kind and what changed.
+pub fn entry_line(entry: &Value) -> String {
+    let at = entry["at_unix"]
+        .as_u64()
+        .map(|t| {
+            crate::crash_log::timestamp(std::time::UNIX_EPOCH + std::time::Duration::from_secs(t))
+                .chars()
+                .take(16)
+                .collect::<String>()
+                .replace('T', " ")
+        })
+        .unwrap_or_else(|| "-".repeat(16));
+    let revision = entry["revision"].as_u64().unwrap_or(0);
+    if entry["kind"] == "catalog" {
+        let changes = entry["changes"].as_array().map_or(&[][..], Vec::as_slice);
+        let count = |f: &str| changes.iter().filter(|c| !c[f].is_null()).count();
+        let records = entry["records_changed"].as_u64().unwrap_or(0);
+        let mut parts = vec![];
+        if records > 0 {
+            parts.push(format!(
+                "{records} record{}",
+                if records == 1 { "" } else { "s" }
+            ));
+        }
+        for (field, label) in [
+            ("created", "created"),
+            ("removed", "removed"),
+            ("status", "status"),
+            ("name", "renamed"),
+            ("parent", "moved"),
+            ("reopened", "reopened"),
+        ] {
+            let n = count(field);
+            if n > 0 {
+                parts.push(format!("{n} {label}"));
+            }
+        }
+        if let [single] = changes {
+            let id = single["id"].as_u64().unwrap_or(0);
+            if let Some(status) = single["status"]["after"].as_str() {
+                parts.push(format!("#{id} -> {status}"));
+            } else if let Some(name) = single["name"]["after"].as_str() {
+                parts.push(format!("#{id} -> {name}"));
+            } else {
+                parts.push(format!("#{id}"));
+            }
+        }
+        // Sidecar-only changes (flags, claims, quarantine, the review queue) name their files.
+        let sidecars: Vec<&str> = entry["sidecars"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if !sidecars.is_empty() {
+            parts.push(sidecars.join(", "));
+        }
+        if parts.is_empty() {
+            parts.push("no record changes".into());
+        }
+        let directed = if entry["directed_by"].is_string() {
+            " [directed]"
+        } else {
+            ""
+        };
+        format!("r{revision}  {at}  catalog: {}{directed}", parts.join(", "))
+    } else {
+        let kind = entry["entry_kind"].as_str().unwrap_or("tooling");
+        let summary: String = entry["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(160)
+            .collect();
+        format!("r{revision}  {at}  {kind}: {summary}")
+    }
+}
+
+/// Receipts newest first, with the journal's modification time (the commit time; compaction keeps it).
+fn receipts(root: &Path) -> Vec<(u64, PathBuf, Option<u64>)> {
     let mut all = vec![];
     for folder in RECEIPTS {
         let Ok(entries) = fs::read_dir(root.join(folder)) else {
@@ -40,14 +281,21 @@ fn receipts(root: &Path) -> Vec<(u64, PathBuf)> {
                 .and_then(|r| r.parse::<u64>().ok())
             {
                 let journal = entry.path().join("journal.json");
-                if journal.is_file() {
-                    all.push((rev, journal));
+                if let Ok(meta) = fs::metadata(&journal)
+                    && meta.is_file()
+                {
+                    let at = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+                    all.push((rev, journal, at));
                 }
             }
         }
     }
-    all.sort_by_key(|(rev, _)| std::cmp::Reverse(*rev));
-    all.dedup_by_key(|(rev, _)| *rev);
+    all.sort_by_key(|(rev, _, _)| std::cmp::Reverse(*rev));
+    all.dedup_by_key(|(rev, _, _)| *rev);
     all
 }
 
@@ -62,6 +310,7 @@ struct Receipt {
     sidecars: Vec<PathRef>,
     dependencies: Vec<Value>,
     directed_by: Option<String>,
+    at_unix: Option<u64>,
 }
 #[derive(Deserialize)]
 struct EditRef {
@@ -82,6 +331,7 @@ impl Receipt {
             "sidecars": self.sidecars.into_iter().map(|s| json!({"path": s.path})).collect::<Vec<_>>(),
             "dependencies": self.dependencies,
             "directed_by": self.directed_by,
+            "at_unix": self.at_unix,
         })
     }
 }
@@ -176,6 +426,9 @@ fn summarize(revision: u64, receipt: &Value, filter: &HistoryFilter) -> Option<V
     if let Some(directed) = receipt["directed_by"].as_str() {
         entry["directed_by"] = directed.into();
     }
+    if let Some(at) = receipt["at_unix"].as_u64() {
+        entry["at_unix"] = at.into();
+    }
     Some(entry)
 }
 
@@ -187,6 +440,32 @@ impl Library {
         let in_range = |rev: u64| {
             filter.since.is_none_or(|s| rev >= s) && filter.until.is_none_or(|u| rev <= u)
         };
+        let in_time = |at: Option<u64>| {
+            (filter.from.is_none() && filter.to.is_none())
+                || at.is_some_and(|t| {
+                    filter.from.is_none_or(|f| t >= f) && filter.to.is_none_or(|u| t < u)
+                })
+        };
+        // An RVA names exactly one record; an unknown one is an error, not an empty answer.
+        let mut node = filter.node;
+        if let Some(rva) = filter.rva {
+            let id = self.projects[p]
+                .nodes
+                .iter()
+                .find(|n| n.rva == Some(rva))
+                .map(|n| n.id)
+                .ok_or_else(|| format!("No record has RVA {rva:X}"))?;
+            if node.is_some_and(|n| n != id) {
+                return Err(format!("RVA {rva:X} is node {id}, not the given node"));
+            }
+            node = Some(id);
+        }
+        let narrowed = HistoryFilter {
+            node,
+            kind: filter.kind.clone(),
+            ..*filter
+        };
+        let filter = &narrowed;
         let mut entries: Vec<Value> = vec![];
         if filter.tooling
             && let Ok(text) = fs::read_to_string(root.join(TOOLING_LOG))
@@ -205,15 +484,15 @@ impl Library {
                     .kind
                     .as_deref()
                     .is_none_or(|k| entry["entry_kind"].as_str() == Some(k));
-                if in_range(rev) && node_ok && kind_ok {
+                if in_range(rev) && in_time(entry["at_unix"].as_u64()) && node_ok && kind_ok {
                     entries.push(entry);
                 }
             }
         }
         if filter.catalog && filter.kind.as_deref().is_none_or(|k| k == "catalog") {
             let mut found = 0usize;
-            for (rev, path) in receipts(&root) {
-                if !in_range(rev) {
+            for (rev, path, modified) in receipts(&root) {
+                if !in_range(rev) || !in_time(modified) {
                     continue;
                 }
                 if found >= limit {
@@ -224,7 +503,12 @@ impl Library {
                 let Ok(receipt) = serde_json::from_slice::<Receipt>(&bytes) else {
                     continue;
                 };
-                let receipt = receipt.summary_value();
+                let mut receipt = receipt.summary_value();
+                if receipt["at_unix"].is_null()
+                    && let Some(at) = modified
+                {
+                    receipt["at_unix"] = at.into();
+                }
                 if let Some(summary) = summarize(rev, &receipt, filter) {
                     entries.push(summary);
                     found += 1;
@@ -277,6 +561,20 @@ impl Library {
         }
         if summary.trim().is_empty() {
             return Err("A history entry needs a summary.".into());
+        }
+        if let Some(known) = KINDS.iter().find(|k| k.name == entry_kind) {
+            if known.needs_node && nodes.is_empty() {
+                return Err(format!(
+                    "A {} entry names the records it concerns (--node).",
+                    known.name
+                ));
+            }
+            if known.needs_ref && refs.iter().all(|r| r.trim().is_empty()) {
+                return Err(format!(
+                    "A {} entry names what it refers to (--ref).",
+                    known.name
+                ));
+            }
         }
         let known: std::collections::HashSet<u64> =
             self.projects[p].nodes.iter().map(|n| n.id).collect();

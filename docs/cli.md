@@ -398,10 +398,27 @@ research status example --summary    # includes the review_queue count
 research history show example --limit 20
 research history show example --node 42 --detail
 research history show example --since 800 --until 812 --only catalog
+research history show example --rva 3FF480 --from 2026-10-14 --to 2026-10-21
+research history kinds
 research history append example --kind ledger-change --summary "Retyped 14 parameters" --node 42 --ref tools/annotations/ledger.json --diff-file diff.json
 ```
 
 `history show` lists entries newest first. Catalog entries summarise each transaction receipt (`revision-N/journal.json`): created and removed records, status, parent, name and membership changes, reopened completions, edited reports, moves and sidecars; `--detail` adds the changed records. Tooling entries are appended by project tools to `tools/workspaces/history/tooling.jsonl` with a lowercase hyphenated kind, the nodes and paths concerned, and a diff of what changed rather than a copy of whole files. The `catalog` kind is reserved. Restoring from history remains a manual, reviewed operation.
+
+Every entry carries `at_unix`. Catalog receipts record their commit time; older receipts are dated by their `journal.json` modification time, which `journal --compact` keeps (it also writes the time into each receipt it rewrites). `--rva HEX` selects the record with that RVA (an unknown RVA is an error) and combines with `--node`; `--from` and `--to` take UTC days (`YYYY-MM-DD`, both inclusive).
+
+`history kinds` lists the tooling kinds the app knows. `history append` refuses a known kind without what it must name:
+
+| Kind | Must name |
+|---|---|
+| `reviewed-type` | `--ref` (the type) |
+| `typed-signature` | `--node` |
+| `behaviour-artifact-review` | `--node` and `--ref` (the artifact) |
+| `dependency-list` | `--ref` (the list file) |
+
+`ledger-change`, `ghidra-apply`, `generated-artifact` and `tooling-upgrade` need nothing more; `coordinator-commits`, `coordinator-reads`, `coordinator-leases` and `drift` are written by the app. Other lowercase hyphenated kinds are still accepted.
+
+In the GUI, **View > Project history...** shows the same history for the dashboard's project: filter by kind, node, RVA and UTC day, select an entry to see its details, and **Open record** (or double-click) opens the record it concerns in Research records.
 
 ## Coordinator
 

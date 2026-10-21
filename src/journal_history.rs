@@ -232,13 +232,16 @@ pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {
     })
 }
 
-pub(super) fn compact(path: &Path, journal: &Journal) -> Result<()> {
+pub(super) fn compact(path: &Path, journal: &Journal, at_unix: u64) -> Result<()> {
     let mut value: Value = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     if value["kind"] == "pending-catalog-delta" && value["schema"] == 1 {
         value["kind"] = "completed-catalog-delta".into();
     } else {
         value = delta(journal)?;
+    }
+    if value["at_unix"].is_null() {
+        value["at_unix"] = at_unix.into();
     }
     let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
     atomic(path, &bytes)
@@ -452,10 +455,26 @@ impl Library {
                 }
                 let mut retained = size;
                 if output.0 {
+                    // The receipt's time is its journal's modification time until now; keep it
+                    // in the receipt and on the rewritten file, so history dates survive.
+                    let modified = fs::metadata(&path).and_then(|m| m.modified()).ok();
+                    if output.1["at_unix"].is_null()
+                        && let Some(at) =
+                            modified.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    {
+                        output.1["at_unix"] = at.as_secs().into();
+                    }
                     let bytes = serde_json::to_vec(&output.1).map_err(|e| e.to_string())?;
                     retained = bytes.len() as u64;
                     if apply {
                         atomic(&path, &bytes)?;
+                        if let Some(modified) = modified {
+                            fs::File::options()
+                                .write(true)
+                                .open(&path)
+                                .and_then(|f| f.set_modified(modified))
+                                .map_err(|e| at(&path, e))?;
+                        }
                     }
                 }
                 total += size;

@@ -129,3 +129,176 @@ fn catalog_receipts_and_tooling_entries_read_as_one_history() {
         assert!(!out.status.success());
     }
 }
+
+fn today() -> String {
+    research_dashboard::crash_log::timestamp(std::time::SystemTime::now())[..10].to_string()
+}
+fn receipt(f: &Fixture, revision: u64) -> PathBuf {
+    f.home.join(format!(
+        "projects/fixture/tools/workspaces/catalog-transactions-v4/revision-{revision}/journal.json"
+    ))
+}
+fn set_time(path: &PathBuf, unix: u64) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix))
+        .unwrap();
+}
+fn revisions(v: &Value) -> Vec<u64> {
+    v["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["revision"].as_u64().unwrap())
+        .collect()
+}
+
+#[test]
+fn history_filters_by_rva_and_by_day() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node", "create", "fixture", "--parent", "2", "--name", "F", "--rva", "1000",
+    ]);
+    f.ok(&["node", "flag", "fixture", "3", "--reason", "check"]);
+    let by_rva = f.ok(&["history", "show", "fixture", "--rva", "0x1000"]);
+    let entries = by_rva["entries"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    for e in entries {
+        assert!(
+            e["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["id"] == 3),
+            "{e}"
+        );
+    }
+    assert_eq!(
+        revisions(&by_rva),
+        revisions(&f.ok(&["history", "show", "fixture", "--node", "3"]))
+    );
+    let unknown = f.run(&["history", "show", "fixture", "--rva", "2000"]);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("No record has RVA 2000"));
+
+    // New receipts carry their commit time; today's entries are found by day.
+    let all = f.ok(&["history", "show", "fixture", "--only", "catalog"]);
+    assert!(
+        all["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["at_unix"].as_u64().is_some())
+    );
+    let day = today();
+    let today_entries = f.ok(&["history", "show", "fixture", "--from", &day, "--to", &day]);
+    assert_eq!(
+        revisions(&today_entries).len(),
+        all["entries"].as_array().unwrap().len()
+    );
+    let none = f.ok(&["history", "show", "fixture", "--to", "2000-01-01"]);
+    assert!(none["entries"].as_array().unwrap().is_empty());
+    assert!(
+        !f.run(&["history", "show", "fixture", "--from", "2026-13-01"])
+            .status
+            .success()
+    );
+
+    // An older receipt without a recorded time is dated by its journal's modification time.
+    let old = receipt(&f, 2);
+    let mut value: Value = serde_json::from_slice(&fs::read(&old).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("at_unix");
+    fs::write(&old, serde_json::to_vec(&value).unwrap()).unwrap();
+    set_time(&old, 978_307_200 + 3_600); // 2001-01-01 01:00 UTC
+    let dated = f.ok(&[
+        "history",
+        "show",
+        "fixture",
+        "--from",
+        "2001-01-01",
+        "--to",
+        "2001-01-01",
+    ]);
+    assert_eq!(revisions(&dated), vec![2]);
+    assert_eq!(dated["entries"][0]["at_unix"], 978_307_200 + 3_600);
+}
+
+#[test]
+fn compaction_keeps_a_receipts_time() {
+    let f = Fixture::new();
+    // A receipt left as a pending delta is rewritten by compaction.
+    let path = receipt(&f, 2);
+    let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value.as_object_mut().unwrap().remove("at_unix");
+    value["kind"] = "pending-catalog-delta".into();
+    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    set_time(&path, 978_307_200);
+    f.ok(&["journal", "fixture", "--compact"]);
+    let after: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(after["kind"], "completed-catalog-delta");
+    assert_eq!(after["at_unix"], 978_307_200);
+    let modified = fs::metadata(&path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(modified, 978_307_200);
+}
+
+#[test]
+fn known_kinds_name_what_they_must() {
+    let f = Fixture::new();
+    let kinds = f.ok(&["history", "kinds"]);
+    let reviewed = kinds["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["kind"] == "reviewed-type")
+        .unwrap();
+    assert_eq!(reviewed["needs_ref"], true);
+    for (args, ok) in [
+        (vec!["--kind", "typed-signature"], false),
+        (vec!["--kind", "typed-signature", "--node", "2"], true),
+        (vec!["--kind", "reviewed-type", "--node", "2"], false),
+        (vec!["--kind", "reviewed-type", "--ref", "SpellCast"], true),
+        (
+            vec!["--kind", "behaviour-artifact-review", "--node", "2"],
+            false,
+        ),
+        (
+            vec![
+                "--kind",
+                "dependency-list",
+                "--ref",
+                "tools/profiles/dependencies.json",
+            ],
+            true,
+        ),
+        (vec!["--kind", "custom-note"], true),
+    ] {
+        let mut argv = vec!["history", "append", "fixture", "--summary", "x"];
+        argv.extend(args.iter().copied());
+        let out = f.run(&argv);
+        assert_eq!(
+            out.status.success(),
+            ok,
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let day = today();
+    let typed = f.ok(&[
+        "history",
+        "show",
+        "fixture",
+        "--kind",
+        "typed-signature",
+        "--from",
+        &day,
+    ]);
+    assert_eq!(typed["entries"].as_array().unwrap().len(), 1);
+}
