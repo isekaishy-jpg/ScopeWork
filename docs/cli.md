@@ -143,7 +143,9 @@ Use `research node batch PROJECT --file C:\work\catalog.json` to enroll a comple
 
 These IDs are illustrative; referenced nodes must exist. JSON RVAs are unsigned 32-bit **decimal byte offsets from the image base**, unlike hexadecimal command-line RVAs. IDs are allocated in `create` order starting at `next_id`; later entries may reference parents created earlier in that array. Architecture/chunk creation omits `rva`. Each function has one unique RVA across the project. Unknown fields, stale revisions, mismatched binary identities, duplicate RVAs, invalid parent kinds, and incomplete sibling order lists are rejected before canonical writes.
 
-`update` moves or renames nodes without changing their IDs or RVAs. Omitted fields are preserved. `reorder` must contain every direct child exactly once; it controls browser, meter and generated source-link order. Arrays may be omitted. Existing research bodies, evidence and data stay with their nodes. New records start unresearched; the batch cannot import completion claims or fabricate report content.
+`update` moves or renames nodes without changing their IDs or RVAs. Omitted fields are preserved.
+
+A rename reaches every report that cites the function exactly as `` `OldName` (`VA`) `` (VA as eight hex digits, any case, optionally `0x`-prefixed; VA = RVA + the image base in the binary identity): function reports, chunk and architecture syntheses and the app report, body and evidence alike. These edits are mechanical: a report changed only by renames (its own `# Name` header, a child's name in its source list, rewritten citations) keeps its completion. Its accepted hash and the prerequisite stamps on it follow the new text, and its annotation-ledger rows are re-pinned in the same transaction. Anything a structural change in the same batch touches (moves, creations, context or order changes, dependency resynchronisation, legacy link repair) is reviewed as before. The result adds `citations` (each rewritten report with its count), `unrewritten` (reports that still mention an old name outside the exact form, with counts, for manual follow-up) and `kept_complete` (the records that kept their completion). Bare mentions are never rewritten. `reorder` must contain every direct child exactly once; it controls browser, meter and generated source-link order. Arrays may be omitted. Existing research bodies, evidence and data stay with their nodes. New records start unresearched; the batch cannot import completion claims or fabricate report content.
 
 Mixed batches containing updates/reordering/link repair hold the project write lock, record a recoverable catalog delta and affected reports under `tools/workspaces/catalog-transactions-v4/pending`, stages moved folders, updates reports and affected dependency views, and commits the catalog last. The next CLI/GUI open resumes interrupted work after checking recorded inputs. Completed journals remain under `revision-N`; preserve them if recovery reports a conflict. Do not manually edit files during a pending transaction. The journal does not back up arbitrary supporting data; maintain ordinary backups separately.
 
@@ -381,7 +383,7 @@ Claims name who is working on an architecture or chunk; functions are covered by
 
 ### Review queue
 
-When a batch move, membership, order or name change reopens a completed record, that record enters the review queue with the reason and revision. An entry stays open until its record is complete again, so completing it needs no extra step.
+When a batch move, membership or order change reopens a completed record, that record enters the review queue with the reason and revision. An entry stays open until its record is complete again, so completing it needs no extra step.
 
 ```powershell
 research review-queue example

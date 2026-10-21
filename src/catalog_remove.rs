@@ -402,6 +402,7 @@ impl Library {
             ledger: !removed.is_empty(),
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
             moves,
             dependencies,
             sidecars,

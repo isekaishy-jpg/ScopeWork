@@ -113,7 +113,7 @@ fn delta_with_after(j: &Journal) -> Result<(Value, Vec<u8>)> {
         json!({"schema":1,"kind":"completed-catalog-delta","before":header(&j.before)?,"after":header(&j.after)?,"changes":changes,
         "before_hash":before_hash,
         "after_hash":after_hash,
-        "edits":j.edits,"moves":j.moves,"dependencies":j.dependencies,"sidecars":j.sidecars,"ledger":j.ledger,"repin_ledger":j.repin_ledger,"directed_by":j.directed_by}),
+        "edits":j.edits,"moves":j.moves,"dependencies":j.dependencies,"sidecars":j.sidecars,"ledger":j.ledger,"repin_ledger":j.repin_ledger,"directed_by":j.directed_by,"repin_ids":j.repin_ids}),
         after_bytes,
     ))
 }
@@ -228,6 +228,7 @@ pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {
         ledger: value["ledger"].as_bool().unwrap_or(false),
         repin_ledger: value["repin_ledger"].as_bool().unwrap_or(false),
         directed_by: value["directed_by"].as_str().map(str::to_string),
+        repin_ids: serde_json::from_value(value["repin_ids"].clone()).unwrap_or_default(),
     })
 }
 

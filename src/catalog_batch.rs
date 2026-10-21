@@ -57,6 +57,15 @@ pub struct BatchOutcome {
     pub moved: Vec<(u64, String, String)>,
     /// Annotation-ledger report paths that now follow their records.
     pub ledger_rows_repathed: usize,
+    /// Reports whose `` `OldName` (`VA`) `` citations of renamed functions were rewritten.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<serde_json::Value>,
+    /// Reports that still mention an old name outside the exact citation form.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unrewritten: Vec<serde_json::Value>,
+    /// Records kept complete because only renames changed their reports.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kept_complete: Vec<u64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,6 +133,9 @@ pub(super) struct Journal {
     /// The human's instruction for a change to quarantined records (`--directed-by`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) directed_by: Option<String>,
+    /// With `repin_ledger`: re-pin only these records' edits (mechanical ones); empty means all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) repin_ids: Vec<u64>,
 }
 
 fn parts(text: &str) -> Result<(&str, &str)> {
@@ -400,6 +412,7 @@ fn finish(
         let pairs: Vec<(String, String)> = j
             .edits
             .iter()
+            .filter(|e| j.repin_ids.is_empty() || j.repin_ids.contains(&e.id))
             .filter_map(|e| Some((hash(e.before.as_ref()?), hash(&e.after))))
             .collect();
         ledger::repin(root, &pairs)?;
@@ -540,6 +553,7 @@ impl Library {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -578,6 +592,7 @@ impl Library {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -690,6 +705,7 @@ impl Library {
             ledger: false,
             repin_ledger,
             directed_by: None,
+            repin_ids: vec![],
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -807,6 +823,7 @@ impl Library {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         self.commit_or_stage(p, journal)?;
         Ok(changed)
@@ -989,6 +1006,9 @@ impl Library {
                 created,
                 moved: vec![],
                 ledger_rows_repathed: 0,
+                citations: vec![],
+                unrewritten: vec![],
+                kept_complete: vec![],
             });
         }
         let old = catalog_index::Index::new(&before);
@@ -1051,10 +1071,48 @@ impl Library {
                 .collect();
             report_hashes::mentioning(&root, &reports, &folders)
         };
+        // Renamed functions: their exact citations (`Name` (`VA`)) in any report follow the new
+        // name. The reference index finds the reports that mention each VA without reading all.
+        let base = image_base(&before.binary);
+        let renames: Vec<Rename> = batch
+            .update
+            .iter()
+            .filter_map(|u| {
+                let name = u.name.as_ref()?.trim();
+                let node = old.nodes.get(&u.id)?;
+                (node.name != name).then(|| {
+                    Rename::new(
+                        &node.name,
+                        name,
+                        base.zip(node.rva)
+                            .map(|(b, r)| format!("{:08X}", b + u64::from(r))),
+                    )
+                })
+            })
+            .collect();
+        let citing = {
+            let tokens: HashSet<String> = renames.iter().filter_map(|r| r.va.clone()).collect();
+            if tokens.is_empty() {
+                HashSet::new()
+            } else {
+                let reports: Vec<&str> = before
+                    .nodes
+                    .iter()
+                    .filter(|n| !changed.contains(&n.id))
+                    .map(|n| old.paths[&n.id].as_str())
+                    .collect();
+                report_hashes::mentioning(&root, &reports, &tokens)
+            }
+        };
+        let mut citations = vec![];
+        let mut unrewritten = vec![];
         let mut edits = vec![];
         for n in &after.nodes {
             let original = if let Some(path) = old.paths.get(&n.id) {
-                if changed.contains(&n.id) || batch.repair_legacy_links || mentioning.contains(path)
+                if changed.contains(&n.id)
+                    || batch.repair_legacy_links
+                    || mentioning.contains(path)
+                    || citing.contains(path)
                 {
                     Some(fs::read_to_string(root.join(path)).map_err(|e| e.to_string())?)
                 } else {
@@ -1089,6 +1147,19 @@ impl Library {
             } else {
                 rewriter.rewrite(evidence, old_path, &new.paths[&n.id])
             };
+            let (body, cited_body) = rewrite_citations(&body, &renames);
+            let (evidence, cited_evidence) = rewrite_citations(&evidence, &renames);
+            if cited_body + cited_evidence > 0 {
+                citations.push(serde_json::json!({"id": n.id, "report": new.paths[&n.id],
+                    "rewritten": cited_body + cited_evidence}));
+            }
+            for r in &renames {
+                let left = bare_mentions(&body, r) + bare_mentions(&evidence, r);
+                if left > 0 {
+                    unrewritten.push(serde_json::json!({"id": n.id, "report": new.paths[&n.id],
+                        "name": r.old, "mentions": left}));
+                }
+            }
             let output = new.render(&after, n.id, &body, &evidence);
             if original.as_ref() != Some(&output) || old_path != &new.paths[&n.id] {
                 changed.insert(n.id);
@@ -1128,16 +1199,103 @@ impl Library {
             }
         }
         drop(new);
-        let existing: HashSet<u64> = changed
+        let all_changed: HashSet<u64> = changed
             .iter()
             .copied()
+            .chain(edits.iter().map(|e: &Edit| e.id))
             .filter(|id| old.nodes.contains_key(id))
             .collect();
+        // Records whose reports changed only through renames (their own header, a child's name
+        // in their source list, rewritten citations) keep their completion: the edit is
+        // mechanical. Everything a structural change touches is reviewed as before.
+        let mut structural: HashSet<u64> = created.iter().copied().collect();
+        structural.extend(
+            created
+                .iter()
+                .filter_map(|id| after.nodes[positions[id]].parent),
+        );
+        if batch.repair_legacy_links || renames.is_empty() {
+            structural.extend(all_changed.iter().copied());
+        }
+        structural.extend(moves.iter().map(|m| m.id));
+        for (id, parent) in &old_parents {
+            structural.insert(*id);
+            structural.insert(*parent);
+        }
+        for u in &batch.update {
+            if u.parent.is_some() || u.context_only.is_some() {
+                structural.insert(u.id);
+                if let Some(parent) = after.nodes[positions[&u.id]].parent {
+                    structural.insert(parent);
+                }
+            }
+        }
+        structural.extend(batch.reorder.iter().map(|o| o.parent));
+        structural.extend(dependencies.iter().copied());
+        structural.extend(
+            old.paths
+                .iter()
+                .filter(|(_, path)| mentioning.contains(*path))
+                .map(|(id, _)| *id),
+        );
+        let mechanical: HashSet<u64> = all_changed
+            .iter()
+            .copied()
+            .filter(|id| !structural.contains(id))
+            .collect();
+        let existing: HashSet<u64> = all_changed
+            .iter()
+            .copied()
+            .filter(|id| !mechanical.contains(id))
+            .collect();
+        let renamed: HashSet<u64> = batch
+            .update
+            .iter()
+            .filter(|u| u.name.is_some())
+            .map(|u| u.id)
+            .collect();
+        let accepted: HashMap<u64, (String, String)> = edits
+            .iter()
+            .filter(|e| mechanical.contains(&e.id))
+            .filter_map(|e| Some((e.id, (hash(e.before.as_ref()?), hash(&e.after)))))
+            .collect();
+        let old_revisions: HashMap<u64, u64> =
+            before.nodes.iter().map(|n| (n.id, n.revision)).collect();
         for n in &mut after.nodes {
             if existing.contains(&n.id) {
                 reopen::mark_changed(n, None);
+            } else if mechanical.contains(&n.id) {
+                if renamed.contains(&n.id) {
+                    n.revision += 1;
+                }
+                if let Some((old_hash, new_hash)) = accepted.get(&n.id)
+                    && n.accepted_hash.as_ref() == Some(old_hash)
+                {
+                    n.accepted_hash = Some(new_hash.clone());
+                }
             }
         }
+        let new_revisions: HashMap<u64, u64> =
+            after.nodes.iter().map(|n| (n.id, n.revision)).collect();
+        for n in &mut after.nodes {
+            for (id, stamp) in &mut n.accepted_prerequisites {
+                if let (Some((old_hash, new_hash)), Some(old_rev), Some(new_rev)) = (
+                    accepted.get(id),
+                    old_revisions.get(id),
+                    new_revisions.get(id),
+                ) && *stamp == format!("{old_rev}:{old_hash}")
+                {
+                    *stamp = format!("{new_rev}:{new_hash}");
+                }
+            }
+        }
+        let mut kept_complete: Vec<u64> = before
+            .nodes
+            .iter()
+            .filter(|n| n.status == Status::Complete && mechanical.contains(&n.id))
+            .map(|n| n.id)
+            .collect();
+        kept_complete.sort_unstable();
         let consumers = reopen::consumers_of(&after.dependencies);
         let reached = reopen::reopen_affected(&mut after, &existing, &old_parents, &consumers);
         after.revision += 1;
@@ -1182,8 +1340,13 @@ impl Library {
             after,
             edits,
             ledger: !moves.is_empty(),
-            repin_ledger: false,
+            repin_ledger: !accepted.is_empty(),
             directed_by: batch.directed_by.clone(),
+            repin_ids: {
+                let mut ids: Vec<u64> = accepted.keys().copied().collect();
+                ids.sort_unstable();
+                ids
+            },
             moves,
             dependencies: dependencies.into_iter().collect(),
             sidecars,
@@ -1193,8 +1356,84 @@ impl Library {
             created,
             moved,
             ledger_rows_repathed,
+            citations,
+            unrewritten,
+            kept_complete,
         })
     }
+}
+
+/// A function renamed by a batch: its exact-citation pattern (when the VA is known, from the
+/// image base) and its whole-word pattern, compiled once per batch.
+pub(super) struct Rename {
+    old: String,
+    new: String,
+    va: Option<String>,
+    citation: Option<regex::Regex>,
+    word: Option<regex::Regex>,
+}
+impl Rename {
+    fn new(old: &str, new: &str, va: Option<String>) -> Self {
+        let citation = va.as_ref().and_then(|va| {
+            regex::Regex::new(&format!(
+                r"`{}`(\s*\(\s*`(?i:0x)?(?i:{va})`\s*\))",
+                regex::escape(old)
+            ))
+            .ok()
+        });
+        let word = (!old.is_empty())
+            .then(|| {
+                regex::Regex::new(&format!(
+                    r"(?:^|[^A-Za-z0-9_]){}(?:[^A-Za-z0-9_]|$)",
+                    regex::escape(old)
+                ))
+                .ok()
+            })
+            .flatten();
+        Self {
+            old: old.into(),
+            new: new.into(),
+            va,
+            citation,
+            word,
+        }
+    }
+}
+/// The image base from a binary identity such as `...; image base 0x00400000`.
+fn image_base(binary: &str) -> Option<u64> {
+    static BASE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let base = BASE
+        .get_or_init(|| regex::Regex::new(r"(?i)image\s+base\s*(?:is\s*)?0x([0-9a-f]+)").unwrap());
+    let hex = base.captures(binary)?.get(1)?.as_str();
+    u64::from_str_radix(hex, 16).ok()
+}
+/// Rewrites exact citations `` `OldName` (`VA`) `` (VA in any case, optionally `0x`) to the
+/// new name; returns the text and the number of citations rewritten.
+pub(super) fn rewrite_citations(text: &str, renames: &[Rename]) -> (String, usize) {
+    let mut out = text.to_string();
+    let mut count = 0;
+    for r in renames {
+        let Some(citation) = &r.citation else {
+            continue;
+        };
+        if !citation.is_match(&out) {
+            continue;
+        }
+        out = citation
+            .replace_all(&out, |c: &regex::Captures| {
+                count += 1;
+                format!("`{}`{}", r.new, &c[1])
+            })
+            .into_owned();
+    }
+    (out, count)
+}
+/// Mentions of a renamed function's old name as a whole word (after citations were rewritten).
+pub(super) fn bare_mentions(text: &str, rename: &Rename) -> usize {
+    rename
+        .word
+        .as_ref()
+        .map_or(0, |word| word.find_iter(text).count())
 }
 
 fn prepare_pending(root: &Path) -> Result<PathBuf> {
@@ -1429,6 +1668,7 @@ mod tests {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         atomic(
             &receipt.join("journal.json"),
@@ -1486,6 +1726,7 @@ mod tests {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         let bytes = journal_history::pending_bytes(&j).unwrap();
         assert!(
@@ -1512,6 +1753,7 @@ mod tests {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         let bytes = journal_history::pending_bytes(&deletion).unwrap();
         assert!(
@@ -1540,6 +1782,7 @@ mod tests {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         let bytes = journal_history::pending_bytes(&rearranged).unwrap();
         for current in [&rearranged.before, &rearranged.after] {
@@ -1567,6 +1810,7 @@ mod tests {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         let (delta, bytes) = journal_history::pending_delta(&j).unwrap();
         assert_eq!(bytes, catalog_bytes(&after).unwrap());
@@ -1604,6 +1848,7 @@ mod tests {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         let (a, _) = journal_history::pending_delta(&journal(&first, &second)).unwrap();
         journal_history::committed(&second, a["after_hash"].as_str().unwrap());
@@ -1632,6 +1877,7 @@ mod tests {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         let receipt = lib.dir(0).join(format!(
             "tools/workspaces/catalog-transactions-v4/revision-{}/journal.json",

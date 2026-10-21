@@ -1033,9 +1033,19 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                     .iter()
                     .map(|(node, from, to)| json!({"node": node, "from": from, "to": to}))
                     .collect();
-                Ok(
-                    json!({"project": id, "revision":revision, "created":outcome.created, "reopened": reopened, "moved": moved, "ledger_rows_repathed": outcome.ledger_rows_repathed}),
-                )
+                let mut answer = json!({"project": id, "revision":revision, "created":outcome.created, "reopened": reopened, "moved": moved, "ledger_rows_repathed": outcome.ledger_rows_repathed});
+                // Renames: the citations that followed, the mentions left for review, and the
+                // records that stayed complete because only names changed in their reports.
+                if !outcome.citations.is_empty() {
+                    answer["citations"] = json!(outcome.citations);
+                }
+                if !outcome.unrewritten.is_empty() {
+                    answer["unrewritten"] = json!(outcome.unrewritten);
+                }
+                if !outcome.kept_complete.is_empty() {
+                    answer["kept_complete"] = json!(outcome.kept_complete);
+                }
+                Ok(answer)
             }
             NodeCommand::Resolve { project: id, paths } => {
                 let p = project(lib, &id)?;

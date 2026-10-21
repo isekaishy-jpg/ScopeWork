@@ -210,7 +210,8 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
     out
 }
 
-const REFERENCES: &str = "tools/workspaces/scopework-cache/report-references.json";
+// v2 also indexes values written with a `0x` prefix (citations such as `Name` (`0x00401000`)).
+const REFERENCES: &str = "tools/workspaces/scopework-cache/report-references-v2.json";
 /// The canonical folder names a report mentions, under the same reuse rule as hashes.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Mentions {
@@ -219,14 +220,16 @@ struct Mentions {
     read_ns: u64,
     folders: Vec<String>,
 }
-/// Canonical folder names in `text`: 6-digit node IDs and 8-digit hexadecimal RVAs, uppercase.
+/// Canonical folder names in `text`: 6-digit node IDs and 8-digit hexadecimal values (RVAs and
+/// VAs, also after a `0x` prefix), uppercase.
 fn folder_names(text: &str) -> Vec<String> {
     static NAMES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let names =
-        NAMES.get_or_init(|| regex::Regex::new(r"(?i)\b(?:[0-9a-f]{8}|[0-9]{6})\b").unwrap());
+    let names = NAMES.get_or_init(|| {
+        regex::Regex::new(r"(?i)(?:^|[^0-9a-z_]|0x)([0-9a-f]{8}|[0-9]{6})\b").unwrap()
+    });
     let mut found: Vec<String> = names
-        .find_iter(text)
-        .map(|m| m.as_str().to_uppercase())
+        .captures_iter(text)
+        .map(|c| c[1].to_uppercase())
         .collect();
     found.sort_unstable();
     found.dedup();

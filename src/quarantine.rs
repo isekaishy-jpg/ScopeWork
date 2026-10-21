@@ -296,6 +296,7 @@ impl Library {
             ledger: false,
             repin_ledger: false,
             directed_by: None,
+            repin_ids: vec![],
         };
         self.commit_or_stage(p, journal).map(|_| true)
     }
