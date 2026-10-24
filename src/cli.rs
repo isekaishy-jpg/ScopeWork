@@ -956,12 +956,7 @@ fn run(args: Args) -> Result<Value, String> {
         if directed_by.is_some() {
             batch.directed_by = directed_by.clone();
         }
-        if batch.schema == 1
-            && !batch.create.is_empty()
-            && batch.update.is_empty()
-            && batch.reorder.is_empty()
-            && !batch.repair_legacy_links
-        {
+        if batch.is_import() {
             let job = imports::reserve(&root, project, &batch)?;
             let job = imports::run(&root, project, &job.id)?;
             if job.state != imports::JobState::Committed {
@@ -1923,16 +1918,12 @@ fn write_route(
         bytes,
     })
 }
-/// A creation-only schema-1 batch runs as a background import, outside any queue.
+/// Whether the batch in `file` runs as a background import (`Batch::is_import`).
 fn import_batch(file: &PathBuf) -> bool {
-    let Some(request) = fs::read(file)
+    fs::read(file)
         .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-    else {
-        return false;
-    };
-    let empty = |field: &str| request[field].as_array().is_none_or(Vec::is_empty);
-    request["schema"] == 1 && !empty("create") && empty("update") && empty("reorder")
+        .and_then(|b| serde_json::from_slice::<Batch>(&b).ok())
+        .is_some_and(|batch| batch.is_import())
 }
 pub(crate) fn route(command: &Command) -> Route {
     match command {
@@ -2101,6 +2092,32 @@ pub(crate) fn route(command: &Command) -> Route {
 pub(crate) fn parse(arguments: &[String]) -> Result<Args, String> {
     Args::try_parse_from(std::iter::once("research".to_string()).chain(arguments.iter().cloned()))
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod import_routing_tests {
+    use super::import_batch;
+
+    #[test]
+    fn only_a_creation_only_batch_without_link_repair_is_a_background_import() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("routing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("batch.json");
+        let create = r#"[{"parent":2,"name":"F","rva":4096}]"#;
+        for (repair, import) in [(false, true), (true, false)] {
+            std::fs::write(
+                &file,
+                format!(
+                    r#"{{"schema":1,"binary":"b","expect_revision":1,"create":{create},"repair_legacy_links":{repair}}}"#
+                ),
+            )
+            .unwrap();
+            assert_eq!(import_batch(&file), import, "repair_legacy_links {repair}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(test)]

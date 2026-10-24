@@ -49,6 +49,16 @@ pub struct Update {
     #[serde(default)]
     pub expect_node_revision: Option<u64>,
 }
+impl Batch {
+    /// A creation-only schema-1 batch: it runs as a background import, outside any queue.
+    pub fn is_import(&self) -> bool {
+        self.schema == 1
+            && !self.create.is_empty()
+            && self.update.is_empty()
+            && self.reorder.is_empty()
+            && !self.repair_legacy_links
+    }
+}
 /// What a catalog batch changed.
 #[derive(Serialize)]
 pub struct BatchOutcome {
