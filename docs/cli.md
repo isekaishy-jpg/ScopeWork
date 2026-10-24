@@ -30,7 +30,7 @@ research criteria app
 research status example
 ```
 
-Use the actual IDs returned by creation; the numbers above illustrate a fresh project. App is always node 0. A new project appears as a dashboard tab after **View > Refresh research progress**. Set binary identity before adding functions; it becomes locked once functions exist. After that, `project set-binary` accepts only an amendment, with `--expect-revision` from `project show`: every SHA-256 and every `0x` value of the current identity must remain, and new wording or mappings may be added. An amendment re-renders the report headers without reopening anything: completed records stay complete, and annotation-ledger rows pinned to those reports are re-pinned. `--expect-revision` is also accepted before enrolment, to reject concurrent identity edits. A function has one canonical owner and one unique RVA per project. RVAs are hexadecimal; node IDs are decimal.
+Use the actual IDs returned by creation; the numbers above illustrate a fresh project. App is always node 0. A new project appears as a dashboard tab after **View > Refresh research progress**. Set binary identity before adding functions; it becomes locked once functions exist. After that, `project set-binary` accepts only an amendment, with `--expect-revision` from `project show`: every SHA-256 and every `0x` value of the current identity must remain, and new wording or mappings may be added. An amendment re-renders the report headers without reopening anything: completed records stay complete, and annotation-ledger rows pinned to those reports are re-pinned. `--expect-revision` is also accepted before enrolment, to reject concurrent identity edits. Setting the identity it already has commits nothing. The project name and the binary identity are rendered into every report's header, so each must be one line without report section markers (`<!-- research-`). A command that names a project that does not exist answers `Unknown project` without creating anything. A function has one canonical owner and one unique RVA per project. RVAs are hexadecimal; node IDs are decimal.
 
 ## Project research scope
 
@@ -136,10 +136,12 @@ research node unquarantine example 152 --reason "The human lifted it" --by solo
 A quarantine takes a chunk or function out of research. Its origin is either the human's request (`human`) or a Claude cyber (safety) stop while researching the record (`cyber-stop`). A quarantined chunk covers its functions, including any added later.
 
 - **Complete everywhere.** A quarantined record's effective status is Complete for parent completion, meters, `status` counts and prerequisites; it is never ready for review or synthesis, and its report hash is not compared, so nothing reopens it.
-- **Sealed.** Creating records in it, moving records into or out of it, renaming or reordering inside it, changing its context membership, changing its own prerequisites and removing it (or a function of a quarantined chunk) are refused (`kind` `quarantined`) unless the request carries the human's instruction: `--directed-by "..."` on `node create`, `node batch`, `node delete` and `node prune` (or `"directed_by"` in their request files) and `deps set`. `node prune` without it passes over quarantined records with the reason `quarantined`. The instruction is stored with the transaction and shown by `research history show` as `directed_by`.
+- **Sealed.** Creating records in it, moving records into or out of it, renaming or reordering inside it, changing its context membership, changing its own prerequisites (including deleting a function it depends on) and removing it (or a function of a quarantined chunk) are refused (`kind` `quarantined`) unless the request carries the human's instruction: `--directed-by "..."` on `node create`, `node batch`, `node delete` and `node prune` (or `"directed_by"` in their request files) and `deps set`. `node prune` without it passes over quarantined records with the reason `quarantined`. The instruction is stored with the transaction and shown by `research history show` as `directed_by`.
 - **Usable as a prerequisite.** Other records may add or drop a quarantined function as a prerequisite without direction; later work builds on sealed research.
-- **Not applicable.** Completing, flagging or claiming a quarantined record is refused. Quarantining clears the record's review flag, claim and review-queue entries in the same transaction.
-- **Editable.** Report saves are accepted and never reopen the record.
+- **Not applicable.** Completing, reopening, resetting the status of, flagging or claiming a quarantined record is refused. Quarantining clears the record's review flag, claim and review-queue entries in the same transaction.
+- **Kept underneath.** Changes around a quarantined record never touch its own stored status: the reopen walk neither reopens it nor passes through it.
+- **Editable.** Report saves are accepted and the record stays Complete while quarantined. Changed text clears its earlier acceptance, so after a lift it needs review again; an unchanged save changes nothing.
+- **Fails closed.** If `quarantine.json` exists but cannot be read (damaged, or written by a newer version), every write to the project is refused with `quarantine_unreadable` until it is repaired; reads keep answering and treat it as holding no quarantine.
 - **Visible.** `node show` returns `quarantine` (with the carrying `node`), `status` and `read-batch` return `quarantined` per record, and `status --summary` counts them. The GUI marks them with ⊘, lists them with the **Quarantined** filter and shows the reason in the editor.
 - **Lifting** returns the record to its own status. The record moves to the `lifted` log in the journaled `quarantine.json` sidecar beside `project.json`; deleting a node drops its record.
 
@@ -205,7 +207,7 @@ Current operations use catalog format 4. Upgrade the GUI and all CLI workers tog
 
 Catalog the whole binary even for a smaller research subject. Use coherent semantic chunks for established or provisional ownership. An unresolved queue denotes uncertainty, not subsystem ownership; navigation address pages are not semantic chunks.
 
-Every node defaults to required child membership (`context_only: false`). Set `context_only: true` in a batch or with the **Context only** check box on the Research records **Organize** tab to exclude that branch from its parent's required synthesis. Its report, data, progress and canonical identity remain intact. Explicit function prerequisites remain required even when their canonical owner is contextual. Context records are never automatically completed.
+Every node defaults to required child membership (`context_only: false`). Set `context_only: true` in a batch or with the **Context only** check box on the Research records **Organize** tab to exclude that branch from its parent's required synthesis. Its report, data, progress and canonical identity remain intact. Explicit function prerequisites remain required even when their canonical owner is contextual. Context records are never automatically completed. Because a parent's completion does not depend on its context-only children, editing or completing a context-only record does not reopen the parent (changing its membership does, since that rewrites the parent's report).
 
 Membership is separate from the short Research Scope label. The label never silently excludes nodes. For a whole-client recreation, leave all inventoried functions required. CLI `status` exposes `inventory_functions`, `required_functions`, `context_functions` and per-record `required_research`. Meters count required work; the status line retains the full inventory count.
 
@@ -220,7 +222,7 @@ $project = research project show example | ConvertFrom-Json
 research node repair-links example --expect-revision $project.revision
 ```
 
-This repairs recognized internal references through the same journaled operation using current canonical identities. Changed reports require review; it does not reinstate stale completion or alter external evidence. The equivalent batch flag is `"repair_legacy_links": true`.
+This repairs recognized internal references through the same journaled operation using current canonical identities. A repair rewrites only links, so the records it touches keep their completion and their annotation-ledger pins follow the new text; it does not reinstate stale completion or alter external evidence. The equivalent batch flag is `"repair_legacy_links": true`.
 
 ## Large-library reads
 
@@ -424,7 +426,7 @@ Claims name who is working on an architecture or chunk; functions are covered by
 
 ### Review queue
 
-When a batch move, membership or order change reopens a completed record, that record enters the review queue with the reason and revision. An entry stays open until its record is complete again, so completing it needs no extra step.
+When a batch move, membership or order change reopens a completed record, that record enters the review queue with the reason and revision. So does a completed record reopened by an import's publication. An entry stays open until its record is complete again, so completing it needs no extra step.
 
 ```powershell
 research review-queue example
@@ -444,7 +446,7 @@ research history kinds
 research history append example --kind ledger-change --summary "Retyped 14 parameters" --node 42 --ref tools/annotations/ledger.json --diff-file diff.json
 ```
 
-`history show` lists entries newest first. Catalog entries summarise each transaction receipt (`revision-N/journal.json`): created and removed records, status, parent, name and membership changes, reopened completions, edited reports, moves and sidecars, and changes to the project's own fields (`project`: research scope, name, binary identity, import reservations); `--detail` adds the changed records. Every catalog change has a receipt, including scope changes and import reservations; an import's publication keeps its own receipt in its job folder. Tooling entries are appended by project tools to `tools/workspaces/history/tooling.jsonl` with a lowercase hyphenated kind, the nodes and paths concerned, and a diff of what changed rather than a copy of whole files. The `catalog` kind is reserved. Restoring from history remains a manual, reviewed operation.
+`history show` lists entries newest first. Catalog entries summarise each transaction receipt (`revision-N/journal.json`): created and removed records, status, parent, name and membership changes, reopened completions, edited reports, moves and sidecars, and changes to the project's own fields (`project`: research scope, name, binary identity, import reservations); `--detail` adds the changed records. Every catalog change has a receipt, including scope changes and import reservations; an import's publication keeps its own receipt in its job folder, and `history show` lists it as `import <job> published` at its revision, with the range of records it created. Tooling entries are appended by project tools to `tools/workspaces/history/tooling.jsonl` with a lowercase hyphenated kind, the nodes and paths concerned, and a diff of what changed rather than a copy of whole files. The `catalog` kind is reserved. Restoring from history remains a manual, reviewed operation.
 
 Every entry carries `at_unix`. Catalog receipts record their commit time, and `--from`/`--to` filter by it, so copying or restoring receipts does not move them in time; older receipts without one are dated by their `journal.json` modification time, which `journal --compact` keeps (it also writes the time into each receipt it rewrites). `--rva HEX` selects the record with that RVA (an unknown RVA is an error) and combines with `--node`; `--from` and `--to` take UTC days (`YYYY-MM-DD`, both inclusive).
 

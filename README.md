@@ -48,16 +48,19 @@ App               what the project set out to understand
 
 ## Features
 
-- **Progress at a glance.** Each project has a tab, each architecture a meter, and each chunk a segment of it. Totals show function and chunk counts and the project's research scope.
+- **Progress at a glance.** Each project has a tab, each architecture a meter, and each chunk a segment of it. Totals show function and chunk counts and the project's research scope. Related projects can share one tab as a group, with a menu to switch between them.
 - **Research records window.** Search the whole binary by name or address; write reports and evidence; flag records for review; organise the hierarchy; mark work complete when its requirements are met.
 - **Whole-binary inventories.** Enrol tens of thousands of functions with resumable batch imports and keep context-only code in the inventory without making it required work.
+- **Implementation tracker.** Record a recreation alongside the research: a free-form tree of its crates, modules or files, the researched functions placed where they are implemented, implementation-only items and their completion. The dashboard switches between **Research** and **Implementation** for each project.
+- **Quarantine.** Take a chunk or function out of research, at the human's request or after a safety stop. It counts as complete, never shows up as open work, and is sealed against structural changes unless the human directs them.
+- **Renames that follow through.** Renaming a record rewrites its citations in every report, without reopening the completed work they appear in.
 - **Built for several agents at once:**
   - A coordinator answers reads without waiting for writes, and merges queued saves into one commit.
   - Every read says which writes are pending on the records it returned.
   - The dashboard footer counts queued and running writes.
   - Agents can claim parts of the tree, and a review queue lists records that other people's changes reopened.
 - **Tool coordination.** Analysis tools can take leases on shared resources such as an annotation database. Requests of the same kind are collected into one run. Changes made outside a lease are recorded as drift.
-- **Recoverable and readable history.** Every change is a journaled transaction that survives crashes, and `research history show` lists what changed, when and why.
+- **Recoverable and readable history.** Every change is a journaled transaction that survives crashes. `research history show` and the **Project history** window list what changed, when and why, filtered by record, address, kind or day.
 - **Your files, on your machine.** A research home is a plain folder of Markdown reports and JSON. Projects are isolated from each other by exact binary identity, and uninstalling never touches your research.
 
 ## Install
@@ -80,7 +83,7 @@ research status lumen --summary
 research --version                              # Scopework 0.13.1a (Build 000003)
 ```
 
-Tokens make every write conditional on what the writer last read, so concurrent agents cannot silently overwrite each other. The [CLI guide](docs/cli.md) covers batches, prerequisites, claims, the review queue, history, the coordinator and tool leases.
+Tokens make every write conditional on what the writer last read, so concurrent agents cannot silently overwrite each other. The [CLI guide](docs/cli.md) covers batches, prerequisites, claims, the review queue, quarantine, history, dashboard groups, the implementation tracker, the coordinator and tool leases.
 
 ## Status
 
