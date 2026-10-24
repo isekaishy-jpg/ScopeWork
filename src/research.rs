@@ -332,6 +332,8 @@ pub struct Library {
     pub root: PathBuf,
     pub projects: Vec<Project>,
     pub busy_projects: Vec<String>,
+    /// Projects a whole-library open could not read, with why; the others are still listed.
+    pub unreadable: Vec<(String, String)>,
     /// Why a pending transaction could not resume when this read-only view was opened; the
     /// view shows the committed catalog. Writes stay blocked until recovery succeeds.
     pub recovery_blocked: Option<String>,
@@ -946,6 +948,7 @@ impl Library {
             root,
             projects: vec![project],
             busy_projects: vec![],
+            unreadable: vec![],
             recovery_blocked: None,
             overlay: Some(overlay),
             staging: None,
@@ -985,6 +988,7 @@ impl Library {
                 root: root.clone(),
                 projects: vec![],
                 busy_projects: vec![],
+                unreadable: vec![],
                 _lock: None,
                 recovery_blocked: None,
                 overlay: None,
@@ -1001,7 +1005,8 @@ impl Library {
                 match Self::read_project(root.clone(), &id) {
                     Ok(mut project) => lib.projects.append(&mut project.projects),
                     Err(e) if e.contains("is busy") => lib.busy_projects.push(id),
-                    Err(e) => return Err(e),
+                    // One stray or damaged folder must not hide every other project.
+                    Err(e) => lib.unreadable.push((id, e)),
                 }
             }
             lib.projects.sort_by_key(|p| p.name.clone());
@@ -1116,6 +1121,7 @@ impl Library {
             root,
             projects: project.into_iter().collect(),
             busy_projects: vec![],
+            unreadable: vec![],
             recovery_blocked,
             overlay: None,
             staging: None,
@@ -1159,6 +1165,7 @@ impl Library {
             root: PathBuf::new(),
             projects: vec![p.clone()],
             busy_projects: vec![],
+            unreadable: vec![],
             _lock: None,
             recovery_blocked: None,
             overlay: None,

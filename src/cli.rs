@@ -1164,6 +1164,12 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
         }
         Command::Project(command) => match command {
             ProjectCommand::List => {
+                for (project, error) in &lib.unreadable {
+                    eprintln!(
+                        "{}",
+                        json!({"warning": format!("Project {project} could not be read and is not listed: {error}"), "kind": "unreadable_project", "project": project})
+                    );
+                }
                 if !lib.busy_projects.is_empty() {
                     return Err(format!(
                         "Projects busy: {}. Retry or address a project directly.",

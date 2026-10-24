@@ -181,6 +181,7 @@ pub(super) fn snapshot(
         root: root.clone(),
         projects: vec![],
         busy_projects: vec![],
+        unreadable: vec![],
         _lock: None,
         recovery_blocked: None,
         overlay: None,

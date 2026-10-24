@@ -350,6 +350,7 @@ impl Library {
             root,
             projects: vec![project],
             busy_projects: vec![],
+            unreadable: vec![],
             recovery_blocked: None,
             overlay: None,
             staging: None,

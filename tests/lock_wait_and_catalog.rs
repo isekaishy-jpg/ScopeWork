@@ -214,3 +214,22 @@ fn wait_times_out_and_session_answers_one_line_per_command() {
     assert_eq!(lines[1]["kind"], "usage");
     assert_eq!(lines[2]["kind"], "usage");
 }
+
+#[test]
+fn project_list_skips_and_reports_an_unreadable_folder() {
+    let f = Fixture::new();
+    let stray = f.projects().join("fixture - Copy");
+    fs::create_dir_all(&stray).unwrap();
+    fs::copy(
+        f.projects().join("fixture/project.json"),
+        stray.join("project.json"),
+    )
+    .unwrap();
+    let o = f.run(&["project", "list"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let listed: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    let warning: Value = serde_json::from_str(String::from_utf8_lossy(&o.stderr).trim()).unwrap();
+    assert_eq!(warning["kind"], "unreadable_project");
+    assert_eq!(warning["project"], "fixture - Copy");
+}
