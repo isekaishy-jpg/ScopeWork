@@ -480,6 +480,21 @@ impl Library {
             Ok(json!({"complete": complete, "changed": changed}))
         })
     }
+    /// Where every placed record is implemented: record to its node's path.
+    pub fn impl_placements(&self, p: usize) -> Result<HashMap<u64, String>> {
+        let tree = self.read_tree(p)?;
+        Ok(self
+            .all_shards(p, &tree)?
+            .into_iter()
+            .flat_map(|(id, shard)| {
+                let path = Self::node_path(&tree, id);
+                shard
+                    .placements
+                    .into_iter()
+                    .map(move |pl| (pl.record, path.clone()))
+            })
+            .collect())
+    }
     /// Where `record` is implemented: its node and that node's path, or null.
     pub fn impl_where(&self, p: usize, record: u64) -> Result<Value> {
         let tree = self.read_tree(p)?;

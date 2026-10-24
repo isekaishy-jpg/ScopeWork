@@ -541,8 +541,9 @@ impl ResearchUi {
                 classic::label(ui, report.display().to_string(), None);
                 if n.kind == Kind::Function {
                     let placed = match &self.implemented_in {
-                        Some(path) => format!("Implemented in: {path}"),
-                        None => "Not placed in the implementation tracker.".into(),
+                        Ok(Some(path)) => format!("Implemented in: {path}"),
+                        Ok(None) => "Not placed in the implementation tracker.".into(),
+                        Err(e) => format!("Implemented in: unavailable ({e})"),
                     };
                     classic::label(ui, placed, None);
                 }

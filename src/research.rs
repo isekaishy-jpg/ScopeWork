@@ -1652,7 +1652,7 @@ pub struct ResearchUi {
     status: Status,
     blockers: Vec<String>,
     /// Where the loaded record is implemented, from the implementation tracker.
-    implemented_in: Option<String>,
+    implemented_in: std::result::Result<Option<String>, String>,
     /// Message styling: errors in the alert colour.
     message_error: bool,
     tab: usize,
@@ -1721,7 +1721,7 @@ impl ResearchUi {
             flag_reason: String::new(),
             status: Status::NotStarted,
             blockers: vec![],
-            implemented_in: None,
+            implemented_in: Ok(None),
             message_error: false,
             tab: 0,
             confirm_complete: false,
@@ -2372,7 +2372,7 @@ mod background_ui_tests {
             dependencies: String::new(),
             status: Status::NotStarted,
             blockers: vec![],
-            implemented_in: None,
+            implemented_in: Ok(None),
         }
     }
     fn fixture_project(id: &str) -> std::sync::Arc<Project> {

@@ -99,8 +99,9 @@ pub(super) struct Loaded {
     pub dependencies: String,
     pub status: Status,
     pub blockers: Vec<String>,
-    /// Where the record is implemented, from the implementation tracker.
-    pub implemented_in: Option<String>,
+    /// Where the record is implemented, from the implementation tracker; an error when the
+    /// tracker cannot be read, which never stops the record itself from loading.
+    pub implemented_in: std::result::Result<Option<String>, String>,
 }
 pub(super) fn load(project: &str, id: u64) -> Result<Loaded> {
     let root = crate::paths::home(None)?.join("projects");
@@ -123,8 +124,34 @@ pub(super) fn load(project: &str, id: u64) -> Result<Loaded> {
         dependencies: record.dependency_rvas,
         status: record.effective_status,
         blockers: lib.completion_blockers(0, id)?,
-        implemented_in: lib.impl_where(0, id)?["path"].as_str().map(str::to_string),
+        implemented_in: implemented_in(&lib, id),
     })
+}
+
+/// Where record `id` of `lib`'s project is implemented. The placement map is read from every
+/// tracker shard once per project revision and kept for the next record (tracker changes raise
+/// the revision, so it never answers from an older tracker).
+fn implemented_in(lib: &Library, id: u64) -> std::result::Result<Option<String>, String> {
+    type Placements = (PathBuf, u64, Arc<HashMap<u64, String>>);
+    static CACHE: std::sync::Mutex<Option<Placements>> = std::sync::Mutex::new(None);
+    let project = lib.projects.first().ok_or("Project was removed")?;
+    let key = (lib.root.join(&project.id), project.revision);
+    let cached = CACHE.lock().ok().and_then(|c| {
+        c.as_ref()
+            .filter(|c| (&c.0, c.1) == (&key.0, key.1))
+            .map(|c| c.2.clone())
+    });
+    let placements = match cached {
+        Some(placements) => placements,
+        None => {
+            let placements = Arc::new(lib.impl_placements(0)?);
+            if let Ok(mut cache) = CACHE.lock() {
+                *cache = Some((key.0, key.1, placements.clone()));
+            }
+            placements
+        }
+    };
+    Ok(placements.get(&id).cloned())
 }
 
 /// What one project contributes to the refresh fingerprint: its catalog's stamp, plus the stamps
@@ -553,5 +580,37 @@ mod tests {
         );
         let beta = skipped.projects.iter().find(|p| p.id == "beta").unwrap();
         assert_eq!(beta.research_scope, "Changed");
+    }
+
+    #[test]
+    fn where_a_record_is_implemented_follows_the_tracker_and_never_fails_the_load() {
+        let home = Home(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target/test-workspaces")
+                .join(format!("placements-{}", uuid::Uuid::new_v4())),
+        );
+        let root = home.0.join("projects");
+        fs::create_dir_all(&root).unwrap();
+        let mut lib = Library::open(root.clone()).unwrap();
+        lib.create("alpha", "Alpha", "synthetic").unwrap();
+        drop(lib);
+        let mut lib = Library::open_project(root.clone(), Some("alpha")).unwrap();
+        let arch = lib.add(0, 0, "Arch", "").unwrap();
+        let chunk = lib.add(0, arch, "Chunk", "").unwrap();
+        let function = lib.add(0, chunk, "Alloc", "1000").unwrap();
+        assert_eq!(implemented_in(&lib, function), Ok(None));
+        let krate = lib.impl_add(0, None, "alpha_rs").unwrap();
+        lib.impl_place(0, krate, &[function]).unwrap();
+        assert_eq!(implemented_in(&lib, function), Ok(Some("alpha_rs".into())));
+        // A tracker change raises the revision, so the cached map is replaced.
+        lib.impl_rename(0, krate, "alpha_core").unwrap();
+        assert_eq!(
+            implemented_in(&lib, function),
+            Ok(Some("alpha_core".into()))
+        );
+        // An unreadable tracker answers an error for this field alone.
+        fs::write(root.join("alpha/implementation/tree.json"), "{not json").unwrap();
+        lib.set_scope(0, "Bump", lib.projects[0].revision).unwrap();
+        assert!(implemented_in(&lib, function).is_err());
     }
 }
