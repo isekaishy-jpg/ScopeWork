@@ -307,5 +307,12 @@ fn a_record_named_twice_is_placed_once_and_a_cyclic_tree_cannot_hang() {
     let started = std::time::Instant::now();
     f.ok(&["impl", "show", "fixture", "--node", "1"]);
     f.ok(&["impl", "where", "fixture", "3"]);
+    // A move whose ancestor walk meets the cycle is refused instead of looping.
+    let other = f.ok(&["impl", "add", "fixture", "--name", "other"])["node"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let error = f.fails(&["impl", "move", "fixture", &other, "--parent", "1"]);
+    assert!(error.contains("cycle"), "{error}");
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
 }

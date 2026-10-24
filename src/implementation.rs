@@ -290,11 +290,18 @@ impl Library {
             Self::node_exists(&c.tree, node)?;
             if let Some(parent) = parent {
                 Self::node_exists(&c.tree, parent)?;
-                // The new parent may not be the node or below it.
+                // The new parent may not be the node or below it. `seen` stops at a cycle a
+                // hand-edited tree.json may hold.
+                let mut seen = HashSet::new();
                 let mut current = Some(parent);
                 while let Some(id) = current {
                     if id == node {
                         return Err("A node cannot move inside itself.".into());
+                    }
+                    if !seen.insert(id) {
+                        return Err(format!(
+                            "The implementation tree has a cycle through node {id}; repair {TREE}."
+                        ));
                     }
                     current = c
                         .tree
