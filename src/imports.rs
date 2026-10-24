@@ -689,8 +689,20 @@ fn publish(
         let _lease = Library::commit_lease(root, &job.project)?;
         *job.timings_ms.entry("publication_wait".into()).or_default() += elapsed(lock_start);
         let hold = Instant::now();
-        if digest(&fs::read(project_root.join("project.json")).map_err(|e| e.to_string())?)
-            != journal.before_hash
+        // A catalog transaction left pending by a process that died since the read above would
+        // be applied after this publication and conflict with it: read again, which recovers it.
+        let pending = ["catalog-transactions-v4", "catalog-transactions"]
+            .iter()
+            .any(|folder| {
+                project_root
+                    .join("tools/workspaces")
+                    .join(folder)
+                    .join("pending/journal.json")
+                    .is_file()
+            });
+        if pending
+            || digest(&fs::read(project_root.join("project.json")).map_err(|e| e.to_string())?)
+                != journal.before_hash
         {
             continue;
         }
