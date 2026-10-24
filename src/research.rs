@@ -216,27 +216,36 @@ pub(crate) fn valid_id(id: &str) -> bool {
             && (id.starts_with("com") || id.starts_with("lpt"))
             && matches!(id.as_bytes()[3], b'1'..=b'9'))
 }
-fn relative(project: &Project, n: &Node) -> String {
-    if n.kind == Kind::App {
-        return "app.md".into();
+/// A record's report path relative to its project folder, given its parent's report path (none
+/// for the App and architectures). The one rule for report locations: `app.md`,
+/// `architectures/<id>/research.md`, then a folder per chunk (`<id>`) and per function (`<RVA>`)
+/// inside the parent's folder.
+pub(crate) fn report_path(n: &Node, parent: Option<&str>) -> String {
+    match n.kind {
+        Kind::App => "app.md".into(),
+        Kind::Architecture => format!("architectures/{:06}/research.md", n.id),
+        Kind::Chunk | Kind::Function => {
+            let folder = match n.kind {
+                Kind::Function => format!("{:08X}", n.rva.unwrap()),
+                _ => format!("{:06}", n.id),
+            };
+            format!(
+                "{}/{folder}/research.md",
+                parent.unwrap_or_default().trim_end_matches("/research.md")
+            )
+        }
     }
-    let folder = match n.kind {
-        Kind::Function => format!("{:08X}", n.rva.unwrap()),
-        _ => format!("{:06}", n.id),
-    };
-    if n.kind == Kind::Architecture {
-        return format!("architectures/{folder}/research.md");
+}
+fn relative(project: &Project, n: &Node) -> String {
+    if matches!(n.kind, Kind::App | Kind::Architecture) {
+        return report_path(n, None);
     }
     let parent = project
         .nodes
         .iter()
         .find(|v| Some(v.id) == n.parent)
         .unwrap();
-    let parent_path = relative(project, parent);
-    format!(
-        "{}/{folder}/research.md",
-        parent_path.trim_end_matches("/research.md")
-    )
+    report_path(n, Some(&relative(project, parent)))
 }
 
 // One project-local destination for each kind of reversing material.

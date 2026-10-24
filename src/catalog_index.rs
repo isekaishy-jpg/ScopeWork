@@ -33,19 +33,10 @@ impl<'a> Index<'a> {
             }
             let n = nodes[&id];
             let value = match n.kind {
-                Kind::App => "app.md".to_string(),
-                Kind::Architecture => format!("architectures/{:06}/research.md", n.id),
-                _ => {
+                Kind::App | Kind::Architecture => report_path(n, None),
+                Kind::Chunk | Kind::Function => {
                     let parent = path(n.parent.unwrap(), nodes, paths);
-                    let folder = if n.kind == Kind::Function {
-                        format!("{:08X}", n.rva.unwrap())
-                    } else {
-                        format!("{:06}", n.id)
-                    };
-                    format!(
-                        "{}/{folder}/research.md",
-                        parent.trim_end_matches("/research.md")
-                    )
+                    report_path(n, Some(&parent))
                 }
             };
             paths.insert(id, value.clone());
@@ -260,5 +251,61 @@ impl<'a> Index<'a> {
             self.state(&hashes, *id, &mut cache, &mut active);
         }
         cache
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: u64, parent: Option<u64>, kind: Kind, rva: Option<u32>) -> Node {
+        Node {
+            context_only: false,
+            id,
+            parent,
+            kind,
+            name: format!("n{id}"),
+            status: Status::NotStarted,
+            rva,
+            revision: 0,
+            accepted_hash: None,
+            accepted_prerequisites: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_index_and_the_library_place_reports_alike() {
+        let project = Project {
+            layout_version: 5,
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            binary: String::new(),
+            research_scope: String::new(),
+            next_id: 5,
+            revision: 0,
+            structural_epoch: 0,
+            active_import: None,
+            last_import: None,
+            nodes: vec![
+                node(0, None, Kind::App, None),
+                node(1, Some(0), Kind::Architecture, None),
+                node(2, Some(1), Kind::Chunk, None),
+                node(3, Some(2), Kind::Function, Some(0x0040_1000)),
+                node(4, Some(2), Kind::Function, Some(0xABC)),
+            ],
+            dependencies: vec![],
+        };
+        let index = Index::new(&project);
+        let expected = [
+            (0, "app.md"),
+            (1, "architectures/000001/research.md"),
+            (2, "architectures/000001/000002/research.md"),
+            (3, "architectures/000001/000002/00401000/research.md"),
+            (4, "architectures/000001/000002/00000ABC/research.md"),
+        ];
+        for (id, path) in expected {
+            assert_eq!(index.paths[&id], path);
+            assert_eq!(relative(&project, &project.nodes[id as usize]), path);
+        }
     }
 }
