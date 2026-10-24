@@ -238,8 +238,9 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
     out
 }
 
-// v2 also indexes values written with a `0x` prefix (citations such as `Name` (`0x00401000`)).
-const REFERENCES: &str = "tools/workspaces/scopework-cache/report-references-v2.json";
+// v2 also indexes values written with a `0x` prefix (citations such as `Name` (`0x00401000`));
+// v3 indexes hexadecimal values of 8 to 16 digits, so VAs above 4 GiB are found too.
+const REFERENCES: &str = "tools/workspaces/scopework-cache/report-references-v3.json";
 /// The canonical folder names a report mentions, under the same reuse rule as hashes.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Mentions {
@@ -248,12 +249,12 @@ struct Mentions {
     read_ns: u64,
     folders: Vec<String>,
 }
-/// Canonical folder names in `text`: 6-digit node IDs and 8-digit hexadecimal values (RVAs and
-/// VAs, also after a `0x` prefix), uppercase.
+/// Canonical folder names in `text`: 6-digit node IDs and hexadecimal values of 8 to 16 digits
+/// (RVAs, and VAs including those above 4 GiB, also after a `0x` prefix), uppercase.
 fn folder_names(text: &str) -> Vec<String> {
     static NAMES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let names = NAMES.get_or_init(|| {
-        regex::Regex::new(r"(?i)(?:^|[^0-9a-z_]|0x)([0-9a-f]{8}|[0-9]{6})\b").unwrap()
+        regex::Regex::new(r"(?i)(?:^|[^0-9a-z_]|0x)([0-9a-f]{8,16}|[0-9]{6})\b").unwrap()
     });
     let mut found: Vec<String> = names
         .captures_iter(text)
@@ -388,6 +389,15 @@ mod tests {
         set_mtime(&path, mtime);
         assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("bbbb")));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn citations_of_vas_above_four_gigabytes_are_indexed() {
+        let names = folder_names("`Alloc` (`0x140001000`) beside ../000184/00401000/research.md");
+        for name in ["140001000", "000184", "00401000"] {
+            assert!(names.contains(&name.to_string()), "{name}: {names:?}");
+        }
+        assert!(folder_names("count 1234567 and 0x10").is_empty());
     }
 
     #[test]
