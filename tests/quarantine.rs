@@ -799,3 +799,76 @@ fn reopening_a_quarantined_record_is_refused() {
     assert_eq!(node["status"], "Complete");
     assert!(node["accepted_hash"].is_string());
 }
+
+#[test]
+fn a_sealed_records_prerequisites_change_only_by_direction_and_record_it() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "human",
+        "--reason",
+        "Voice code only",
+    ]);
+    let structural = f.ok(&["node", "show", "fixture", "3"])["structural_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.ok(&[
+        "deps",
+        "set",
+        "fixture",
+        "3",
+        "2000",
+        "--expect",
+        &structural,
+        "--directed-by",
+        "The human: F1 calls F2",
+    ]);
+    let history = f.ok(&["history", "show", "fixture", "--only", "catalog"]);
+    assert_eq!(
+        history["entries"][0]["directed_by"], "The human: F1 calls F2",
+        "{history}"
+    );
+    // Deleting F2 would drop F1's prerequisite: sealed.
+    let binary = f.ok(&["project", "revision", "fixture"])["binary"].clone();
+    let request =
+        serde_json::json!({"schema":1,"binary":binary,"expect_revision":f.revision(),"ids":[5]});
+    let path = f.home.join("delete.json");
+    fs::write(&path, request.to_string()).unwrap();
+    let error = f.refused(&[
+        "node",
+        "delete",
+        "fixture",
+        "--file",
+        path.to_str().unwrap(),
+    ]);
+    assert!(error.contains("Removing a prerequisite of"), "{error}");
+    let preview = f.ok(&[
+        "node",
+        "delete",
+        "fixture",
+        "--file",
+        path.to_str().unwrap(),
+        "--directed-by",
+        "The human: F2 goes",
+    ]);
+    f.ok(&[
+        "node",
+        "delete",
+        "fixture",
+        "--file",
+        path.to_str().unwrap(),
+        "--directed-by",
+        "The human: F2 goes",
+        "--expect",
+        preview["token"].as_str().unwrap(),
+    ]);
+    assert_eq!(
+        f.ok(&["deps", "get", "fixture", "3"])["requires"],
+        serde_json::json!([])
+    );
+}

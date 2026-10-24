@@ -221,6 +221,15 @@ impl Library {
             ordered.sort_unstable();
             self.check_seal(p, ordered, directed_by, "Removing")?;
         }
+        // A surviving record that loses a prerequisite has its own prerequisites changed, which
+        // the seal covers like any other change to them.
+        let losing: std::collections::BTreeSet<u64> = before
+            .dependencies
+            .iter()
+            .filter(|e| removed.contains(&e.prerequisite) && !removed.contains(&e.dependent))
+            .map(|e| e.dependent)
+            .collect();
+        self.check_seal(p, losing, directed_by, "Removing a prerequisite of")?;
         let archive = format!(
             "tools/workspaces/deleted-nodes/revision-{}",
             before.revision + 1
