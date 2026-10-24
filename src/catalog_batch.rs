@@ -1288,7 +1288,9 @@ impl Library {
                 .iter()
                 .filter_map(|id| after.nodes[positions[id]].parent),
         );
-        if batch.repair_legacy_links || renames.is_empty() {
+        // Link repair and rename citations rewrite reports mechanically; everything else a
+        // batch changes is structural.
+        if renames.is_empty() && !batch.repair_legacy_links {
             structural.extend(all_changed.iter().copied());
         }
         structural.extend(moves.iter().map(|m| m.id));
@@ -1603,6 +1605,58 @@ mod tests {
         .unwrap();
         lib.apply_batch(0, &batch).unwrap();
         assert_eq!(lib.projects[0].nodes[f as usize].name, "New");
+    }
+    #[test]
+    fn link_repair_keeps_completion_and_follows_ledger_pins() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        // Function 3 cites its legacy flat location; complete it as written.
+        let token = lib.report_token(0, 3).unwrap();
+        lib.save_report(
+            0,
+            3,
+            "See functions/00001000/research.md.",
+            "Evidence",
+            false,
+            &token,
+        )
+        .unwrap();
+        let completion = lib.completion_token(0, 3).unwrap();
+        lib.save_report(
+            0,
+            3,
+            "See functions/00001000/research.md.",
+            "Evidence",
+            true,
+            &completion,
+        )
+        .unwrap();
+        let old_hash = lib.projects[0].nodes[3].accepted_hash.clone().unwrap();
+        let ledger = workspace.0.join("alpha").join(ledger::LEDGER);
+        fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        fs::write(
+            &ledger,
+            format!(r#"{{"schema":1,"rows":[{{"report_sha256":"{old_hash}"}}]}}"#),
+        )
+        .unwrap();
+        let batch: Batch = serde_json::from_value(serde_json::json!({"schema":1,
+            "binary":lib.projects[0].binary,"expect_revision":lib.projects[0].revision,
+            "repair_legacy_links":true}))
+        .unwrap();
+        lib.apply_batch(0, &batch).unwrap();
+        let body = lib.read(0, 3).unwrap().0;
+        assert!(!body.contains("functions/00001000"), "{body}");
+        assert_eq!(
+            lib.effective(0, 3),
+            Status::Complete,
+            "a link repair keeps completion"
+        );
+        let new_hash = lib.projects[0].nodes[3].accepted_hash.clone().unwrap();
+        assert_ne!(new_hash, old_hash);
+        assert!(
+            fs::read_to_string(&ledger).unwrap().contains(&new_hash),
+            "the pin follows"
+        );
     }
     #[test]
     fn project_locks_isolate_writes_and_preserve_gui_snapshots() {
