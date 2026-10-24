@@ -6,7 +6,7 @@ Before starting a maintenance session, read `TODO.md` for the user's deferred wo
 
 - Keep the approved dashboard design. Do not redesign it while implementing research storage or workflows.
 - Canonical hierarchy: App -> Architecture category -> Chunk -> Function. Research composes upward. Every node has exactly one canonical Markdown report in its project directory.
-- Update canonical files in place; do not create overlapping follow-up reports. Keep each function's supporting data in architectures/<category>/<chunk>/<RVA>/data/ beside its research.md, and link it from that report.
+- Update canonical files in place; do not create overlapping follow-up reports. Keep each function's supporting data in architectures/<category>/<chunk>/<RVA>/data/ beside its research.md (created when first used), and link it from that report.
 - Each parent report must synthesize its children. All required children and the parent's own report must be complete before the parent can be complete.
 - Research assignments have fixed scopes. A function report establishes that function's behavior, inputs, outputs, side effects, boundaries and connections with evidence. A chunk synthesizes completed function reports into control flow, data flow and external interactions. An architecture synthesizes completed chunks into subsystem behavior and interfaces. The app synthesizes completed architectures to fulfill the project's declared research scope and relevant subsystem interactions.
 - Completed children make a parent ready for synthesis; they do not automatically complete it. Review the parent's own understanding separately at every level.
@@ -21,7 +21,7 @@ Before starting a maintenance session, read `TODO.md` for the user's deferred wo
 
 - Every research project owns tools/profiles, tools/scripts, tools/instrumentation and tools/bin. Shared tool databases and working data belong in tools/workspaces, tools/logs or tools/scratch. Function-specific captures, exports, logs and evidence belong in that function's data/ folder. Do not create project-level data/evidence dumps or parallel research reports. Canonical architecture reports are architectures/<category>/research.md and chunk reports are architectures/<category>/<chunk>/research.md; the app report is app.md.
 
-- Maintain function prerequisites through the app or research deps set. Each function has dep.toml and prereq.toml as synchronized generated views of the project dependency graph. Do not duplicate shared function research or count it twice. Prerequisite changes require dependent-report review; adding a use does not reopen the shared prerequisite.
+- Maintain function prerequisites through the app or research deps set; the catalog's dependency graph is the only copy, and `deps get` and the GUI show both directions. Do not duplicate shared function research or count it twice. Record folders hold only their report and what research stores beside it: create nothing empty there. Prerequisite changes require dependent-report review; adding a use does not reopen the shared prerequisite.
 
 - Use the documented research CLI for catalog/report mutations; read docs/cli.md. Resolve the home with research home; never assume the checkout is the data home. Upgrade the current catalog layout with a recoverable migration; do not import historical material automatically. Carry-over is manual. Keep app installation separate from research; uninstall must preserve user research.
 

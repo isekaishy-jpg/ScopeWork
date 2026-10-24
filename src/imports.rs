@@ -3,7 +3,6 @@ use super::*;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     io::Write,
-    sync::Arc,
     time::Instant,
 };
 const SEGMENT: usize = 256;
@@ -68,7 +67,6 @@ struct Unit {
 struct Prepared {
     id: u64,
     folder: String,
-    function: bool,
     files: Vec<(Output, Vec<u8>)>,
 }
 #[derive(Serialize, Deserialize)]
@@ -397,7 +395,6 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
             u.node.id,
         )
     });
-    let metadata = Arc::new((project.id.clone(), project.binary.clone()));
     let project_root = root.join(&job.project);
     job.timings_ms
         .insert("catalog_preparation".into(), elapsed(start));
@@ -413,10 +410,9 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
             let mut tasks = vec![];
             for part in chunk.chunks(chunk.len().div_ceil(WORKERS)) {
                 let part = part.to_vec();
-                let metadata = metadata.clone();
                 tasks.push(background::spawn(
                     solworker::SWExecutionClass::Low,
-                    move || render_files(part, &metadata.0, &metadata.1),
+                    move || render_files(part),
                 )?);
             }
             let mut prepared = vec![];
@@ -516,18 +512,26 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
     fault("ready");
     publish(root, job, folder, &reservation, new_nodes)
 }
-fn render_files(units: Vec<Unit>, project: &str, binary: &str) -> Result<Vec<Prepared>> {
-    units.into_iter().map(|u| {
-        let folder=u.path.trim_end_matches("/research.md").to_string();let mut files=vec![(u.path,u.report.into_bytes())];
-        if let Some(rva)=u.node.rva {
-            let deps=DependencyFile {schema:1,project:project.into(),binary:binary.into(),function_rva:format!("0x{rva:08X}"),requires:vec![]};
-            let inbound=PrerequisiteFile {schema:1,project:project.into(),binary:binary.into(),function_rva:format!("0x{rva:08X}"),required_by:vec![]};
-            for (name,body) in [("dep.toml",toml::to_string_pretty(&deps)),("prereq.toml",toml::to_string_pretty(&inbound))] {
-                files.push((format!("{folder}/{name}"),format!("# Managed by Scopework. Edit through the app or research deps set.\n{}",body.map_err(|e|e.to_string())?).into_bytes()));
-            }
-        }
-        Ok(Prepared {id:u.node.id,folder,function:u.node.kind==Kind::Function,files:files.into_iter().map(|(path,bytes)|(Output{path,hash:digest(&bytes),bytes:bytes.len()},bytes)).collect()})
-    }).collect()
+fn render_files(units: Vec<Unit>) -> Result<Vec<Prepared>> {
+    units
+        .into_iter()
+        .map(|u| {
+            let folder = u.path.trim_end_matches("/research.md").to_string();
+            let bytes = u.report.into_bytes();
+            Ok(Prepared {
+                id: u.node.id,
+                folder,
+                files: vec![(
+                    Output {
+                        path: u.path,
+                        hash: digest(&bytes),
+                        bytes: bytes.len(),
+                    },
+                    bytes,
+                )],
+            })
+        })
+        .collect()
 }
 fn install_folder(root: &Path, workspace: &Path, job: &Job, unit: &Prepared) -> Result<()> {
     let target = root.join(&unit.folder);
@@ -556,9 +560,6 @@ fn install_folder(root: &Path, workspace: &Path, job: &Job, unit: &Prepared) -> 
                 .map_err(|e| e.to_string())?
                 .write_all(job.id.as_bytes())
                 .map_err(|e| e.to_string())?;
-        }
-        if unit.function {
-            fs::create_dir_all(stage.join("data")).map_err(|e| e.to_string())?;
         }
         if !target.parent().ok_or("Missing parent directory")?.is_dir() {
             return Err("Missing committed/prepared parent directory".into());
@@ -768,6 +769,10 @@ pub(super) fn recover(root: &Path, project: &mut Project) -> Result<()> {
         *project = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     }
     let mut job: Job = read(&folder.join("manifest.json"))?;
+    // The catalog owns the installed folders now; ownership markers only served a resume or a
+    // cancel, which a published job no longer allows.
+    let leftover = remove_markers(root, &folder, &id);
+    job.warnings.extend(leftover);
     job.state = JobState::Committed;
     job.prepared = job.total;
     job.revision = Some(project.revision);
@@ -778,6 +783,37 @@ pub(super) fn recover(root: &Path, project: &mut Project) -> Result<()> {
     rename_retrying(&pending, &committed)
         .map_err(|e| format!("Cannot replace {}: {e}", committed.display()))?;
     Ok(())
+}
+/// Removes job `id`'s ownership markers from every folder its segments installed. Returns a
+/// warning for each marker that could not be removed; `project tidy` removes them later.
+fn remove_markers(project_root: &Path, folder: &Path, id: &str) -> Vec<String> {
+    let marker = format!(".scopework-import-{id}");
+    let mut folders = HashSet::new();
+    if let Ok(entries) = fs::read_dir(folder.join("segments")) {
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(segment) = read::<Segment>(&path) {
+                for output in segment.outputs {
+                    if let Some(parent) = Path::new(&output.path).parent() {
+                        folders.insert(parent.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    let mut warnings = vec![];
+    for relative in folders {
+        let path = project_root.join(&relative).join(&marker);
+        if path.is_file()
+            && let Err(e) = fs::remove_file(&path)
+        {
+            warnings.push(format!("Kept import marker {}: {e}", path.display()));
+        }
+    }
+    warnings.sort();
+    warnings
 }
 fn cancel_preparation(root: &Path, job: &mut Job, folder: &Path) -> Result<()> {
     job.state = JobState::Cancelling;

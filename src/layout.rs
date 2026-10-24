@@ -355,17 +355,6 @@ pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
             atomic(&path, rewritten.as_bytes())?;
         }
     }
-    // Refresh generated dependency views before committing the new catalog.
-    let temporary = Library {
-        busy_projects: vec![],
-        root: root.parent().ok_or("Missing library directory")?.into(),
-        projects: vec![project.clone()],
-        _lock: None,
-        recovery_blocked: None,
-        overlay: None,
-        staging: None,
-    };
-    temporary.sync_dependency_files(0)?;
     // The catalog is the commit point. The retained journal contains the original catalog and reports.
     project.layout_version = 2;
     project.revision += 1;

@@ -124,6 +124,8 @@ mod records_ui;
 mod reopen;
 #[path = "report_hashes.rs"]
 mod report_hashes;
+#[path = "tidy.rs"]
+mod tidy;
 pub use catalog_batch::Batch;
 pub use catalog_batch::Removal;
 pub use catalog_batch::ReviewFlag;
@@ -267,6 +269,11 @@ fn ensure_folders(dir: &Path) -> Result<()> {
         Err(e) => return Err(e.to_string()),
     }
     Ok(())
+}
+/// Opens a function's data folder, creating it first: data folders exist only once used.
+fn open_data_folder(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    open_folder(path)
 }
 fn open_folder(path: &Path) -> Result<()> {
     #[cfg(target_os = "windows")]
@@ -1973,28 +1980,6 @@ pub struct Dependency {
     pub dependent: u64,
     pub prerequisite: u64,
 }
-#[derive(Serialize)]
-struct FunctionTag {
-    node_id: u64,
-    rva: String,
-    report: String,
-}
-#[derive(Serialize)]
-struct DependencyFile {
-    schema: u32,
-    project: String,
-    binary: String,
-    function_rva: String,
-    requires: Vec<FunctionTag>,
-}
-#[derive(Serialize)]
-struct PrerequisiteFile {
-    schema: u32,
-    project: String,
-    binary: String,
-    function_rva: String,
-    required_by: Vec<FunctionTag>,
-}
 impl Library {
     fn validate_dependencies(&self, p: usize, edges: &[Dependency]) -> Result<()> {
         let functions: std::collections::HashSet<_> = self.projects[p]
@@ -2041,84 +2026,6 @@ impl Library {
         for id in functions {
             if !visit(id, edges, &mut Default::default(), &mut done) {
                 return Err("That creates a prerequisite cycle. These tags describe research prerequisites, not every call edge.".into());
-            }
-        }
-        Ok(())
-    }
-    fn sync_dependency_files(&self, p: usize) -> Result<()> {
-        self.sync_dependency_subset(p, None)
-    }
-    fn sync_dependency_subset(
-        &self,
-        p: usize,
-        only: Option<&std::collections::HashSet<u64>>,
-    ) -> Result<()> {
-        let project = &self.projects[p];
-        let index = catalog_index::Index::new(project);
-        let mut incoming: std::collections::HashMap<u64, Vec<u64>> = Default::default();
-        for e in &project.dependencies {
-            incoming
-                .entry(e.prerequisite)
-                .or_default()
-                .push(e.dependent);
-        }
-        for node in project
-            .nodes
-            .iter()
-            .filter(|n| n.kind == Kind::Function && only.is_none_or(|ids| ids.contains(&n.id)))
-        {
-            let tag = |id| {
-                let n = index.nodes[&id];
-                FunctionTag {
-                    node_id: id,
-                    rva: format!("0x{:08X}", n.rva.unwrap()),
-                    report: layout::link(&index.paths[&node.id], &index.paths[&n.id]),
-                }
-            };
-            let deps = DependencyFile {
-                schema: 1,
-                project: project.id.clone(),
-                binary: project.binary.clone(),
-                function_rva: format!("0x{:08X}", node.rva.unwrap()),
-                requires: index
-                    .requires
-                    .get(&node.id)
-                    .into_iter()
-                    .flatten()
-                    .map(|id| tag(*id))
-                    .collect(),
-            };
-            let prereq = PrerequisiteFile {
-                schema: 1,
-                project: project.id.clone(),
-                binary: project.binary.clone(),
-                function_rva: format!("0x{:08X}", node.rva.unwrap()),
-                required_by: incoming
-                    .get(&node.id)
-                    .into_iter()
-                    .flatten()
-                    .map(|id| tag(*id))
-                    .collect(),
-            };
-            let folder = self
-                .dir(p)
-                .join(&index.paths[&node.id])
-                .parent()
-                .unwrap()
-                .to_owned();
-            fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-            for (name, body) in [
-                ("dep.toml", toml::to_string_pretty(&deps)),
-                ("prereq.toml", toml::to_string_pretty(&prereq)),
-            ] {
-                let content = format!(
-                    "# Managed by Scopework. Edit through the app or research deps set.\n{}",
-                    body.map_err(|e| e.to_string())?
-                );
-                let path = folder.join(name);
-                if fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
-                    atomic(&path, content.as_bytes())?;
-                }
             }
         }
         Ok(())

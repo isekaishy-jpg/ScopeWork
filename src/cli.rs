@@ -275,6 +275,14 @@ pub(crate) enum ProjectCommand {
         #[arg(long)]
         expect_revision: Option<u64>,
     },
+    /// Report files that hold nothing in existing record folders: generated `dep.toml` and
+    /// `prereq.toml` views, markers of committed imports and empty `data/` folders. --apply
+    /// removes them; nothing else is touched.
+    Tidy {
+        project: String,
+        #[arg(long)]
+        apply: bool,
+    },
     /// Set the short research-topic label displayed above the meters.
     SetScope {
         project: String,
@@ -821,7 +829,8 @@ fn run(args: Args) -> Result<Value, String> {
             ProjectCommand::Show { project }
             | ProjectCommand::Revision { project }
             | ProjectCommand::SetBinary { project, .. }
-            | ProjectCommand::SetScope { project, .. },
+            | ProjectCommand::SetScope { project, .. }
+            | ProjectCommand::Tidy { project, .. },
         ) => Some(project.as_str()),
         Command::Node(
             NodeCommand::List { project, .. }
@@ -861,18 +870,20 @@ fn run(args: Args) -> Result<Value, String> {
     };
     let read_only = matches!(
         &args.command,
-        Command::Project(ProjectCommand::Show { .. } | ProjectCommand::Revision { .. })
-            | Command::Node(
-                NodeCommand::Show { .. }
-                    | NodeCommand::List { .. }
-                    | NodeCommand::ReadBatch { .. }
-                    | NodeCommand::Resolve { .. }
-                    | NodeCommand::Flagged { .. }
-                    | NodeCommand::Quarantined { .. }
-                    | NodeCommand::Delete { expect: None, .. }
-                    | NodeCommand::Prune { expect: None, .. }
-            )
-            | Command::Deps(DepsCommand::Get { .. })
+        Command::Project(
+            ProjectCommand::Show { .. }
+                | ProjectCommand::Revision { .. }
+                | ProjectCommand::Tidy { apply: false, .. }
+        ) | Command::Node(
+            NodeCommand::Show { .. }
+                | NodeCommand::List { .. }
+                | NodeCommand::ReadBatch { .. }
+                | NodeCommand::Resolve { .. }
+                | NodeCommand::Flagged { .. }
+                | NodeCommand::Quarantined { .. }
+                | NodeCommand::Delete { expect: None, .. }
+                | NodeCommand::Prune { expect: None, .. }
+        ) | Command::Deps(DepsCommand::Get { .. })
             | Command::Claim(ClaimCommand::List { .. })
             | Command::ReviewQueue { .. }
             | Command::History(HistoryCommand::Show { .. })
@@ -963,6 +974,10 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 Ok(
                     json!({"project":id,"binary":lib.projects[p].binary,"revision":lib.projects[p].revision}),
                 )
+            }
+            ProjectCommand::Tidy { project: id, apply } => {
+                let p = project(lib, &id)?;
+                lib.tidy(p, apply)
             }
             ProjectCommand::SetScope {
                 project: id,
@@ -1690,7 +1705,9 @@ pub(crate) fn route(command: &Command) -> Route {
         Command::Project(ProjectCommand::SetScope { project, .. }) => {
             write_route(project, "set-scope", vec![], &["scope"], false, 0)
         }
-        Command::Project(ProjectCommand::List | ProjectCommand::Create { .. }) => Route::Direct,
+        Command::Project(
+            ProjectCommand::List | ProjectCommand::Create { .. } | ProjectCommand::Tidy { .. },
+        ) => Route::Direct,
         Command::Node(command) => match command {
             NodeCommand::Show { project, node } => read_route(project, Some(vec![*node])),
             NodeCommand::ReadBatch { project, nodes } => read_route(project, Some(nodes.clone())),

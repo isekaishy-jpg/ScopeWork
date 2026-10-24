@@ -388,19 +388,9 @@ fn finish(
         }
     }
     fault("moves");
-    let functions: HashSet<_> = j
-        .after
-        .nodes
-        .iter()
-        .filter(|n| n.kind == Kind::Function)
-        .map(|n| n.id)
-        .collect();
     for edit in &j.edits {
         let path = root.join(&edit.new);
         fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-        if functions.contains(&edit.id) {
-            fs::create_dir_all(path.parent().unwrap().join("data")).map_err(|e| e.to_string())?;
-        }
         if fs::read_to_string(&path).ok().as_ref() != Some(&edit.after) {
             atomic(&path, edit.after.as_bytes())?;
         }
@@ -428,18 +418,6 @@ fn finish(
         0
     };
     fault("reports");
-    let temporary = Library {
-        root: root.parent().ok_or("Missing library directory")?.into(),
-        projects: vec![j.after.clone()],
-        busy_projects: vec![],
-        _lock: None,
-        recovery_blocked: None,
-        overlay: None,
-        staging: None,
-    };
-    if !j.dependencies.is_empty() {
-        temporary.sync_dependency_subset(0, Some(&j.dependencies.iter().copied().collect()))?;
-    }
     let (delta, after_bytes) = match prepared {
         Some((delta, bytes)) => (Some(delta), bytes),
         None => (None, catalog_bytes(&j.after)?),
@@ -1626,6 +1604,8 @@ mod tests {
             .parent()
             .unwrap()
             .join("data/capture.bin");
+        // Data folders exist once a tool stores something.
+        fs::create_dir_all(data.parent().unwrap()).unwrap();
         fs::write(&data, [1, 2, 3, 4]).unwrap();
         let batch = inputs(&lib, &[3]);
         let revision = lib.projects[0].revision;
@@ -1913,6 +1893,7 @@ mod tests {
         let mut lib = workspace.populate("alpha");
         lib.set_dependencies(0, 4, "1000").unwrap();
         let source = lib.path(0, 3).unwrap();
+        fs::create_dir_all(source.parent().unwrap().join("data")).unwrap();
         fs::write(
             source.parent().unwrap().join("data/capture.bin"),
             b"evidence",

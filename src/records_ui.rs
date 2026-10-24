@@ -541,7 +541,7 @@ impl ResearchUi {
                 classic::label(ui, report.display().to_string(), None);
                 if n.kind == Kind::Function
                     && classic::button(ui, true, "Open data folder").clicked()
-                    && let Err(e) = open_folder(&report.parent().unwrap().join("data"))
+                    && let Err(e) = open_data_folder(&report.parent().unwrap().join("data"))
                 {
                     self.set_error(e);
                 }

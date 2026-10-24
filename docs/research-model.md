@@ -16,9 +16,7 @@ Each project owns a complete hierarchy:
       research.md
       <RVA>/
         research.md
-        dep.toml
-        prereq.toml
-        data/                       # this function's captures, exports and raw evidence
+        data/                       # created when used: this function's captures, exports and raw evidence
   tools/
     README.md
     profiles/
@@ -82,17 +80,17 @@ Options > Dark mode switches palettes and saves the choice. Other menus provide 
 ## Supporting data
 
 
-Every function has its own folder: `research.md` plus `data/`. Use relative `data/<file>` links from that report. There is no new project-level evidence or data directory. Shared tool state lives under `tools/workspaces`, `tools/logs`, and `tools/scratch`. The research editor has an **Open this function's data folder** button.
+Every function has its own folder: `research.md`, plus `data/` once something is stored there. Use relative `data/<file>` links from that report. There is no new project-level evidence or data directory. Shared tool state lives under `tools/workspaces`, `tools/logs`, and `tools/scratch`. The research editor has an **Open this function's data folder** button.
 
-Version 0.4.2 upgrades the current catalog to nested architecture/chunk/function folders on first open. Original catalog/report text and the path mapping remain in tools/workspaces/layout-migration-v2/journal.json. Entire function folders move together, preserving data. Report links and dependency views are rebased; valid completion hashes are carried forward only for these path changes. Stale evidence stays stale. This does not import historical research or move projects between homes.
+Version 0.4.2 upgrades the current catalog to nested architecture/chunk/function folders on first open. Original catalog/report text and the path mapping remain in tools/workspaces/layout-migration-v2/journal.json. Entire function folders move together, preserving data. Report links are rebased (and, in those versions, the dependency views); valid completion hashes are carried forward only for these path changes. Stale evidence stays stale. This does not import historical research or move projects between homes.
 
 Meter pairs use padded inset panels sized to their own meter and text widths. The second panel follows the first with a small gap rather than a fixed half-window offset. Large meters grow their own row and remain scrollable. The total-progress meter occupies a separate full-width panel below the meter bank.
 
 ## Function prerequisite tags
 
-Each function folder also contains `dep.toml` (functions this report requires) and `prereq.toml` (functions that require this one). Both include project/binary identity, function RVAs, and relative canonical-report links. Tags stay within one project, do not duplicate research files, and do not add functions to coverage totals.
+Prerequisites live in the project's dependency graph in `project.json`. `research deps get`, `node show` and the research editor show both directions: the functions a report requires and the functions that require it. Tags stay within one project, do not duplicate research files, and do not add functions to coverage totals. (Earlier versions also wrote each function's two directions into `dep.toml` and `prereq.toml`; `research project tidy` removes those stale views.)
 
-The app maintains both directions from the project's dependency graph in `project.json`; these two TOML files are generated views. In a function's research editor, enter prerequisite RVAs separated by commas and use **Save prerequisite tags**. The reverse list is generated automatically. Self-dependencies, missing functions, duplicates and prerequisite cycles are rejected. These are understanding prerequisites, not a complete machine-code call graph.
+In a function's research editor, enter prerequisite RVAs separated by commas and use **Save prerequisite tags**. The reverse list is generated automatically. Self-dependencies, missing functions, duplicates and prerequisite cycles are rejected. These are understanding prerequisites, not a complete machine-code call graph.
 
 A dependent function cannot be marked complete until its prerequisites are complete. Its completion records which prerequisite revisions it used. Changes to a shared function reopen transitive dependents and their owning chunk/architecture/app reports. External changes are detected by the report hash checks. Merely referencing an already understood function does not reopen that shared function. Re-saving unchanged research does not invalidate dependents.
 

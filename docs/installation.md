@@ -60,6 +60,6 @@ New edits retain only changed catalog records plus affected report and sidecar c
 
 On first GUI or CLI library open, existing current projects migrate to `architectures/<category-id>/<chunk-id>/<RVA>/`. Each level owns its report; functions retain their complete data folders. New projects use this layout immediately. Keep old app/CLI copies closed after upgrading.
 
-A retained journal in each project at `tools/workspaces/layout-migration-v2/journal.json` records original catalog/report text and old/new paths. Interrupted upgrades resume; conflicting files stop migration without overwriting them. Standard report references, generated dependency files and schema-1 annotation report references/hash pins are updated. Custom scripts must resolve canonical paths from the CLI instead of assuming flat folders.
+A retained journal in each project at `tools/workspaces/layout-migration-v2/journal.json` records original catalog/report text and old/new paths. Interrupted upgrades resume; conflicting files stop migration without overwriting them. Standard report references and schema-1 annotation report references/hash pins are updated. Custom scripts must resolve canonical paths from the CLI instead of assuming flat folders.
 
 Project tabs and progress refresh automatically about every two seconds. Removing a project folder removes its tab; surviving tabs retain their identity. Unsaved edits for a removed report remain available to copy or discard and cannot be saved into a different project.

@@ -354,6 +354,8 @@ fn cancellation_preserves_changed_and_foreign_files_and_recovers_release() {
         .home
         .join("projects/fixture/architectures/000001/000002/00010000");
     fs::write(dir.join("research.md"), "manually changed prepared report").unwrap();
+    // A tool stores evidence in the record's data folder, creating it.
+    fs::create_dir_all(dir.join("data")).unwrap();
     fs::write(dir.join("data/foreign.bin"), b"preserve evidence bytes").unwrap();
     let failed = f
         .command(&["import", "cancel", "fixture", id])
@@ -719,6 +721,7 @@ fn branch_delete_recovers_after_each_publication_boundary() {
         let p = f.ok(&["project", "show", "fixture"]);
         let report = f.ok(&["node", "show", "fixture", "3"]);
         let source = PathBuf::from(report["report"].as_str().unwrap());
+        fs::create_dir_all(source.parent().unwrap().join("data")).unwrap();
         fs::write(
             source.parent().unwrap().join("data/capture.bin"),
             b"retained capture",
