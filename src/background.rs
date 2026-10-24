@@ -225,6 +225,12 @@ pub(super) struct Refresh {
 /// The next snapshot of the projects under `root`, reusing what `last` shows of every project
 /// unchanged since it was last read.
 pub(super) fn snapshot_in(root: PathBuf, last: Refresh) -> Result<Snapshot> {
+    snapshot_observed(root, last, &|_| {})
+}
+
+/// `snapshot_in`, calling `after_read` with each project's ID right after its catalog is read
+/// (tests commit there, to land a change inside the refresh).
+fn snapshot_observed(root: PathBuf, last: Refresh, after_read: &dyn Fn(&str)) -> Result<Snapshot> {
     let Refresh {
         previous,
         signatures,
@@ -313,6 +319,7 @@ pub(super) fn snapshot_in(root: PathBuf, last: Refresh) -> Result<Snapshot> {
                 // Meters hash reports and walk the tree; do that without holding the lock,
                 // which would otherwise delay agents' writes on every refresh.
                 lib.release();
+                after_read(id);
                 let view = lib.views().pop();
                 if let Some(project) = lib.projects.pop() {
                     entries.push(Entry {
@@ -366,17 +373,20 @@ pub(super) fn snapshot_in(root: PathBuf, last: Refresh) -> Result<Snapshot> {
     for (i, browser) in built {
         entries[i].browser = Some(browser);
     }
-    let mut next = HashMap::new();
-    for entry in entries.iter().filter(|e| e.fresh) {
-        let pair = entry
-            .browser
-            .as_deref()
-            .map(|b| (entry.project.as_ref(), b));
-        next.insert(
-            entry.project.id.clone(),
-            signature(&root, &entry.project.id, pair, &selected),
-        );
-    }
+    // The signature each project had before anything was read: one taken after reading could
+    // already describe a commit that landed meanwhile, which would then never be read.
+    let before: HashMap<&str, &String> = current
+        .iter()
+        .map(|(id, signature)| (id.as_str(), signature))
+        .collect();
+    let next: HashMap<String, String> = entries
+        .iter()
+        .filter(|e| e.fresh)
+        .filter_map(|e| {
+            let id = e.project.id.as_str();
+            Some((id.to_string(), before.get(id)?.to_string()))
+        })
+        .collect();
     if retry {
         // The fingerprint of nothing that was read: the next poll looks again.
         fingerprint.push('*');
@@ -512,6 +522,50 @@ mod tests {
         .unwrap()
     }
 
+    /// What the dashboard shows: it keeps its projects when an answer is unchanged.
+    #[derive(Clone)]
+    struct Shown {
+        fingerprint: String,
+        signatures: HashMap<String, String>,
+        projects: Vec<Arc<Project>>,
+        browsers: Vec<Arc<catalog_browser::BrowserData>>,
+        views: Vec<ProjectView>,
+    }
+    impl Shown {
+        fn empty() -> Self {
+            Self {
+                fingerprint: String::new(),
+                signatures: HashMap::new(),
+                projects: vec![],
+                browsers: vec![],
+                views: vec![],
+            }
+        }
+        /// One refresh; `previous` overrides the fingerprint, as a forced refresh does.
+        fn refresh(&mut self, root: &Path, previous: Option<&str>) -> Snapshot {
+            let answer = snapshot_in(
+                root.to_path_buf(),
+                Refresh {
+                    previous: previous.map_or(self.fingerprint.clone(), str::to_string),
+                    signatures: self.signatures.clone(),
+                    projects: self.projects.clone(),
+                    browsers: self.browsers.clone(),
+                    previous_views: self.views.clone(),
+                    selected: (String::new(), 0),
+                },
+            )
+            .unwrap();
+            self.fingerprint = answer.fingerprint.clone();
+            self.signatures = answer.signatures.clone();
+            if answer.root.is_some() {
+                self.projects = answer.projects.clone();
+                self.browsers = answer.browser.clone();
+                self.views = answer.views.clone();
+            }
+            answer
+        }
+    }
+
     #[test]
     fn a_refresh_reads_only_changed_projects_and_skips_unreadable_ones() {
         let home = Home(
@@ -580,6 +634,55 @@ mod tests {
         );
         let beta = skipped.projects.iter().find(|p| p.id == "beta").unwrap();
         assert_eq!(beta.research_scope, "Changed");
+    }
+
+    #[test]
+    fn a_commit_landing_during_a_refresh_is_read_by_the_next_one() {
+        let home = Home(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target/test-workspaces")
+                .join(format!("refresh-race-{}", uuid::Uuid::new_v4())),
+        );
+        let root = home.0.join("projects");
+        fs::create_dir_all(&root).unwrap();
+        let mut lib = Library::open(root.clone()).unwrap();
+        lib.create("alpha", "Alpha", "synthetic").unwrap();
+        drop(lib);
+        // An agent commits right after the refresh has read the catalog.
+        let committed = std::cell::Cell::new(false);
+        let commit = |id: &str| {
+            if id == "alpha" && !committed.replace(true) {
+                let mut lib = Library::open_project(root.clone(), Some("alpha")).unwrap();
+                let revision = lib.projects[0].revision;
+                lib.set_scope(0, "Landed meanwhile", revision).unwrap();
+            }
+        };
+        let first = snapshot_observed(
+            root.clone(),
+            Refresh {
+                previous: String::new(),
+                signatures: HashMap::new(),
+                projects: vec![],
+                browsers: vec![],
+                previous_views: vec![],
+                selected: (String::new(), 0),
+            },
+            &commit,
+        )
+        .unwrap();
+        assert_eq!(
+            first.projects[0].research_scope, "",
+            "read before the commit"
+        );
+        let mut shown = Shown {
+            fingerprint: first.fingerprint.clone(),
+            signatures: first.signatures.clone(),
+            projects: first.projects.clone(),
+            browsers: first.browser.clone(),
+            views: first.views.clone(),
+        };
+        shown.refresh(&root, None);
+        assert_eq!(shown.projects[0].research_scope, "Landed meanwhile");
     }
 
     #[test]
