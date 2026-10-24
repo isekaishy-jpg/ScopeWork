@@ -13,14 +13,14 @@ use super::manifest::LeaseSpec;
 use serde_json::{Value, json};
 use std::path::Path;
 
-/// Runs `command` under the lease `spec` describes. Returns the answer and the exit code.
+/// Runs `command` under the lease `spec` describes. The answer's `exit` is the exit code.
 pub fn run(
     home: &Path,
     project: &str,
     spec: &LeaseSpec,
     payload: Option<Value>,
     command: &[String],
-) -> Result<(Value, i32), String> {
+) -> Result<Value, String> {
     let projects = home.join("projects");
     let dir = projects.join(project);
     if !dir.join("project.json").is_file() {
@@ -47,10 +47,7 @@ pub fn run(
             if let Some(answered) = reply.get(field) {
                 let result = answered["result"].clone();
                 let exit = i32::from(result.get("error").is_some());
-                return Ok((
-                    answer(field, answered["by"].as_u64(), false, result, exit),
-                    exit,
-                ));
+                return Ok(answer(field, answered["by"].as_u64(), false, result, exit));
             }
         }
         if let Some(granted) = reply.get("granted") {
@@ -83,7 +80,7 @@ pub fn run(
             let _ = connection.receive();
             let result = own_result(&results, own, payload_given, &overall);
             let exit = exit_code(exit, &result);
-            return Ok((answer("coordinator", Some(lease), true, result, exit), exit));
+            return Ok(answer("coordinator", Some(lease), true, result, exit));
         }
         // A stopping coordinator: run with lock files instead.
         if reply.get("unavailable").is_none() {
@@ -97,7 +94,7 @@ pub fn run(
     let (results, overall, exit) = execute(&dir, 1, &payloads, command)?;
     let result = own_result(&results, 1, payload_given, &overall);
     let exit = exit_code(exit, &result);
-    Ok((answer("locks", None, true, result, exit), exit))
+    Ok(answer("locks", None, true, result, exit))
 }
 
 /// A request's exit code, the same for a holder, a joined request and direct mode: the

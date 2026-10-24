@@ -824,13 +824,9 @@ fn run(args: Args) -> Result<Value, String> {
                     )
                 }
             };
-            let (answer, exit) =
-                crate::coordinator::job::run(&home, project, &spec, payload, command)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&answer).unwrap_or_default()
-            );
-            std::process::exit(exit);
+            // The answer carries the command's `exit`; `main` exits with it, and a session
+            // answers it like any other command.
+            return crate::coordinator::job::run(&home, project, &spec, payload, command);
         }
         Command::Job(JobCommand::Status { project }) => {
             return crate::coordinator::job::status(&home, project);
@@ -1707,8 +1703,13 @@ fn session(home: Option<PathBuf>, wait: Option<u64>) {
                 argv.extend(words);
                 match Args::try_parse_from(&argv) {
                     Err(e) => json!({"error": e.to_string(), "kind": "usage"}),
-                    Ok(args) if matches!(args.command, Command::Session | Command::Gui) => {
-                        json!({"error": "session and gui cannot run inside a session", "kind": "usage"})
+                    Ok(args)
+                        if matches!(
+                            args.command,
+                            Command::Session | Command::Gui | Command::Serve
+                        ) =>
+                    {
+                        json!({"error": "session, gui and serve cannot run inside a session", "kind": "usage"})
                     }
                     Ok(args) => match run(args) {
                         Ok(value) => json!({"ok": value}),
@@ -1761,8 +1762,15 @@ pub fn main() {
     if let Some(exit) = through_coordinator(&raw, &args) {
         std::process::exit(exit);
     }
+    let job = matches!(args.command, Command::Job(JobCommand::Run { .. }));
     match run(args) {
-        Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+        Ok(value) => {
+            println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            // `job run` exits with its own result: the command's failure, or an error result.
+            if job && let Some(exit) = value["exit"].as_i64().filter(|e| *e != 0) {
+                std::process::exit(i32::try_from(exit).unwrap_or(1));
+            }
+        }
         Err(error) => {
             eprintln!("{}", json!({"error":error,"kind":error_kind(&error)}));
             std::process::exit(1);

@@ -568,3 +568,64 @@ fn a_failed_payload_fails_its_request_whatever_the_command_exits() {
         (1, Some("failed by request"))
     );
 }
+
+#[test]
+fn a_session_answers_job_run_and_keeps_going() {
+    use std::io::Write;
+    let f = Fixture::new();
+    let mut child = f
+        .command("off", &["session"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lines = [
+        json!([
+            "job",
+            "run",
+            "fixture",
+            "--resource",
+            "ghidra",
+            "--",
+            "cmd",
+            "/c",
+            "exit",
+            "0"
+        ]),
+        json!([
+            "job",
+            "run",
+            "fixture",
+            "--resource",
+            "ghidra",
+            "--",
+            "cmd",
+            "/c",
+            "exit",
+            "3"
+        ]),
+        json!(["project", "revision", "fixture"]),
+        json!(["serve"]),
+    ];
+    let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let answers: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(answers.len(), 4, "one line per request: {answers:?}");
+    assert_eq!(answers[0]["ok"]["exit"], 0);
+    assert_eq!(
+        answers[1]["ok"]["exit"], 3,
+        "the command's exit is in the answer"
+    );
+    assert_eq!(answers[2]["ok"]["project"], "fixture");
+    assert_eq!(answers[3]["kind"], "usage");
+}
