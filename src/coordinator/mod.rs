@@ -303,14 +303,18 @@ impl Server {
     }
     /// The project's state, loading its first snapshot and starting its writer on first use.
     fn project(self: &Arc<Self>, id: &str) -> Result<Arc<ProjectState>, String> {
-        let mut projects = self
-            .projects
-            .lock()
-            .map_err(|_| "Coordinator state poisoned")?;
-        if let Some(state) = projects.get(id) {
+        let poisoned = |_| "Coordinator state poisoned".to_string();
+        if let Some(state) = self.projects.lock().map_err(poisoned)?.get(id) {
             return Ok(state.clone());
         }
+        // Loading waits for the project's file lock: never while holding the map, which every
+        // request for every project needs.
         let snapshot = self.load(id)?;
+        let mut projects = self.projects.lock().map_err(poisoned)?;
+        if let Some(state) = projects.get(id) {
+            // Another request loaded it meanwhile; its writer and watcher already run.
+            return Ok(state.clone());
+        }
         let state = Arc::new(ProjectState {
             id: id.to_string(),
             snapshot: RwLock::new(snapshot),
@@ -329,6 +333,7 @@ impl Server {
             }),
         });
         projects.insert(id.to_string(), state.clone());
+        drop(projects);
         let server = self.clone();
         let writer = state.clone();
         std::thread::spawn(move || server.write_loop(&writer));

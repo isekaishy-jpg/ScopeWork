@@ -897,3 +897,33 @@ fn concurrent_tracker_changes_merge_without_losing_any() {
     let unique: std::collections::HashSet<u64> = items.iter().copied().collect();
     assert_eq!(unique.len(), 6, "item IDs are unique");
 }
+
+#[test]
+fn a_project_waiting_for_its_lock_does_not_hold_up_other_projects() {
+    let f = Fixture::new(0);
+    f.direct(&["project", "create", "other", "--name", "Other"]);
+    f.coordinated(&["project", "revision", "other"]);
+    // Another process holds the fixture's project lock, so the coordinator's first load of it
+    // waits.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.home.join("projects/.project-locks/fixture.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let mut waiting = f
+        .command("required", &["project", "revision", "fixture"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let started = Instant::now();
+    f.coordinated(&["project", "revision", "other"]);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "another project's request waited {:?} behind the blocked load",
+        started.elapsed()
+    );
+    lock.unlock().unwrap();
+    assert!(waiting.wait().unwrap().success());
+}
