@@ -773,15 +773,10 @@ impl Server {
             },
         };
         let open_time = opening.elapsed();
-        // Declared after `lib`, so it is dropped first: the flag is down before the lock goes.
-        let writing = Writing::start(&state.writing);
-        #[cfg(debug_assertions)]
-        if std::env::var("SCOPEWORK_COORDINATOR_FAIL_AT").as_deref() == Ok("apply") {
-            panic!("injected writer failure");
-        }
-        research::operations::take_commit_times();
         // Another process committed since the last snapshot: publish its state first, so
-        // readers never see our next commit's texts against an older catalog.
+        // readers never see our next commit's texts against an older catalog. This happens
+        // before the flag goes up: until then readers still check for outside commits, so none
+        // answers from the old snapshot against the files that commit changed.
         let unchanged = state
             .snapshot
             .read()
@@ -791,6 +786,13 @@ impl Server {
             state.external.fetch_add(1, Ordering::AcqRel);
             self.publish(state, lib.projects[0].clone());
         }
+        // Declared after `lib`, so it is dropped first: the flag is down before the lock goes.
+        let writing = Writing::start(&state.writing);
+        #[cfg(debug_assertions)]
+        if std::env::var("SCOPEWORK_COORDINATOR_FAIL_AT").as_deref() == Ok("apply") {
+            panic!("injected writer failure");
+        }
+        research::operations::take_commit_times();
         // Record each file's previous text in every live snapshot before a commit changes it.
         let observed = state.clone();
         let answers = research::operations::with_commit_observer(
