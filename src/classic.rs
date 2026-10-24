@@ -621,6 +621,7 @@ impl<'a> Window<'a> {
         let dark = ctx.style().visuals.dark_mode;
         let mut close = false;
         let title = self.title;
+        let resizable = self.resizable;
         let frame = egui::Frame::new()
             .fill(face(dark))
             .inner_margin(egui::Margin::same(4));
@@ -652,10 +653,17 @@ impl<'a> Window<'a> {
                 })
                 .show(ui, |ui| add(ui))
                 .inner;
-            // Frame drawn last so the bevel stays on top of the content's edges.
+            // Frame drawn last so the bevel stays on top of the content's edges. It encloses
+            // what the window's fill covers: a resizable window fills its whole reserved size,
+            // any other window only its content.
+            let outline = if resizable {
+                ui.max_rect().union(ui.min_rect())
+            } else {
+                ui.min_rect()
+            };
             double_bevel(
                 &ui.ctx().layer_painter(ui.layer_id()),
-                ui.max_rect().union(ui.min_rect()).expand(4.0),
+                outline.expand(4.0),
                 false,
             );
             result
