@@ -804,21 +804,6 @@ impl Library {
     pub fn release(&mut self) {
         self._lock = None;
     }
-    fn fresh(&self) -> Result<Self> {
-        let mut fresh = Self::open(self.root.clone())?;
-        for old in &self.projects {
-            if fresh.busy_projects.contains(&old.id) {
-                fresh.projects.push(old.clone());
-            }
-        }
-        fresh.projects.sort_by_key(|p| {
-            self.projects
-                .iter()
-                .position(|old| old.id == p.id)
-                .unwrap_or(usize::MAX)
-        });
-        Ok(fresh)
-    }
     fn write_project<T>(
         &mut self,
         p: usize,
@@ -842,12 +827,6 @@ impl Library {
         self.projects[p] = fresh.projects.remove(current);
         self.busy_projects.retain(|busy| busy != &id);
         result
-    }
-    pub fn refresh(&mut self) -> Result<()> {
-        let mut fresh = self.fresh()?;
-        fresh.release();
-        *self = fresh;
-        Ok(())
     }
     /// Sets the binary identity. Before any function exists it may change freely. Afterwards
     /// only an amendment is accepted: every SHA-256 and every `0x` value of the current identity

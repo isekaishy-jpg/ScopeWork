@@ -1116,13 +1116,8 @@ fn groups(home: &std::path::Path, command: &GroupCommand) -> Result<Value, Strin
 /// coordinator snapshot, or the coordinator writer's library (possibly staging).
 pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, String> {
     match command {
-        Command::Journal {
-            project: id,
-            compact,
-            compact_sidecars,
-        } => {
-            let p = project(lib, &id)?;
-            lib.journal_maintenance(p, compact || compact_sidecars, compact_sidecars)
+        Command::Journal { .. } => {
+            unreachable!("journal commands are handled before opening a library")
         }
         Command::Import(_) => unreachable!("import commands handled before opening a library"),
         Command::Impl(command) => {

@@ -1702,28 +1702,28 @@ mod tests {
         assert!(workspace.0.join("alpha").join(archived).is_file());
     }
     #[test]
-    fn project_locks_isolate_writes_and_preserve_gui_snapshots() {
+    fn project_locks_isolate_writes_and_report_busy_projects() {
         let workspace = Workspace::new();
         drop(workspace.populate("alpha"));
         drop(workspace.populate("beta"));
-        let mut gui = Library::open(workspace.0.clone()).unwrap();
         let mut alpha = Library::open_project(workspace.0.clone(), Some("alpha")).unwrap();
         assert!(Library::open_project(workspace.0.clone(), Some("alpha")).is_err());
         let mut beta = Library::open_project(workspace.0.clone(), Some("beta")).unwrap();
         beta.save_reports(0, &inputs(&beta, &[3, 4])).unwrap();
         drop(beta);
-        gui.refresh().unwrap();
-        assert_eq!(gui.projects.len(), 2);
+        let mut gui = Library::open(workspace.0.clone()).unwrap();
+        assert_eq!(gui.projects.len(), 1, "the busy project is listed as busy");
         assert_eq!(gui.busy_projects, vec!["alpha"]);
         let b = gui.projects.iter().position(|p| p.id == "beta").unwrap();
         gui.set_scope(b, "Assets", gui.projects[b].revision)
             .unwrap();
-        assert_eq!(gui.projects.len(), 2);
+        assert_eq!(gui.projects.len(), 1);
         alpha
             .set_scope(0, "Rendering", alpha.projects[0].revision)
             .unwrap();
         drop(alpha);
-        gui.refresh().unwrap();
+        let gui = Library::open(workspace.0.clone()).unwrap();
+        assert_eq!(gui.projects.len(), 2);
         assert!(gui.busy_projects.is_empty());
         assert_eq!(
             gui.projects
