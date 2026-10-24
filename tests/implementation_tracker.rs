@@ -285,3 +285,27 @@ fn tracker_changes_are_journaled_with_history() {
         .count();
     assert_eq!(files, 1);
 }
+
+#[test]
+fn a_record_named_twice_is_placed_once_and_a_cyclic_tree_cannot_hang() {
+    let f = Fixture::new();
+    let krate = f.ok(&["impl", "add", "fixture", "--name", "core"])["node"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let placed = f.ok(&["impl", "place", "fixture", &krate, "3", "3"]);
+    assert_eq!(placed["placed"], serde_json::json!([3]), "{placed}");
+    // A hand-edited tree.json whose two nodes are each other's parent.
+    let tree = f.home.join("projects/fixture/implementation/tree.json");
+    let mut value: Value = serde_json::from_str(&fs::read_to_string(&tree).unwrap()).unwrap();
+    value["nodes"] = serde_json::json!([
+        {"id": 1, "parent": 2, "name": "a"},
+        {"id": 2, "parent": 1, "name": "b"}
+    ]);
+    value["next_id"] = serde_json::json!(3);
+    fs::write(&tree, value.to_string()).unwrap();
+    let started = std::time::Instant::now();
+    f.ok(&["impl", "show", "fixture", "--node", "1"]);
+    f.ok(&["impl", "where", "fixture", "3"]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+}

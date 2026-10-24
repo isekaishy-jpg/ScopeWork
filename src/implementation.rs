@@ -221,8 +221,10 @@ impl Library {
     /// A node's path from the top, names joined by `/`.
     fn node_path(tree: &Tree, id: u64) -> String {
         let mut names = vec![];
+        let mut seen = HashSet::new();
         let mut current = Some(id);
-        while let Some(id) = current {
+        // `seen` stops at a cycle a hand-edited tree.json may hold.
+        while let Some(id) = current.filter(|id| seen.insert(*id)) {
             let Some(node) = tree.nodes.iter().find(|n| n.id == id) else {
                 break;
             };
@@ -329,6 +331,13 @@ impl Library {
         })
     }
     pub fn impl_place(&mut self, p: usize, node: u64, records: &[u64]) -> Result<Value> {
+        let mut unique = HashSet::new();
+        let records: Vec<u64> = records
+            .iter()
+            .copied()
+            .filter(|r| unique.insert(*r))
+            .collect();
+        let records = records.as_slice();
         let catalog: HashMap<u64, Kind> = self.projects[p]
             .nodes
             .iter()
@@ -544,7 +553,12 @@ impl Library {
             out: &mut HashMap<u64, [usize; 4]>,
         ) -> [usize; 4] {
             let mut total = own.get(&id).copied().unwrap_or_default();
+            out.insert(id, total);
             for child in children.get(&Some(id)).into_iter().flatten() {
+                if out.contains_key(child) {
+                    // Already counted: a hand-edited tree.json may hold a cycle.
+                    continue;
+                }
                 let sub = rolled(*child, own, children, out);
                 for k in 0..4 {
                     total[k] += sub[k];
