@@ -64,7 +64,7 @@ Work brief, 2026-10-18 (set by the user; the items above are its inputs):
 Resolved on main, unreleased (2026-10-18): commits 39c3cfd, 284e646 and 065ecf8; design, measured causes and acceptance criteria in docs/proposal-2026-10-18.md; changes listed under Unreleased in CHANGELOG.md. The three complaint items above are covered by A. Not yet done: a release (it waits on the versioning item), installing it for the running agents, and visual checks of the dashboard's menus and About dialog (the records window and its dialogs were captured with examples/capture_panels.rs). Carried forward:
 
 - [x] **Shared worker runtime.** Report hashing and GUI snapshots start a Solworker runtime (up to 8 threads) per bulk call and per refresh. Reuse one per process if Solworker supports concurrent use from several threads. Done in phase 0 (2026-10-18): one shared runtime per process (`background::shared`).
-- [ ] **Reclaim ledger copies on the live project.** `research journal wow-335a-12340 --compact-sidecars` would reclaim about 14.2 GB of the 15.3 GB transaction history. It is irreversible for those historical bytes, so it is the user's call; run it with the new version installed and no session writing.
+- [x] **Reclaim ledger copies on the live project.** Done 2026-10-22 with the user's approval: compacting the old project's receipts reclaimed 14.53 GB (logical), and its files were then LZX-compressed. `research journal wow-335a-12340 --compact-sidecars` would reclaim about 14.2 GB of the 15.3 GB transaction history. It is irreversible for those historical bytes, so it is the user's call; run it with the new version installed and no session writing.
 
 Recorded 2026-10-18 (research pass done, not implemented):
 
