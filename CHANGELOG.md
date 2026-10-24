@@ -22,6 +22,20 @@ Maintenance from the 2026-10-21 TODO pass; each item has its proposal in `docs/`
 - The coordinator creates its shutdown window before accepting clients, so an installer or Windows shutdown during startup cannot miss it.
 - Completion throughput was measured: a member completion costs about 0.4 s, and the time went to project tools, not the app ([findings](docs/proposal-completion-throughput.md)).
 
+Fixes from the 2026-10-24 code review of all of `src` ([proposal](docs/proposal-review-fixes.md)):
+
+- **A batch that restates current values no longer reopens records.** Repeating a record's current name, parent or context membership, or a parent's current order, cleared completed records' acceptance, reopened their ancestors and queued them for review. Now only real changes count, and a batch with none commits nothing.
+- **Quarantine seals structure only** (user decision). Another record may name a quarantined function as a prerequisite without direction, so later work can build on sealed research; changing a quarantined record's own prerequisites still needs `--directed-by`, however its RVAs are spelled (`0X…` and space-separated lists used to slip past). `node delete` of quarantined records needs `--directed-by`, and `node prune` passes over them with the reason `quarantined`. Restating a sealed record's values needs no direction.
+- Record names are one line and cannot contain report section markers, which used to break the record's report and its parent's.
+- The coordinator no longer holds up every project while it waits up to 120 s for one project's lock, recovers an interrupted import publication before reusing its cached catalog (previously the publication was left blocked), publishes another process's commit before suspending its readers' checks, admits work again after a cancelled shutdown or logoff, and no longer records Scopework's own ledger re-pins as drift.
+- A change whose only failure was writing its receipt's final journal is reported as committed instead of `commit_pending`.
+- `job run` inside `research session` is answered as one line instead of ending the session; a session refuses `serve`.
+- One unreadable project folder (for example a stray copy) no longer blanks the dashboard or fails `project list`: it is skipped and reported (`unreadable_project` on standard error; the Research records status bar in the dashboard).
+- The dashboard refreshes only projects that changed; a busy project no longer makes every refresh re-read every catalog.
+- Research records loads a record whatever state the implementation tracker is in, and looks placements up from a map cached per revision.
+- Changing a project's dashboard group keeps group members the dashboard has not loaded yet; the History window ignores an answer for the project it showed before.
+- Smaller fixes: temporary files and waiter tickets are not left behind on failure, a ticket dated in the future is judged by its lock, reading a missing project creates no lock file, the dashboard's queue poll no longer takes the project lock exclusively, too-long claim leases are refused, background imports are decided by one rule, renames find citations of VAs above 4 GiB (`report-references-v3.json`), publication re-checks for a pending catalog journal, and a cyclic hand-edited `implementation/tree.json` cannot hang the tracker.
+
 ## 0.13.1a - 2026-10-18
 
 Release notes, validation and the commit ledger: [docs/releases/0.13.1a.md](docs/releases/0.13.1a.md). Fixes from a code review of 0.13.0a, whose draft release was not published:
