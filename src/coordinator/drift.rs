@@ -69,14 +69,19 @@ fn catalog_head(path: &Path) -> (Option<u64>, Option<u64>) {
         .and_then(|mut f| f.read(&mut head))
         .unwrap_or(0);
     let head = String::from_utf8_lossy(&head[..read]);
-    let field = |name: &str| {
-        Regex::new(&format!(r#""{name}"\s*:\s*(\d+)"#))
-            .ok()?
+    static REVISION: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static LAYOUT: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let field = |pattern: &std::sync::OnceLock<Regex>, name: &str| {
+        pattern
+            .get_or_init(|| Regex::new(&format!(r#""{name}"\s*:\s*(\d+)"#)).unwrap())
             .captures(&head)?[1]
             .parse::<u64>()
             .ok()
     };
-    match (field("revision"), field("layout_version")) {
+    match (
+        field(&REVISION, "revision"),
+        field(&LAYOUT, "layout_version"),
+    ) {
         (Some(revision), layout) => (Some(revision), layout),
         _ => {
             let value = std::fs::read(path)
@@ -139,7 +144,9 @@ impl Watch {
         if let (Some(old), Some(new)) = (self.revision, revision) {
             for r in old.saturating_add(1)..=new.min(old.saturating_add(10_000)) {
                 if let Ok(journal) = std::fs::read(receipt(r).join("journal.json")) {
-                    ledger_repathed |= journal.windows(13).any(|w| w == b"\"ledger\":true");
+                    // Repathing (`ledger`) and re-pinning (`repin_ledger`) both rewrite it.
+                    ledger_repathed |= journal.windows(13).any(|w| w == b"\"ledger\":true")
+                        || journal.windows(19).any(|w| w == b"\"repin_ledger\":true");
                 }
             }
         }
@@ -169,6 +176,12 @@ impl Watch {
             self.catalog_taken = Some(SystemTime::now());
         }
 
+        // A transaction in flight may already have rewritten the ledger, but its receipt does not
+        // exist yet: judge declared files after it lands, with the lease window still open from
+        // the last check that judged them.
+        if in_flight && !first {
+            return found;
+        }
         for (file, (resource, old_stamp, old_hash, taken)) in self.files.iter_mut() {
             let path = dir.join(file.as_str());
             let now = stamp(&path);
@@ -302,5 +315,51 @@ mod tests {
         let drift = watch.check(d, &nobody);
         assert_eq!(drift.len(), 1);
         assert_eq!(drift[0].file, "claims.json");
+    }
+
+    #[test]
+    fn scopeworks_own_ledger_rewrites_are_not_drift() {
+        let dir = Dir(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("drift-{}", uuid::Uuid::new_v4())));
+        let d = &dir.0;
+        std::fs::create_dir_all(d.join("tools/profiles")).unwrap();
+        std::fs::write(
+            d.join("tools/coordinator.toml"),
+            "version = 1\n[resources.ledger]\nfiles = [\"tools/profiles/annotations.json\"]\n",
+        )
+        .unwrap();
+        std::fs::write(d.join(LEDGER), "{}").unwrap();
+        std::fs::write(
+            d.join("project.json"),
+            r#"{"layout_version":5,"revision":1}"#,
+        )
+        .unwrap();
+        let mut watch = Watch::default();
+        let nobody = |_: &str, _: Instant| false;
+        assert!(watch.check(d, &nobody).is_empty());
+        // A transaction in flight has rewritten the ledger and the catalog, but its receipt is
+        // still the pending folder: nothing is judged yet.
+        std::fs::create_dir_all(d.join(PENDING)).unwrap();
+        std::fs::write(d.join(LEDGER), r#"{"report_sha256":"new"}"#).unwrap();
+        std::fs::write(
+            d.join("project.json"),
+            r#"{"layout_version":5,"revision":2}"#,
+        )
+        .unwrap();
+        assert!(watch.check(d, &nobody).is_empty());
+        // It lands as a re-pin (a rename batch keeping completion), not a repath.
+        std::fs::remove_dir_all(d.join(PENDING)).unwrap();
+        std::fs::create_dir_all(d.join(RECEIPTS).join("revision-2")).unwrap();
+        std::fs::write(
+            d.join(RECEIPTS).join("revision-2/journal.json"),
+            r#"{"ledger":false,"repin_ledger":true}"#,
+        )
+        .unwrap();
+        let found = watch.check(d, &nobody);
+        assert!(found.is_empty(), "{found:?}");
+        // A later write by nobody is still drift.
+        std::fs::write(d.join(LEDGER), r#"{"report_sha256":"tool"}"#).unwrap();
+        assert_eq!(watch.check(d, &nobody).len(), 1);
     }
 }
