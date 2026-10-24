@@ -732,9 +732,10 @@ impl Library {
         if scope == self.projects[p].research_scope {
             return Ok(());
         }
+        let before = self.projects[p].clone();
         self.projects[p].research_scope = scope.into();
         self.projects[p].revision += 1;
-        self.persist(p)
+        self.commit_catalog(p, before)
     }
     pub fn release(&mut self) {
         self._lock = None;
@@ -1129,11 +1130,12 @@ impl Library {
     fn dir(&self, p: usize) -> PathBuf {
         self.root.join(&self.projects[p].id)
     }
-    fn persist(&self, p: usize) -> Result<()> {
-        atomic(
-            &self.dir(p).join("project.json"),
-            &catalog_bytes(&self.projects[p])?,
-        )
+    /// Commits a change to the catalog's own fields, already made to `self.projects[p]`, as an
+    /// ordinary journaled transaction with no file changes, so it leaves a receipt in history.
+    /// `before` is the catalog before the change.
+    fn commit_catalog(&mut self, p: usize, before: Project) -> Result<()> {
+        let after = std::mem::replace(&mut self.projects[p], before.clone());
+        self.commit_metadata_with(p, before, after, vec![], vec![], false)
     }
     pub fn create(&mut self, id: &str, name: &str, binary: &str) -> Result<()> {
         if self

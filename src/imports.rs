@@ -250,10 +250,11 @@ pub fn reserve(root: &Path, project: &str, batch: &Batch) -> Result<Job> {
         timings_ms: BTreeMap::new(),
     };
     checkpoint(&folder, &job)?;
+    let catalog = lib.projects[0].clone();
     lib.projects[0].next_id = job.end_id;
     lib.projects[0].active_import = Some(id);
     lib.projects[0].revision += 1;
-    lib.persist(0)?;
+    lib.commit_catalog(0, catalog)?;
     job.timings_ms
         .insert("reservation_lock".into(), elapsed(start));
     checkpoint(&folder, &job)?;
@@ -877,9 +878,10 @@ fn cancel_preparation(root: &Path, job: &mut Job, folder: &Path) -> Result<()> {
             &folder.join("cancel-release.json"),
             &serde_json::json!({"revision":lib.projects[0].revision+1,"end_id":job.end_id}),
         )?;
+        let catalog = lib.projects[0].clone();
         lib.projects[0].active_import = None;
         lib.projects[0].revision += 1;
-        lib.persist(0)?;
+        lib.commit_catalog(0, catalog)?;
         fault("cancel_released");
     } else {
         let release: serde_json::Value = read(&folder.join("cancel-release.json"))?;

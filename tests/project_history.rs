@@ -302,3 +302,110 @@ fn known_kinds_name_what_they_must() {
     ]);
     assert_eq!(typed["entries"].as_array().unwrap().len(), 1);
 }
+
+/// Revisions that have a catalog receipt, ascending.
+fn receipted(f: &Fixture) -> Vec<u64> {
+    let dir = f
+        .home
+        .join("projects/fixture/tools/workspaces/catalog-transactions-v4");
+    let mut found: Vec<u64> = fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.unwrap().file_name().to_string_lossy().into_owned();
+            name.strip_prefix("revision-")?.parse().ok()
+        })
+        .collect();
+    found.sort_unstable();
+    found
+}
+
+#[test]
+fn scope_changes_and_import_reservations_leave_receipts() {
+    let f = Fixture::new();
+    let p = f.ok(&["project", "show", "fixture"]);
+    let revision = p["revision"].as_u64().unwrap().to_string();
+    f.ok(&[
+        "project",
+        "set-scope",
+        "fixture",
+        "--scope",
+        "Rendering",
+        "--expect-revision",
+        &revision,
+    ]);
+    let latest = f.ok(&[
+        "history", "show", "fixture", "--only", "catalog", "--limit", "1",
+    ]);
+    let entry = &latest["entries"][0];
+    assert_eq!(entry["project"]["research_scope"]["after"], "Rendering");
+    assert!(
+        research_dashboard::research::history::entry_line(entry).contains("scope -> Rendering"),
+        "{entry}"
+    );
+
+    // An import: its reservation is an ordinary receipt; its publication has its own.
+    let p = f.ok(&["project", "show", "fixture"]);
+    let request = serde_json::json!({"schema": 1, "binary": p["binary"], "expect_revision": p["revision"],
+        "create": [{"parent": 2, "name": "F", "rva": 0x1000}]});
+    let path = f.home.join("import.json");
+    fs::write(&path, serde_json::to_vec(&request).unwrap()).unwrap();
+    let job = f.ok(&[
+        "import",
+        "start",
+        "fixture",
+        "--file",
+        path.to_str().unwrap(),
+    ]);
+    let published = job["revision"].as_u64().unwrap();
+    let current = f.ok(&["project", "show", "fixture"])["revision"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(current, published);
+    // Every revision since creation has a receipt, except the publication.
+    let expected: Vec<u64> = (1..=current).filter(|r| *r != published).collect();
+    assert_eq!(receipted(&f), expected);
+    let reserved: Value =
+        serde_json::from_slice(&fs::read(receipt(&f, published - 1)).unwrap()).unwrap();
+    assert_eq!(reserved["after"]["active_import"], job["id"]);
+}
+
+#[test]
+fn a_cancelled_imports_release_leaves_a_receipt() {
+    if !cfg!(debug_assertions) {
+        eprintln!("skipped: requires debug-build fault injection (run without --release)");
+        return;
+    }
+    let f = Fixture::new();
+    let p = f.ok(&["project", "show", "fixture"]);
+    let request = serde_json::json!({"schema": 1, "binary": p["binary"], "expect_revision": p["revision"],
+        "create": [{"parent": 2, "name": "F", "rva": 0x1000}]});
+    let path = f.home.join("import.json");
+    fs::write(&path, serde_json::to_vec(&request).unwrap()).unwrap();
+    let failed = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        .env("SCOPEWORK_COORDINATOR", "off")
+        .env("SCOPEWORK_IMPORT_IO_ERROR", "1")
+        .arg("--home")
+        .arg(&f.home)
+        .args([
+            "import",
+            "start",
+            "fixture",
+            "--file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let id = f.ok(&["project", "show", "fixture"])["active_import"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.ok(&["import", "cancel", "fixture", &id]);
+    let current = f.ok(&["project", "show", "fixture"]);
+    assert!(current["active_import"].is_null());
+    let current = current["revision"].as_u64().unwrap();
+    assert_eq!(receipted(&f), (1..=current).collect::<Vec<_>>());
+    let released: Value = serde_json::from_slice(&fs::read(receipt(&f, current)).unwrap()).unwrap();
+    assert_eq!(released["before"]["active_import"], id.as_str());
+    assert!(released["after"]["active_import"].is_null());
+}

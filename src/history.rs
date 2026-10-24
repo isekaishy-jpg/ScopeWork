@@ -233,6 +233,24 @@ pub fn entry_line(entry: &Value) -> String {
                 parts.push(format!("#{id}"));
             }
         }
+        let project = &entry["project"];
+        if let Some(scope) = project["research_scope"]["after"].as_str() {
+            parts.push(format!("scope -> {scope}"));
+        }
+        if let Some(name) = project["name"]["after"].as_str() {
+            parts.push(format!("name -> {name}"));
+        }
+        if project["binary"].is_object() {
+            parts.push("binary identity amended".into());
+        }
+        match (
+            project["active_import"]["before"].as_str(),
+            project["active_import"]["after"].as_str(),
+        ) {
+            (_, Some(job)) => parts.push(format!("import {job} reserved")),
+            (Some(job), None) => parts.push(format!("import {job} released")),
+            (None, None) => {}
+        }
         // Sidecar-only changes (flags, claims, quarantine, the review queue) name their files.
         let sidecars: Vec<&str> = entry["sidecars"]
             .as_array()
@@ -304,6 +322,9 @@ fn receipts(root: &Path) -> Vec<(u64, PathBuf, Option<u64>)> {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Receipt {
+    /// The catalog's own fields before and after (no record arrays).
+    before: Value,
+    after: Value,
     changes: Value,
     edits: Vec<EditRef>,
     moves: Vec<Value>,
@@ -325,6 +346,8 @@ struct PathRef {
 impl Receipt {
     fn summary_value(self) -> Value {
         json!({
+            "before": self.before,
+            "after": self.after,
             "changes": self.changes,
             "edits": self.edits.into_iter().map(|e| json!({"id": e.id, "old": e.old, "new": e.new})).collect::<Vec<_>>(),
             "moves": self.moves,
@@ -335,6 +358,15 @@ impl Receipt {
         })
     }
 }
+
+/// Catalog fields that history reports when a receipt changes them.
+const PROJECT_FIELDS: [&str; 5] = [
+    "research_scope",
+    "name",
+    "binary",
+    "active_import",
+    "last_import",
+];
 
 /// Summary of one receipt: which records changed and how, without report text.
 fn summarize(revision: u64, receipt: &Value, filter: &HistoryFilter) -> Option<Value> {
@@ -412,6 +444,16 @@ fn summarize(revision: u64, receipt: &Value, filter: &HistoryFilter) -> Option<V
         .iter()
         .map(|s| s["path"].clone())
         .collect();
+    // Changes to the catalog's own fields: scope, name, binary identity, import reservations.
+    let mut project = serde_json::Map::new();
+    if filter.node.is_none() {
+        for f in PROJECT_FIELDS {
+            let (a, b) = (&receipt["before"][f], &receipt["after"][f]);
+            if receipt["before"].is_object() && receipt["after"].is_object() && a != b {
+                project.insert(f.to_string(), json!({"before": a, "after": b}));
+            }
+        }
+    }
     let mut entry = json!({
         "kind": "catalog",
         "revision": revision,
@@ -422,6 +464,9 @@ fn summarize(revision: u64, receipt: &Value, filter: &HistoryFilter) -> Option<V
         "sidecars": sidecars,
         "dependencies_resynced": receipt["dependencies"].as_array().map_or(0, Vec::len),
     });
+    if !project.is_empty() {
+        entry["project"] = Value::Object(project);
+    }
     // A change to quarantined records carries the human's instruction that allowed it.
     if let Some(directed) = receipt["directed_by"].as_str() {
         entry["directed_by"] = directed.into();
