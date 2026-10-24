@@ -257,7 +257,12 @@ impl Resident {
         let id = self.lib.projects[0].id.clone();
         let path = root.join(&id).join("project.json");
         let now = stamp(&path);
-        if pending_journal(root, &id) || now != self.stamp {
+        // Anything `open_project` would recover first (a catalog journal of either format, an
+        // interrupted import publication) makes the held catalog unusable: re-open instead.
+        if pending_journal(root, &id)
+            || research::imports::needs_recovery(&root.join(&id), &self.lib.projects[0])
+            || now != self.stamp
+        {
             return None;
         }
         // A modification time this recent could hide a same-size rewrite: compare the bytes.
@@ -289,10 +294,14 @@ fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
 fn new_overlay() -> Overlay {
     Arc::new(RwLock::new(HashMap::new()))
 }
+/// Whether a catalog transaction of either journal format is pending for `project`.
 fn pending_journal(root: &Path, project: &str) -> bool {
-    root.join(project)
-        .join("tools/workspaces/catalog-transactions-v4/pending")
+    let dir = root.join(project);
+    dir.join("tools/workspaces/catalog-transactions-v4/pending")
         .exists()
+        || dir
+            .join("tools/workspaces/catalog-transactions/pending/journal.json")
+            .is_file()
 }
 
 impl Server {

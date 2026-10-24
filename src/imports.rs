@@ -717,7 +717,7 @@ fn publish(
     }
     Err("publication_contention: preparation retained after eight changed snapshots; resume when writes settle".into())
 }
-pub(super) fn needs_recovery(root: &Path, project: &Project) -> bool {
+pub(crate) fn needs_recovery(root: &Path, project: &Project) -> bool {
     project
         .active_import
         .as_ref()

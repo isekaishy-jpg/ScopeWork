@@ -927,3 +927,74 @@ fn a_project_waiting_for_its_lock_does_not_hold_up_other_projects() {
     lock.unlock().unwrap();
     assert!(waiting.wait().unwrap().success());
 }
+
+#[test]
+fn the_writer_recovers_an_interrupted_import_before_committing() {
+    if !cfg!(debug_assertions) {
+        eprintln!("skipped: requires debug-build fault injection");
+        return;
+    }
+    let f = Fixture::new(2);
+    let token = |node: u64| {
+        f.coordinated(&["node", "show", "fixture", &node.to_string()])["token"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let save = |node: u64, token: &str, body: &str| {
+        let args = f.save_args(node, token, body);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        f.coordinated(&args);
+    };
+    let p = f.direct(&["project", "show", "fixture"]);
+    let request = json!({"schema":1,"binary":p["binary"],"expect_revision":p["revision"],
+        "create":(0..4).map(|i| json!({"parent":2,"name":format!("Imported {i}"),"rva":0x10000+i*16})).collect::<Vec<_>>()});
+    let input = f.home.join("import.json");
+    fs::write(&input, serde_json::to_vec(&request).unwrap()).unwrap();
+    let run_import = |args: &[&str], point: &str| {
+        let o = f
+            .command("off", args)
+            .env("SCOPEWORK_IMPORT_FAIL_AT", point)
+            .output()
+            .unwrap();
+        assert_eq!(
+            o.status.code(),
+            Some(99),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    };
+    // The import is reserved and prepared, then the coordinator's writer commits and keeps the
+    // catalog (with the reservation) in memory.
+    run_import(
+        &[
+            "import",
+            "start",
+            "fixture",
+            "--file",
+            input.to_str().unwrap(),
+        ],
+        "ready",
+    );
+    save(3, &token(3), "First save through the coordinator");
+    let job = f.direct(&["project", "show", "fixture"])["active_import"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Taken now: any read after the crash below would itself recover the import first.
+    let fourth = token(4);
+    // The runner dies after writing its publication journal, before the catalog.
+    run_import(
+        &["import", "resume", "fixture", &job],
+        "publication_journal",
+    );
+    // The writer's next commit must not build on its held catalog: the import lands first.
+    save(4, &fourth, "Second save through the coordinator");
+    let after = f.direct(&["project", "show", "fixture"]);
+    assert_eq!(after["nodes"].as_array().unwrap().len(), 9, "{after}");
+    assert!(after["active_import"].is_null());
+    assert_eq!(
+        f.direct(&["node", "show", "fixture", "4"])["body"],
+        "Second save through the coordinator"
+    );
+}
