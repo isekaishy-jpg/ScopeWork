@@ -2146,31 +2146,44 @@ impl Library {
                 );
             }
         }
-        fn visit(
-            id: u64,
-            edges: &[Dependency],
-            active: &mut std::collections::HashSet<u64>,
-            done: &mut std::collections::HashSet<u64>,
-        ) -> bool {
-            if done.contains(&id) {
-                return true;
-            }
-            if !active.insert(id) {
-                return false;
-            }
-            for e in edges.iter().filter(|e| e.dependent == id) {
-                if !visit(e.prerequisite, edges, active, done) {
-                    return false;
-                }
-            }
-            active.remove(&id);
-            done.insert(id);
-            true
+        // Depth-first search for a cycle, iterative so a long prerequisite chain cannot
+        // overflow the stack, over a map built once (linear in functions and edges).
+        let mut requires: std::collections::HashMap<u64, Vec<u64>> = Default::default();
+        for e in edges {
+            requires
+                .entry(e.dependent)
+                .or_default()
+                .push(e.prerequisite);
         }
+        let mut active = std::collections::HashSet::new();
         let mut done = std::collections::HashSet::new();
-        for id in functions {
-            if !visit(id, edges, &mut Default::default(), &mut done) {
-                return Err("That creates a prerequisite cycle. These tags describe research prerequisites, not every call edge.".into());
+        for start in functions {
+            if done.contains(&start) {
+                continue;
+            }
+            // Each frame: a function on the current path and how many of its prerequisites
+            // have been visited.
+            let mut path = vec![(start, 0usize)];
+            active.insert(start);
+            while let Some((id, next)) = path.last_mut() {
+                let id = *id;
+                match requires.get(&id).and_then(|r| r.get(*next)).copied() {
+                    Some(prerequisite) => {
+                        *next += 1;
+                        if done.contains(&prerequisite) {
+                            continue;
+                        }
+                        if !active.insert(prerequisite) {
+                            return Err("That creates a prerequisite cycle. These tags describe research prerequisites, not every call edge.".into());
+                        }
+                        path.push((prerequisite, 0));
+                    }
+                    None => {
+                        path.pop();
+                        active.remove(&id);
+                        done.insert(id);
+                    }
+                }
             }
         }
         Ok(())
@@ -2674,5 +2687,69 @@ mod lock_queue_tests {
         assert!(!waiters.join(format!("{dead}.lock")).exists());
         drop(held);
         fs::remove_dir_all(&folder).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_prerequisite_chain_validates_without_recursion_and_cycles_are_found() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("chain-{}", uuid::Uuid::new_v4()));
+        let mut lib = Library::empty(root.clone()).unwrap();
+        let node = |id: u64, parent: Option<u64>, kind: Kind| Node {
+            context_only: false,
+            id,
+            parent,
+            kind,
+            name: format!("n{id}"),
+            status: Status::NotStarted,
+            rva: (kind == Kind::Function).then_some(0x1000 + id as u32),
+            revision: 0,
+            accepted_hash: None,
+            accepted_prerequisites: Default::default(),
+        };
+        const FUNCTIONS: u64 = 50_000;
+        let mut nodes = vec![
+            node(0, None, Kind::App),
+            node(1, Some(0), Kind::Architecture),
+            node(2, Some(1), Kind::Chunk),
+        ];
+        nodes.extend((3..3 + FUNCTIONS).map(|id| node(id, Some(2), Kind::Function)));
+        // Each function requires the next: one chain through every function.
+        let mut edges: Vec<Dependency> = (3..2 + FUNCTIONS)
+            .map(|id| Dependency {
+                dependent: id,
+                prerequisite: id + 1,
+            })
+            .collect();
+        lib.projects.push(Project {
+            layout_version: 5,
+            structural_epoch: 0,
+            active_import: None,
+            last_import: None,
+            id: "chain".into(),
+            name: "Chain".into(),
+            binary: String::new(),
+            research_scope: String::new(),
+            dependencies: vec![],
+            next_id: 3 + FUNCTIONS,
+            revision: 0,
+            nodes,
+        });
+        let started = std::time::Instant::now();
+        lib.validate_dependencies(0, &edges).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // Closing the chain makes a cycle.
+        edges.push(Dependency {
+            dependent: 2 + FUNCTIONS,
+            prerequisite: 3,
+        });
+        let error = lib.validate_dependencies(0, &edges).unwrap_err();
+        assert!(error.contains("cycle"), "{error}");
+        let _ = fs::remove_dir_all(root);
     }
 }
