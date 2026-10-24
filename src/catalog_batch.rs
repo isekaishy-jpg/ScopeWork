@@ -1382,7 +1382,7 @@ impl Library {
             .collect();
         kept_complete.sort_unstable();
         let consumers = reopen::consumers_of(&after.dependencies);
-        let sealed = quarantine::effective(&after, &self.quarantines(p)?);
+        let sealed = quarantine::effective(&after, &self.quarantines_for_write(p)?);
         let reached =
             reopen::reopen_affected(&mut after, &existing, &old_parents, &consumers, &sealed);
         after.revision += 1;

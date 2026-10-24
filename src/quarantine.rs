@@ -68,6 +68,24 @@ pub(crate) fn without_removed(text: &str, removed: &HashSet<u64>) -> Result<Opti
     }
     render(&file).map(Some)
 }
+/// Why a write is refused while the quarantine file cannot be read: a damaged file, or one
+/// written by a newer version, must never unseal records.
+pub(super) fn unreadable(error: &str) -> String {
+    format!(
+        "quarantine_unreadable: {QUARANTINE} cannot be read ({error}). Writes to this project are refused until it is repaired, so no quarantine is lifted by accident; reads treat it as holding no quarantine meanwhile."
+    )
+}
+/// Recorded quarantines read from a project folder for a write: a missing file holds none, a
+/// file that cannot be read refuses (`unreadable`).
+pub(super) fn read_records_for_write(dir: &Path) -> Result<BTreeMap<u64, Quarantine>> {
+    match fs::read_to_string(dir.join(QUARANTINE)) {
+        Ok(text) => parse(&text)
+            .map(|file| file.records)
+            .map_err(|e| unreadable(&e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(unreadable(&e.to_string())),
+    }
+}
 /// Recorded quarantines read from a project folder (for snapshots built outside a library).
 pub(super) fn read_records(dir: &Path) -> BTreeMap<u64, Quarantine> {
     fs::read_to_string(dir.join(QUARANTINE))
@@ -116,8 +134,13 @@ impl Library {
             None => BTreeMap::new(),
         })
     }
+    /// Recorded quarantines for a write: an unreadable file refuses it (`unreadable`).
+    pub(super) fn quarantines_for_write(&self, p: usize) -> Result<BTreeMap<u64, Quarantine>> {
+        self.quarantines(p).map_err(|e| unreadable(&e))
+    }
     /// Quarantined node IDs, recorded and inherited from a quarantined chunk. An unreadable
-    /// file counts as no quarantine, so reads keep working.
+    /// file counts as no quarantine, so reads keep working; every write refuses it first
+    /// (`commit_or_stage`).
     pub fn quarantined(&self, p: usize) -> HashSet<u64> {
         effective(&self.projects[p], &self.quarantines(p).unwrap_or_default())
     }
@@ -141,8 +164,8 @@ impl Library {
         if directed_by.is_some_and(|d| !d.trim().is_empty()) {
             return Ok(());
         }
-        // Read once for every record checked (an unreadable file counts as no quarantine).
-        let records = self.quarantines(p).unwrap_or_default();
+        // Read once for every record checked; an unreadable file refuses the change.
+        let records = self.quarantines_for_write(p)?;
         if records.is_empty() {
             return Ok(());
         }

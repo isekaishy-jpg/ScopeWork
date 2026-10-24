@@ -664,8 +664,10 @@ fn publish(
         // Parents gain source links; complete records they reach need review again, and are
         // queued for it as any other change queues them.
         // Quarantined records keep no queue entries (quarantining clears them).
-        let sealed =
-            super::quarantine::effective(&after, &super::quarantine::read_records(&project_root));
+        let sealed = super::quarantine::effective(
+            &after,
+            &super::quarantine::read_records_for_write(&project_root)?,
+        );
         let mut reopened: Vec<u64> = after
             .nodes
             .iter()

@@ -716,3 +716,62 @@ fn an_edit_inside_a_completed_quarantined_chunk_leaves_the_chunk_complete() {
         "Complete"
     );
 }
+
+#[test]
+fn an_unreadable_quarantine_file_refuses_writes_and_keeps_reads() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "cyber-stop",
+        "--reason",
+        "Stopped",
+    ]);
+    let file = f.home.join("projects/fixture/quarantine.json");
+    let intact = fs::read(&file).unwrap();
+    let body = f.home.join("body.md");
+    fs::write(&body, "A note.").unwrap();
+    for damaged in [&b"{\"schema\": 1, \"records\": {"[..], b"{\"schema\": 2}"] {
+        fs::write(&file, damaged).unwrap();
+        // Reads keep answering.
+        f.ok(&["node", "show", "fixture", "3"]);
+        let token = f.ok(&["node", "show", "fixture", "3"])["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let error = f.refused(&[
+            "node",
+            "save",
+            "fixture",
+            "3",
+            "--body-file",
+            body.to_str().unwrap(),
+            "--evidence-file",
+            body.to_str().unwrap(),
+            "--expect",
+            &token,
+        ]);
+        assert!(error.contains("quarantine_unreadable"), "{error}");
+        let structural = f.ok(&["node", "show", "fixture", "3"])["structural_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let error = f.refused(&[
+            "deps",
+            "set",
+            "fixture",
+            "3",
+            "2000",
+            "--expect",
+            &structural,
+        ]);
+        assert!(error.contains("quarantine_unreadable"), "{error}");
+        let error = f.refused(&["node", "flag", "fixture", "3", "--reason", "x"]);
+        assert!(error.contains("quarantine_unreadable"), "{error}");
+    }
+    fs::write(&file, intact).unwrap();
+    f.save("3", "A note.");
+}
