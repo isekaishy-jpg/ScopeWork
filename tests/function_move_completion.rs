@@ -177,3 +177,80 @@ fn moving_a_function_reopens_both_chunks_and_keeps_research() {
         b"evidence bytes"
     );
 }
+
+/// Architecture 1 with chunk 2 (functions 3 and 4) and chunk 5 (function 6), all complete.
+fn complete_tree(f: &Fixture) {
+    f.ok(&[
+        "project",
+        "create",
+        "fixture",
+        "--name",
+        "Fixture",
+        "--binary",
+        "synthetic-build",
+    ]);
+    for args in [
+        ["0", "Architecture", ""],
+        ["1", "Source chunk", ""],
+        ["2", "Moved", "1000"],
+        ["2", "Stays", "2000"],
+        ["1", "Destination chunk", ""],
+        ["5", "Resident", "3000"],
+    ] {
+        let mut command = vec![
+            "node", "create", "fixture", "--parent", args[0], "--name", args[1],
+        ];
+        if !args[2].is_empty() {
+            command.extend(["--rva", args[2]]);
+        }
+        f.ok(&command);
+    }
+    for id in [3, 4, 6, 2, 5, 1] {
+        f.research(id, &format!("Research of {id}"));
+    }
+}
+
+fn batch(f: &Fixture, request: Value) -> std::process::Output {
+    let path = f.home.join("batch.json");
+    fs::write(&path, serde_json::to_vec(&request).unwrap()).unwrap();
+    std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        .env("SCOPEWORK_COORDINATOR", "off")
+        .arg("--home")
+        .arg(&f.home)
+        .args(["node", "batch", "fixture", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn names_cannot_carry_report_section_markers() {
+    let f = Fixture::new();
+    complete_tree(&f);
+    let o = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        .env("SCOPEWORK_COORDINATOR", "off")
+        .arg("--home")
+        .arg(&f.home)
+        .args([
+            "node",
+            "create",
+            "fixture",
+            "--parent",
+            "1",
+            "--name",
+            "Two\nlines",
+        ])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("one line"));
+    let p = f.ok(&["project", "show", "fixture"]);
+    let revision = f.ok(&["node", "show", "fixture", "4"])["node"]["revision"].clone();
+    let o = batch(
+        &f,
+        json!({"schema":2,"binary":p["binary"],
+            "update":[{"id":4,"name":"X <!-- research-content --> Y","expect_node_revision":revision}]}),
+    );
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("section markers"));
+    assert_eq!(f.status(4), "Complete");
+}

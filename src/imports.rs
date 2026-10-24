@@ -156,9 +156,10 @@ fn addition(project: &Project, batch: &Batch, first: u64) -> Result<Vec<Node>> {
             .get(&c.parent)
             .and_then(|k| k.child())
             .ok_or("Unknown/invalid parent; create parents before their children")?;
-        if c.name.trim().is_empty() || (kind == Kind::Function) != c.rva.is_some() {
+        if (kind == Kind::Function) != c.rva.is_some() {
             return Err("Invalid node name or RVA scope".into());
         }
+        let name = record_name(&c.name)?;
         if let Some(rva) = c.rva
             && (project.binary.trim().is_empty() || !rvas.insert(rva))
         {
@@ -169,7 +170,7 @@ fn addition(project: &Project, batch: &Batch, first: u64) -> Result<Vec<Node>> {
             id,
             parent: Some(c.parent),
             kind,
-            name: c.name.trim().into(),
+            name,
             rva: c.rva,
             context_only: c.context_only,
             status: Status::NotStarted,

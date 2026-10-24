@@ -218,6 +218,21 @@ pub(crate) fn valid_id(id: &str) -> bool {
             && (id.starts_with("com") || id.starts_with("lpt"))
             && matches!(id.as_bytes()[3], b'1'..=b'9'))
 }
+/// A record name as stored: trimmed, one line and free of the markers that delimit a report's
+/// sections. A name is rendered into its own report's heading and its parent's source list,
+/// ahead of those markers, so a name holding one would split both reports in the wrong place.
+pub(crate) fn record_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Node name cannot be empty".into());
+    }
+    if name.chars().any(char::is_control) || name.contains("<!-- research-") {
+        return Err(format!(
+            "Node name must be one line without report section markers: {name:?}"
+        ));
+    }
+    Ok(name.to_string())
+}
 /// A record's report path relative to its project folder, given its parent's report path (none
 /// for the App and architectures). The one rule for report locations: `app.md`,
 /// `architectures/<id>/research.md`, then a folder per chunk (`<id>`) and per function (`<RVA>`)
@@ -1367,9 +1382,7 @@ impl Library {
         }
         self.ensure_structural(p)?;
         self.check_seal(p, [parent], directed_by, "Creating a record in")?;
-        if name.trim().is_empty() {
-            return Err("Enter a name.".into());
-        }
+        let name = record_name(name)?;
         let kind = self.projects[p]
             .nodes
             .iter()
@@ -1400,7 +1413,7 @@ impl Library {
             expect_revision: Some(self.projects[p].revision),
             create: vec![catalog_batch::Create {
                 parent,
-                name: name.trim().into(),
+                name,
                 rva: address,
                 context_only: false,
             }],

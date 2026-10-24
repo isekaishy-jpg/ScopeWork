@@ -886,9 +886,10 @@ impl Library {
                 .kind
                 .child()
                 .ok_or("Functions cannot own children")?;
-            if c.name.trim().is_empty() || (kind == Kind::Function) != c.rva.is_some() {
+            if (kind == Kind::Function) != c.rva.is_some() {
                 return Err("Batch node requires a name and an RVA only for functions".into());
             }
+            let name = record_name(&c.name)?;
             if let Some(rva) = c.rva
                 && (before.binary.trim().is_empty() || !rvas.insert(rva))
             {
@@ -901,7 +902,7 @@ impl Library {
                 id,
                 parent: Some(c.parent),
                 kind,
-                name: c.name.trim().into(),
+                name,
                 rva: c.rva,
                 context_only: c.context_only,
                 status: Status::NotStarted,
@@ -933,10 +934,7 @@ impl Library {
                 changed.insert(parent);
             }
             if let Some(name) = &u.name {
-                if name.trim().is_empty() {
-                    return Err("Node name cannot be empty".into());
-                }
-                after.nodes[i].name = name.trim().into();
+                after.nodes[i].name = record_name(name)?;
             }
             if let Some(context) = u.context_only {
                 if u.id == 0 && context {
