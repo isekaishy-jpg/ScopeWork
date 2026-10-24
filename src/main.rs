@@ -63,7 +63,10 @@ type TrackerResult = Result<serde_json::Value, String>;
 /// Loads the tracker of `project`, with node `node`'s detail when it still exists.
 fn load_tracker(project: &str, node: Option<u64>) -> TrackerResult {
     let root = research_dashboard::paths::home(None)?.join("projects");
-    let lib = research::Library::read_project(root, project)?;
+    // Waits for an agent's write like a record load does, instead of answering busy at once.
+    let lib = research::with_lock_wait(std::time::Duration::from_secs(30), || {
+        research::Library::read_project(root, project)
+    })?;
     if lib.projects.is_empty() {
         return Err("Project was removed".into());
     }

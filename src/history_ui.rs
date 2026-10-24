@@ -88,7 +88,10 @@ impl HistoryView {
         self.error = false;
         std::thread::spawn(move || {
             let result = crate::paths::home(None).and_then(|home| {
-                let lib = Library::read_project(home.join("projects"), &project)?;
+                // Waits for an agent's write like a record load does.
+                let lib = with_lock_wait(std::time::Duration::from_secs(30), || {
+                    Library::read_project(home.join("projects"), &project)
+                })?;
                 if lib.projects.is_empty() {
                     return Err("Project was removed".into());
                 }
