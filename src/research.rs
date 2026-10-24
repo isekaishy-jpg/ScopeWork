@@ -235,19 +235,24 @@ pub(crate) fn parse_rvas(text: &str) -> Result<Vec<u32>> {
         })
         .collect()
 }
-/// A record name as stored: trimmed, one line and free of the markers that delimit a report's
-/// sections. A name is rendered into its own report's heading and its parent's source list,
-/// ahead of those markers, so a name holding one would split both reports in the wrong place.
+/// Refuses text that every report header renders ahead of the markers delimiting a report's
+/// sections (record and project names, the binary identity): text holding a line break or a
+/// marker would split those reports in the wrong place.
+pub(crate) fn header_text(what: &str, text: &str) -> Result<()> {
+    if text.chars().any(char::is_control) || text.contains("<!-- research-") {
+        return Err(format!(
+            "{what} must be one line without report section markers: {text:?}"
+        ));
+    }
+    Ok(())
+}
+/// A record name as stored: trimmed, not empty and safe in report headers (`header_text`).
 pub(crate) fn record_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("Node name cannot be empty".into());
     }
-    if name.chars().any(char::is_control) || name.contains("<!-- research-") {
-        return Err(format!(
-            "Node name must be one line without report section markers: {name:?}"
-        ));
-    }
+    header_text("Node name", name)?;
     Ok(name.to_string())
 }
 /// A record's report path relative to its project folder, given its parent's report path (none
@@ -867,6 +872,7 @@ impl Library {
         if binary.trim().is_empty() {
             return Err("Binary identity cannot be empty.".into());
         }
+        header_text("Binary identity", binary)?;
         let amendment = self.projects[p]
             .nodes
             .iter()
@@ -1227,6 +1233,8 @@ impl Library {
         if !valid_id(id) || name.trim().is_empty() {
             return Err("Use a project ID with lowercase letters, digits, and hyphens, and a nonempty name.".into());
         }
+        header_text("Project name", name)?;
+        header_text("Binary identity", binary)?;
         if self.root.join(id).exists() {
             return Err("That project already exists.".into());
         }

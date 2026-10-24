@@ -278,3 +278,40 @@ fn identity_amendments_keep_completion_and_ledger_pins() {
         "the tool's formatting is kept"
     );
 }
+
+#[test]
+fn header_text_and_unchanged_identities_are_handled() {
+    let home = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/test-workspaces")
+        .join(format!("header-text-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+            .env("SCOPEWORK_COORDINATOR", "off")
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let marker = "build 1\n<!-- research-content -->\nsha 00";
+    for args in [
+        vec![
+            "project", "create", "bad", "--name", "Bad", "--binary", marker,
+        ],
+        vec!["project", "create", "bad", "--name", "Two\nlines"],
+    ] {
+        let o = run(&args);
+        assert!(!o.status.success(), "{args:?}");
+        assert!(String::from_utf8_lossy(&o.stderr).contains("one line"));
+    }
+    assert!(
+        run(&["project", "create", "p", "--name", "P", "--binary", "b"])
+            .status
+            .success()
+    );
+    let o = run(&["project", "set-binary", "p", "--binary", marker]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("one line"));
+    std::fs::remove_dir_all(&home).unwrap();
+}
