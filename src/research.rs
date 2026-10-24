@@ -711,7 +711,9 @@ fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
     let mut taken = !queued_ahead(&live_tickets(&folder, id), None, writable) && take(&file);
     if !taken && wait > 0 {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait);
-        let ticket = take_ticket(&folder, id, writable);
+        // A ticket can lose the race to lock itself against another process's queue check;
+        // a new one keeps this waiter's place in the fair queue instead of polling past it.
+        let ticket = (0..3).find_map(|_| take_ticket(&folder, id, writable));
         let mut pause = std::time::Duration::from_millis(2);
         while !taken && std::time::Instant::now() < deadline {
             std::thread::sleep(pause);
