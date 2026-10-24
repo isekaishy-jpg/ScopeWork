@@ -775,3 +775,27 @@ fn an_unreadable_quarantine_file_refuses_writes_and_keeps_reads() {
     fs::write(&file, intact).unwrap();
     f.save("3", "A note.");
 }
+
+#[test]
+fn reopening_a_quarantined_record_is_refused() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "5",
+        "--origin",
+        "human",
+        "--reason",
+        "Done elsewhere",
+    ]);
+    let token = f.ok(&["node", "show", "fixture", "5"])["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let error = f.refused(&["node", "reopen", "fixture", "5", "--expect", &token]);
+    assert!(error.contains("quarantined"), "{error}");
+    let node = &f.ok(&["node", "show", "fixture", "5"])["node"];
+    assert_eq!(node["status"], "Complete");
+    assert!(node["accepted_hash"].is_string());
+}
