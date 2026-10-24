@@ -929,6 +929,47 @@ fn a_project_waiting_for_its_lock_does_not_hold_up_other_projects() {
 }
 
 #[test]
+fn a_cancelled_shutdown_admits_work_again() {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowExW, GetWindowThreadProcessId, SendMessageW, WM_ENDSESSION, WM_QUERYENDSESSION,
+    };
+    let f = Fixture::new(0);
+    f.coordinated(&["project", "revision", "fixture"]);
+    let pid = f.coordinated(&["coordinator", "status"])["pid"]
+        .as_u64()
+        .unwrap() as u32;
+    // The coordinator's hidden shutdown window (other coordinators may run beside this one).
+    let class: Vec<u16> = "ScopeworkCoordinator".encode_utf16().chain([0]).collect();
+    let mut window: HWND = std::ptr::null_mut();
+    loop {
+        // SAFETY: plain window enumeration by class name with a NUL-terminated string.
+        window = unsafe {
+            FindWindowExW(
+                std::ptr::null_mut(),
+                window,
+                class.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!window.is_null(), "no shutdown window for pid {pid}");
+        let mut owner = 0u32;
+        // SAFETY: valid window handle and out pointer.
+        unsafe { GetWindowThreadProcessId(window, &mut owner) };
+        if owner == pid {
+            break;
+        }
+    }
+    let admitting = || f.coordinated(&["coordinator", "status"])["admitting"].clone();
+    // SAFETY: messages to a window of the coordinator this test started.
+    unsafe { SendMessageW(window, WM_QUERYENDSESSION, 0, 0) };
+    assert_eq!(admitting(), false, "asked to end, it stops admitting work");
+    // The end of session was cancelled (wParam 0): work is admitted again.
+    unsafe { SendMessageW(window, WM_ENDSESSION, 0, 0) };
+    assert_eq!(admitting(), true);
+}
+
+#[test]
 fn the_writer_recovers_an_interrupted_import_before_committing() {
     if !cfg!(debug_assertions) {
         eprintln!("skipped: requires debug-build fault injection");

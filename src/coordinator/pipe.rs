@@ -47,9 +47,10 @@ pub fn spawn_detached(
 }
 /// Starts the hidden window thread and returns once its window exists (or could not be created).
 /// `on_query` runs when Windows asks whether the process may end (stop admitting work); `on_end`
-/// runs when it will end (finish and exit). Call it before the pipe accepts clients: Restart Manager
-/// and session end can only close the process gracefully through this window.
-pub fn shutdown_window(on_query: fn(), on_end: fn()) {
+/// runs with `true` when it will end (finish and exit) and with `false` when the end was cancelled
+/// (admit work again). Call it before the pipe accepts clients: Restart Manager and session end can
+/// only close the process gracefully through this window.
+pub fn shutdown_window(on_query: fn(), on_end: fn(bool)) {
     imp::shutdown_window(on_query, on_end)
 }
 
@@ -372,7 +373,7 @@ mod imp {
         Ok(())
     }
     /// The query-end-session and end-session handlers.
-    type Callbacks = (fn(), fn());
+    type Callbacks = (fn(), fn(bool));
     static CALLBACKS: std::sync::OnceLock<Callbacks> = std::sync::OnceLock::new();
     unsafe extern "system" fn window_proc(
         hwnd: HWND,
@@ -386,16 +387,15 @@ mod imp {
                 1
             }
             (WM_ENDSESSION, Some((_, on_end))) => {
-                if wparam != 0 {
-                    on_end();
-                }
+                // A zero wParam: the shutdown, logoff or Restart Manager session was cancelled.
+                on_end(wparam != 0);
                 0
             }
             // SAFETY: default handling for every other message.
             _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
         }
     }
-    pub fn shutdown_window(on_query: fn(), on_end: fn()) {
+    pub fn shutdown_window(on_query: fn(), on_end: fn(bool)) {
         if CALLBACKS.set((on_query, on_end)).is_err() {
             return;
         }
@@ -471,7 +471,7 @@ mod imp {
     pub fn connect(_: &str) -> Result<Option<File>, String> {
         Ok(None)
     }
-    pub fn shutdown_window(_: fn(), _: fn()) {}
+    pub fn shutdown_window(_: fn(), _: fn(bool)) {}
     pub fn spawn_detached(
         _: &std::path::Path,
         _: &[&std::ffi::OsStr],

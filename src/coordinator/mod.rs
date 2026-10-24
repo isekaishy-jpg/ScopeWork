@@ -281,6 +281,8 @@ struct Server {
     started: Instant,
     projects: Mutex<HashMap<String, Arc<ProjectState>>>,
     admitting: AtomicBool,
+    /// Set once the coordinator is finishing to exit; nothing re-admits work after that.
+    draining: AtomicBool,
     connections: AtomicUsize,
     last_activity: Mutex<Instant>,
     next_operation: AtomicU64,
@@ -992,9 +994,12 @@ pub fn serve(home: &Path) -> Result<Value, String> {
                 server.admitting.store(false, Ordering::Release);
             }
         },
-        || {
+        |ending| {
             if let Some(server) = SERVER.get() {
-                server.drain_and_exit();
+                if ending {
+                    server.drain_and_exit();
+                }
+                server.resume_admitting();
             }
         },
     );
@@ -1010,6 +1015,7 @@ pub fn serve(home: &Path) -> Result<Value, String> {
         started: Instant::now(),
         projects: Mutex::new(HashMap::new()),
         admitting: AtomicBool::new(true),
+        draining: AtomicBool::new(false),
         connections: AtomicUsize::new(0),
         last_activity: Mutex::new(Instant::now()),
         next_operation: AtomicU64::new(1),
@@ -1066,8 +1072,16 @@ impl Server {
             })
         })
     }
+    /// Admits work again after Windows cancelled the end of session it had asked about, unless
+    /// the coordinator is already finishing to exit.
+    fn resume_admitting(&self) {
+        if !self.draining.load(Ordering::Acquire) {
+            self.admitting.store(true, Ordering::Release);
+        }
+    }
     /// Stops admitting work, lets queued work finish, then exits.
     fn drain_and_exit(&self) -> ! {
+        self.draining.store(true, Ordering::Release);
         self.admitting.store(false, Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(60);
         while !self.queues_empty() && Instant::now() < deadline {
