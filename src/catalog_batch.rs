@@ -1158,7 +1158,8 @@ impl Library {
                         &node.name,
                         name,
                         base.zip(node.rva)
-                            .map(|(b, r)| format!("{:08X}", b + u64::from(r))),
+                            .and_then(|(b, r)| b.checked_add(u64::from(r)))
+                            .map(|va| format!("{va:08X}")),
                     )
                 })
             })
@@ -1585,6 +1586,23 @@ mod tests {
                 .collect(),
             evidence_only: false,
         }
+    }
+    #[test]
+    fn a_va_beyond_u64_gives_no_citation_instead_of_overflowing() {
+        let workspace = Workspace::new();
+        let mut lib = Library::open_project(workspace.0.clone(), Some("wide")).unwrap();
+        lib.create("wide", "Wide", "synthetic, image base 0xffffffffffffffff")
+            .unwrap();
+        let a = lib.add(0, 0, "Architecture", "").unwrap();
+        let c = lib.add(0, a, "Chunk", "").unwrap();
+        let f = lib.add(0, c, "Old", "1000").unwrap();
+        let revision = lib.projects[0].nodes[f as usize].revision;
+        let batch: Batch = serde_json::from_value(serde_json::json!({"schema":2,
+            "binary":lib.projects[0].binary,
+            "update":[{"id":f,"name":"New","expect_node_revision":revision}]}))
+        .unwrap();
+        lib.apply_batch(0, &batch).unwrap();
+        assert_eq!(lib.projects[0].nodes[f as usize].name, "New");
     }
     #[test]
     fn project_locks_isolate_writes_and_preserve_gui_snapshots() {
