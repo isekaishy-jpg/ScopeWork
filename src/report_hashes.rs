@@ -326,6 +326,10 @@ pub(super) fn mentioning(
         let mut all = persisted;
         all.extend(fresh);
         store_persisted(&persisted_path, &all);
+        // Earlier formats of the index are rebuilt here; nothing reads them any more.
+        for old in ["report-references.json", "report-references-v2.json"] {
+            let _ = fs::remove_file(dir.join("tools/workspaces/scopework-cache").join(old));
+        }
     }
     found
 }
@@ -388,6 +392,23 @@ mod tests {
         fs::write(&path, "bbbb").unwrap();
         set_mtime(&path, mtime);
         assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("bbbb")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn writing_the_index_removes_its_earlier_formats() {
+        let dir = workspace();
+        let cache = dir.join("tools/workspaces/scopework-cache");
+        fs::create_dir_all(&cache).unwrap();
+        for old in ["report-references.json", "report-references-v2.json"] {
+            fs::write(cache.join(old), "{}").unwrap();
+        }
+        fs::write(dir.join("a.md"), "see 00401000").unwrap();
+        let wanted: std::collections::HashSet<String> = ["00401000".to_string()].into();
+        assert_eq!(mentioning(&dir, &["a.md"], &wanted).len(), 1);
+        assert!(cache.join("report-references-v3.json").is_file());
+        assert!(!cache.join("report-references.json").exists());
+        assert!(!cache.join("report-references-v2.json").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 
