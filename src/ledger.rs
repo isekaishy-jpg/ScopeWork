@@ -128,10 +128,17 @@ pub(super) fn repath(
         let Ok(path) = serde_json::from_str::<String>(&format!("\"{}\"", value.as_str())) else {
             continue;
         };
-        let explicit_target = explicit.iter().find_map(|(from, to)| {
-            let rest = path.strip_prefix(from.as_str())?;
-            (rest.is_empty() || rest.starts_with('/')).then(|| format!("{to}{rest}"))
-        });
+        // The deepest moved folder decides, as for report links: removal archives every
+        // record flat, so a function under a removed chunk has its own archive folder.
+        let explicit_target = explicit
+            .iter()
+            .filter_map(|(from, to)| {
+                let rest = path.strip_prefix(from.as_str())?;
+                (rest.is_empty() || rest.starts_with('/'))
+                    .then(|| (from.len(), format!("{to}{rest}")))
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, target)| target);
         let Some(current) =
             explicit_target.or_else(|| resolver.current(&path).map(|(_, current)| current))
         else {

@@ -1678,6 +1678,30 @@ mod tests {
         assert_eq!(lib.projects[0].nodes[f as usize].name, "New");
     }
     #[test]
+    fn deleting_a_chunk_repaths_its_functions_ledger_rows_to_their_own_archive() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        let function = lib.report_rel(0, 3).unwrap();
+        let ledger = workspace.0.join("alpha").join(ledger::LEDGER);
+        fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+        fs::write(
+            &ledger,
+            format!(r#"{{"schema":1,"rows":[{{"report":"{function}"}}]}}"#),
+        )
+        .unwrap();
+        let request: Removal = serde_json::from_value(serde_json::json!({"schema":1,
+            "binary":lib.projects[0].binary,"expect_revision":lib.projects[0].revision,"ids":[2]}))
+        .unwrap();
+        let preview = lib.remove_nodes(0, &request, false, None).unwrap();
+        lib.remove_nodes(0, &request, false, preview["token"].as_str())
+            .unwrap();
+        let text = fs::read_to_string(&ledger).unwrap();
+        let row: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let archived = row["rows"][0]["report"].as_str().unwrap();
+        assert!(archived.ends_with("/3/research.md"), "{archived}");
+        assert!(workspace.0.join("alpha").join(archived).is_file());
+    }
+    #[test]
     fn project_locks_isolate_writes_and_preserve_gui_snapshots() {
         let workspace = Workspace::new();
         drop(workspace.populate("alpha"));
