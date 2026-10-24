@@ -564,3 +564,36 @@ fn a_quarantined_function_may_be_named_as_a_prerequisite() {
     ]);
     assert!(error.contains("Invalid hexadecimal RVA: zz"), "{error}");
 }
+
+#[test]
+fn restating_a_sealed_records_values_needs_no_direction() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "human",
+        "--reason",
+        "Voice code only",
+    ]);
+    let binary = f.ok(&["project", "revision", "fixture"])["binary"].clone();
+    let revision = f.ok(&["node", "show", "fixture", "3"])["node"]["revision"]
+        .as_u64()
+        .unwrap();
+    let o = f.batch(
+        serde_json::json!({"schema":2,"binary":binary,
+            "update":[{"id":3,"parent":2,"name":"F1","expect_node_revision":revision}],
+            "reorder":[{"parent":2,"children":[3]}]}),
+        None,
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // A real rename inside it still needs the human's direction.
+    let o = f.batch(
+        serde_json::json!({"schema":2,"binary":binary,
+            "update":[{"id":3,"name":"Renamed","expect_node_revision":revision}]}),
+        None,
+    );
+    assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("quarantined"));
+}

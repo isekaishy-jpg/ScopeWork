@@ -894,7 +894,24 @@ impl Library {
             }
         }
         // Quarantined records are sealed: creating in, moving into or out of, renaming,
-        // reordering or changing context needs the human's direction.
+        // reordering or changing context needs the human's direction. Restated values change
+        // nothing, so they need none.
+        let current: HashMap<u64, &Node> = before.nodes.iter().map(|n| (n.id, n)).collect();
+        let changes = |u: &&Update| {
+            current.get(&u.id).is_none_or(|n| {
+                u.parent.is_some_and(|p| n.parent != Some(p))
+                    || u.name.as_ref().is_some_and(|name| n.name != name.trim())
+                    || u.context_only.is_some_and(|c| n.context_only != c)
+            })
+        };
+        let reorders = |o: &&Order| {
+            let children = before
+                .nodes
+                .iter()
+                .filter(|n| n.parent == Some(o.parent))
+                .map(|n| n.id);
+            !children.eq(o.children.iter().copied())
+        };
         let touched = batch
             .create
             .iter()
@@ -903,9 +920,10 @@ impl Library {
                 batch
                     .update
                     .iter()
+                    .filter(changes)
                     .flat_map(|u| std::iter::once(u.id).chain(u.parent)),
             )
-            .chain(batch.reorder.iter().map(|o| o.parent));
+            .chain(batch.reorder.iter().filter(reorders).map(|o| o.parent));
         self.check_seal(p, touched, batch.directed_by.as_deref(), "Changing")?;
         let mut after = before.clone();
         let mut positions: HashMap<_, _> = after
