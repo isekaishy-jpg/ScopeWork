@@ -537,7 +537,14 @@ impl Library {
         if filter.catalog && filter.kind.as_deref().is_none_or(|k| k == "catalog") {
             let mut found = 0usize;
             for (rev, path, modified) in receipts(&root) {
-                if !in_range(rev) || !in_time(modified) {
+                if !in_range(rev) {
+                    continue;
+                }
+                // A receipt's file is written after its commit, so it is never older than the
+                // time it records: one last written well before `--from` cannot match.
+                if let (Some(from), Some(written)) = (filter.from, modified)
+                    && written.saturating_add(2) < from
+                {
                     continue;
                 }
                 if found >= limit {
@@ -549,10 +556,15 @@ impl Library {
                     continue;
                 };
                 let mut receipt = receipt.summary_value();
+                // The recorded commit time; receipts older than 0.13 have none and are dated by
+                // their file.
                 if receipt["at_unix"].is_null()
                     && let Some(at) = modified
                 {
                     receipt["at_unix"] = at.into();
+                }
+                if !in_time(receipt["at_unix"].as_u64()) {
+                    continue;
                 }
                 if let Some(summary) = summarize(rev, &receipt, filter) {
                     entries.push(summary);

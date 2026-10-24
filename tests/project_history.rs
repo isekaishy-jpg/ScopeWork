@@ -409,3 +409,30 @@ fn a_cancelled_imports_release_leaves_a_receipt() {
     assert_eq!(released["before"]["active_import"], id.as_str());
     assert!(released["after"]["active_import"].is_null());
 }
+
+#[test]
+fn a_date_filter_uses_the_recorded_commit_time() {
+    let f = Fixture::new();
+    // Receipt 2 records today's commit time; its file is made to look as if written in 2030.
+    let path = receipt(&f, 2);
+    let recorded: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(recorded["at_unix"].as_u64().is_some());
+    set_time(&path, 1_893_456_000); // 2030-01-01 UTC
+    let day = today();
+    let found = f.ok(&[
+        "history", "show", "fixture", "--only", "catalog", "--from", &day, "--to", &day,
+    ]);
+    assert!(revisions(&found).contains(&2), "{found}");
+    let later = f.ok(&[
+        "history",
+        "show",
+        "fixture",
+        "--only",
+        "catalog",
+        "--from",
+        "2030-01-01",
+        "--to",
+        "2030-01-01",
+    ]);
+    assert!(revisions(&later).is_empty(), "{later}");
+}
