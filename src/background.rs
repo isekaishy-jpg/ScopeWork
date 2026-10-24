@@ -58,6 +58,21 @@ pub(super) fn join<T: Send + 'static>(mut task: SWTask<T>) -> Result<T> {
 }
 
 use std::{collections::HashMap, sync::Arc};
+/// A project's sidecar state as the refresh reads it.
+struct Sidecars {
+    flags: std::collections::BTreeMap<u64, ReviewFlag>,
+    queued: HashMap<u64, String>,
+    quarantine: std::collections::BTreeMap<u64, quarantine::Quarantine>,
+}
+impl Sidecars {
+    fn read(dir: &Path, project: &Project) -> Self {
+        Self {
+            flags: super::catalog_batch::read_flags(dir).unwrap_or_default(),
+            queued: super::coordination::open_queue(dir, project),
+            quarantine: super::quarantine::read_records(dir),
+        }
+    }
+}
 pub(super) struct Snapshot {
     pub root: Option<PathBuf>,
     pub projects: Vec<Arc<Project>>,
@@ -169,6 +184,9 @@ pub(super) fn snapshot(
         staging: None,
     };
     let mut views = vec![];
+    // Each project's sidecars, read under the same shared lock as its catalog so both come from
+    // one revision.
+    let mut sidecars: HashMap<String, Sidecars> = HashMap::new();
     let mut ids = fs::read_dir(&root)
         .map_err(|e| e.to_string())?
         .flatten()
@@ -179,6 +197,10 @@ pub(super) fn snapshot(
     for id in ids {
         match Library::read_project(root.clone(), &id) {
             Ok(mut lib) => {
+                if let Some(project) = lib.projects.first() {
+                    let read = Sidecars::read(&root.join(&project.id), project);
+                    sidecars.insert(project.id.clone(), read);
+                }
                 // Meters hash reports and walk the tree; do that without holding the lock,
                 // which would otherwise delay agents' writes on every refresh.
                 lib.release();
@@ -213,18 +235,16 @@ pub(super) fn snapshot(
         input
             .iter()
             .map(|p| {
-                let flags =
-                    super::catalog_batch::read_flags(&flag_root.join(&p.id)).unwrap_or_default();
-                let queued = super::coordination::open_queue(&flag_root.join(&p.id), p);
-                let quarantined = super::quarantine::descriptions(
-                    p,
-                    &super::quarantine::read_records(&flag_root.join(&p.id)),
-                );
+                // A busy project keeps its previous catalog; its sidecars are read as they are.
+                let read = sidecars.remove(&p.id).unwrap_or_else(|| {
+                    let dir = flag_root.join(&p.id);
+                    Sidecars::read(&dir, p)
+                });
                 Arc::new(catalog_browser::BrowserData::new(
                     p,
-                    &flags,
-                    &queued,
-                    &quarantined,
+                    &read.flags,
+                    &read.queued,
+                    &super::quarantine::descriptions(p, &read.quarantine),
                 ))
             })
             .collect()

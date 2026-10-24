@@ -1,6 +1,6 @@
 # Proposal: fixes found by the storage architecture research
 
-Status: proposed 2026-10-24. Research: [research-storage-architecture.md](research-storage-architecture.md), section 11. These are standalone fixes. They do not depend on the storage backend, and they make today's files a cleaner input for it.
+Status: implemented 2026-10-24. Research: [research-storage-architecture.md](research-storage-architecture.md), section 11. These are standalone fixes. They do not depend on the storage backend, and they make today's files a cleaner input for it.
 
 ## 1. Every catalog change leaves a receipt
 
@@ -45,4 +45,4 @@ Layout migration also changes the catalog without a receipt (the old project's o
 - `history show` reports the scope change.
 - A date filter selects a receipt by its recorded time even when its file's modification time is moved outside the range.
 - Report paths for every kind, unchanged against a fixture.
-- The GUI snapshot's sidecar reads come from the locked library (exercised through `background::snapshot` on a fixture home).
+- Fix 4 has no automated test: what changed is only when the sidecars are read relative to the lock. The panel captures on a fixture home were pixel-identical before and after, and a flag set in the fixture still appears in the records browser ("Flagged (1)").
