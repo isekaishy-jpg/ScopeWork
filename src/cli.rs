@@ -868,7 +868,9 @@ fn run(args: Args) -> Result<Value, String> {
         // With a coordinator, writes also wait in its queue while the lock is free.
         let mut coordinator: Option<crate::coordinator::client::Connection> = None;
         loop {
-            let status = crate::research::lock_status(&root, id)?;
+            // Only the writer matters here: no probe for readers, which would take the lock
+            // exclusively for a moment four times a second.
+            let status = crate::research::lock_status_probing(&root, id, false)?;
             let queue_idle = !idle || {
                 if coordinator.is_none() {
                     coordinator = crate::coordinator::client::connect(&home, "cli", false)
