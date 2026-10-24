@@ -199,3 +199,45 @@ fn moves_queue_reopened_records_until_completed_again() {
     assert_eq!(open, vec![1, 2]);
     assert_eq!(f.ok(&["status", "fixture", "--summary"])["review_queue"], 2);
 }
+
+#[test]
+fn a_lease_too_long_to_represent_is_refused() {
+    let home = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/test-workspaces")
+        .join(format!("lease-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+            .env("SCOPEWORK_COORDINATOR", "off")
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(
+        run(&["project", "create", "fixture", "--name", "Fixture"])
+            .status
+            .success()
+    );
+    assert!(
+        run(&[
+            "node", "create", "fixture", "--parent", "0", "--name", "Arch"
+        ])
+        .status
+        .success()
+    );
+    let o = run(&[
+        "claim",
+        "set",
+        "fixture",
+        "1",
+        "--owner",
+        "agent",
+        "--lease-hours",
+        "18446744073709551615",
+    ]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("cannot be represented"));
+    std::fs::remove_dir_all(&home).unwrap();
+}

@@ -193,11 +193,20 @@ impl Library {
                     .unwrap_or_default()
             ));
         }
+        let expires_unix = match lease_hours {
+            None => None,
+            Some(hours) => Some(
+                hours
+                    .checked_mul(3600)
+                    .and_then(|seconds| now.checked_add(seconds))
+                    .ok_or("A claim lease of that many hours cannot be represented.")?,
+            ),
+        };
         let claim = Claim {
             owner: owner.into(),
             note: note.trim().into(),
             claimed_at_revision: self.projects[p].revision + 1,
-            expires_unix: lease_hours.map(|h| now + h * 3600),
+            expires_unix,
         };
         all.insert(id, claim.clone());
         self.write_sidecar(p, CLAIMS, write_map("claims", &all)?)?;
