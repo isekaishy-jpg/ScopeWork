@@ -567,6 +567,8 @@ impl Server {
     /// One project's writer: takes the most urgent operation, plus every queued record
     /// operation that may join it, and commits them together.
     fn write_loop(self: Arc<Self>, state: &Arc<ProjectState>) {
+        // This thread lives as long as the coordinator and evaluates completion on every commit.
+        research::retain_report_hashes_on_this_thread();
         loop {
             let batch = {
                 let Ok(mut queue) = state.queue.lock() else {

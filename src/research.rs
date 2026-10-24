@@ -128,6 +128,7 @@ pub use catalog_batch::Batch;
 pub use catalog_batch::Removal;
 pub use catalog_batch::ReviewFlag;
 pub use quarantine::Quarantine;
+pub(crate) use report_hashes::retain_on_this_thread as retain_report_hashes_on_this_thread;
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 fn hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -1562,6 +1563,8 @@ pub struct ResearchUi {
     views: Vec<ProjectView>,
     browser_data: Vec<std::sync::Arc<catalog_browser::BrowserData>>,
     refresh_task: Option<(u64, std::sync::mpsc::Receiver<Result<()>>)>,
+    /// The one long-lived thread that builds refresh snapshots (see `background::RefreshWorker`).
+    refresh_worker: Option<background::RefreshWorker>,
     snapshot_inbox: Option<background::SnapshotInbox>,
     load_task: Option<(u64, std::sync::mpsc::Receiver<Result<background::Loaded>>)>,
     action_task: Option<std::sync::mpsc::Receiver<ActionResult>>,
@@ -1625,6 +1628,7 @@ impl ResearchUi {
             views: vec![],
             browser_data: vec![],
             refresh_task: None,
+            refresh_worker: None,
             snapshot_inbox: None,
             load_task: None,
             action_task: None,
@@ -1913,7 +1917,7 @@ impl ResearchUi {
             let browser = self.browser_data.clone();
             let selected = (self.project_id.clone(), self.node);
             let views = self.views.clone();
-            std::thread::spawn(move || {
+            let job: background::RefreshJob = Box::new(move || {
                 let result = background::snapshot(fingerprint, projects, browser, views, selected);
                 let posted = owner
                     .try_post(solworker::SWPhase(1), move |slot| *slot = Some(result))
@@ -1921,6 +1925,16 @@ impl ResearchUi {
                     .map_err(|e| format!("Snapshot delivery rejected: {:?}", e.reason));
                 let _ = send.send(posted);
             });
+            let worker = self
+                .refresh_worker
+                .get_or_insert_with(background::RefreshWorker::start);
+            if let Err(job) = worker.run(job) {
+                // The thread is gone: start another. If that fails too, the dropped job closes
+                // its channel and this refresh reports the worker as failed.
+                let worker = background::RefreshWorker::start();
+                let _ = worker.run(job);
+                self.refresh_worker = Some(worker);
+            }
         }
     }
     pub fn refresh_library(&mut self) {
@@ -2323,6 +2337,38 @@ impl Library {
 #[cfg(test)]
 mod background_ui_tests {
     use super::*;
+    #[test]
+    fn refresh_jobs_share_one_thread_and_survive_a_panic() {
+        let worker = background::RefreshWorker::start();
+        let (send, recv) = std::sync::mpsc::channel();
+        let first = send.clone();
+        assert!(
+            worker
+                .run(Box::new(move || first
+                    .send(std::thread::current().id())
+                    .unwrap()))
+                .is_ok()
+        );
+        assert!(
+            worker
+                .run(Box::new(|| panic!("refresh job failure")))
+                .is_ok()
+        );
+        assert!(
+            worker
+                .run(Box::new(move || send
+                    .send(std::thread::current().id())
+                    .unwrap()))
+                .is_ok()
+        );
+        let timeout = std::time::Duration::from_secs(10);
+        let (a, b) = (
+            recv.recv_timeout(timeout).unwrap(),
+            recv.recv_timeout(timeout).unwrap(),
+        );
+        assert_eq!(a, b);
+        assert_ne!(a, std::thread::current().id());
+    }
     fn isolated_ui() -> ResearchUi {
         let mut ui = ResearchUi::new();
         ui.root = Some(PathBuf::from("C:/unused-background-ui-fixture"));

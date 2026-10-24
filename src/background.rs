@@ -267,6 +267,34 @@ pub(super) fn launch_import(root: &Path, project: &str, id: &str) -> Result<()> 
     Ok(())
 }
 
+/// The GUI's refresh thread: one named thread that runs refresh jobs in order for the life of
+/// the dashboard. Being long-lived, it keeps report stamps in memory between refreshes; a new
+/// thread per refresh would start empty every time. A job that panics is caught, so later
+/// refreshes still run; its result channel closes, which the caller reports.
+pub(super) struct RefreshWorker {
+    jobs: std::sync::mpsc::Sender<RefreshJob>,
+}
+pub(super) type RefreshJob = Box<dyn FnOnce() + Send>;
+impl RefreshWorker {
+    pub fn start() -> Self {
+        let (jobs, queue) = std::sync::mpsc::channel::<RefreshJob>();
+        // If the thread cannot start, `queue` is dropped with the closure and every `run` fails.
+        let _ = std::thread::Builder::new()
+            .name("scopework-refresh".into())
+            .spawn(move || {
+                super::report_hashes::retain_on_this_thread();
+                for job in queue {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                }
+            });
+        Self { jobs }
+    }
+    /// Queues `job`, or hands it back if the thread is gone.
+    pub fn run(&self, job: RefreshJob) -> std::result::Result<(), RefreshJob> {
+        self.jobs.send(job).map_err(|unsent| unsent.0)
+    }
+}
+
 /// Only the GUI owner pumps this inbox; no CPU task or filesystem work is helped.
 pub(super) struct SnapshotInbox {
     owner: solworker::SWOwner<Option<Result<Snapshot>>>,

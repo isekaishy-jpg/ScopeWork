@@ -4,8 +4,10 @@
 //! evaluation used to read and hash every completed report. A hash is reused while the file's
 //! size and modification time are unchanged and that time is older than the moment the hash was
 //! taken (git's racy-timestamp rule), so an edit in the same instant is never missed. Misses
-//! are hashed in parallel on Solworker. Each thread keeps a Solcache table, so the GUI's
-//! background refreshes reuse hashes; one-shot CLI calls load a persisted copy instead.
+//! are hashed in parallel on Solworker. Long-lived threads that opt in with
+//! `retain_on_this_thread` (the GUI's refresh thread, the coordinator's writers) keep a Solcache
+//! table so their repeated evaluations reuse hashes. Other threads keep nothing in memory, so a
+//! thread that ends leaves nothing behind; bulk evaluations load a persisted copy instead.
 use super::*;
 use solcache::{
     SCAccountingDomain, SCAllocationClass, SCByteLimit, SCCache, SCCleanupContext, SCLookup,
@@ -46,19 +48,37 @@ struct Memory {
     domain: SCAccountingDomain,
     cache: SCCache<'static, PathBuf, Stamp>,
 }
+impl Drop for Memory {
+    fn drop(&mut self) {
+        // Dropping the table queues its entries on the context, which is never dropped itself.
+        self.cache = SCCache::new();
+        self.cleanup.drain();
+    }
+}
 thread_local! {
+    static RETAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MEMORY: RefCell<Option<Memory>> = const { RefCell::new(None) };
 }
-fn with_memory<R>(f: impl FnOnce(&mut Memory) -> R) -> R {
+/// Keeps report stamps in memory on the calling thread from now on. Only for threads that live
+/// as long as their process: each one holds a table (within `MEMORY_BYTES`) and a cleanup context
+/// that is never freed.
+pub(crate) fn retain_on_this_thread() {
+    RETAIN.with(|retain| retain.set(true));
+}
+/// Runs `f` on this thread's table, or returns `None` if the thread does not retain stamps.
+fn with_memory<R>(f: impl FnOnce(&mut Memory) -> R) -> Option<R> {
+    if !RETAIN.with(std::cell::Cell::get) {
+        return None;
+    }
     MEMORY.with(|cell| {
         let mut slot = cell.borrow_mut();
         let memory = slot.get_or_insert_with(|| Memory {
-            // One context per thread for the thread's lifetime; it is bound to this thread.
+            // One context per retaining thread for the thread's lifetime; it is bound to it.
             cleanup: Box::leak(Box::new(SCCleanupContext::new())),
             domain: SCAccountingDomain::new(),
             cache: SCCache::new(),
         });
-        f(memory)
+        Some(f(memory))
     })
 }
 fn remembered(path: &Path) -> Option<Stamp> {
@@ -66,9 +86,10 @@ fn remembered(path: &Path) -> Option<Stamp> {
         SCLookup::Ready(view) => Some(view.get().clone()),
         _ => None,
     })
+    .flatten()
 }
 fn remember(path: PathBuf, stamp: Stamp) {
-    with_memory(|m| {
+    let _ = with_memory(|m| {
         let cost = (path.as_os_str().len() + 128) as u64;
         if let Ok(backing) =
             m.cleanup
@@ -79,8 +100,10 @@ fn remember(path: PathBuf, stamp: Stamp) {
         if m.cache.policy_bytes() > MEMORY_BYTES {
             m.cache
                 .maintain(SCByteLimit::Above(MEMORY_BYTES / 2), usize::MAX, false);
-            m.cleanup.drain();
         }
+        // Replaced and evicted entries wait on the cleanup queue until drained; the table's
+        // budget does not count them, so drain on every insert.
+        m.cleanup.drain();
     });
 }
 
@@ -173,10 +196,15 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
             out.insert(rel.to_string(), None);
             continue;
         };
-        let known = remembered(&path).or_else(|| persisted.get(rel).cloned());
+        let in_memory = remembered(&path);
+        let from_memory = in_memory.is_some();
+        let known = in_memory.or_else(|| persisted.get(rel).cloned());
         match known {
             Some(stamp) if stamp.reusable_for(size, mtime) => {
-                remember(path, stamp.clone());
+                // Only a stamp from the persisted copy needs installing; one from memory is there.
+                if !from_memory {
+                    remember(path, stamp.clone());
+                }
                 out.insert(rel.to_string(), stamp.hash);
             }
             _ => misses.push((rel.to_string(), size, mtime, None)),
@@ -387,6 +415,7 @@ mod tests {
 
     #[test]
     fn an_old_unchanged_file_reuses_its_stamp() {
+        retain_on_this_thread();
         let dir = workspace();
         let path = dir.join("r.md");
         fs::write(&path, "aaaa").unwrap();
@@ -400,6 +429,89 @@ mod tests {
         assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("aaaa")));
         fs::write(&path, "bbbbb").unwrap();
         assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("bbbbb")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Writes `count` reports dated a minute ago, so their stamps are reusable.
+    fn old_reports(dir: &Path, count: usize) -> Vec<String> {
+        let old = SystemTime::now() - Duration::from_secs(60);
+        (0..count)
+            .map(|i| {
+                let name = format!("r{i}.md");
+                fs::write(dir.join(&name), format!("report {i}")).unwrap();
+                set_mtime(&dir.join(&name), old);
+                name
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_thread_that_does_not_retain_keeps_nothing_in_memory() {
+        let dir = workspace();
+        let names = old_reports(&dir, 8);
+        let dir_for_thread = dir.clone();
+        let kept = std::thread::spawn(move || {
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            assert_eq!(hashes(&dir_for_thread, &refs).len(), refs.len());
+            assert_eq!(hashes(&dir_for_thread, &refs).len(), refs.len());
+            MEMORY.with(|cell| cell.borrow().is_some())
+        })
+        .join()
+        .unwrap();
+        assert!(!kept, "a short-lived thread must not create a stamp table");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn repeated_evaluations_leave_nothing_queued_for_cleanup() {
+        let dir = workspace();
+        let names = old_reports(&dir, 8);
+        let dir_for_thread = dir.clone();
+        let (cached, pending) = std::thread::spawn(move || {
+            retain_on_this_thread();
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            for _ in 0..5 {
+                hashes(&dir_for_thread, &refs);
+            }
+            // A changed report replaces its entry.
+            fs::write(dir_for_thread.join(&names[0]), "changed").unwrap();
+            hashes(&dir_for_thread, &refs);
+            MEMORY
+                .with(|cell| {
+                    let slot = cell.borrow();
+                    slot.as_ref().map(|m| (m.cache.len(), m.cleanup.snapshot()))
+                })
+                .unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(cached, 8);
+        assert_eq!((pending.pending_records, pending.in_flight_records), (0, 0));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dropping_a_retained_table_frees_its_entries() {
+        let dir = workspace();
+        let names = old_reports(&dir, 8);
+        let dir_for_thread = dir.clone();
+        let (cached, pending) = std::thread::spawn(move || {
+            retain_on_this_thread();
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            hashes(&dir_for_thread, &refs);
+            let (cleanup, cached) = MEMORY
+                .with(|cell| {
+                    let slot = cell.borrow();
+                    slot.as_ref().map(|m| (m.cleanup, m.cache.len()))
+                })
+                .unwrap();
+            drop(MEMORY.with(|cell| cell.borrow_mut().take()));
+            (cached, cleanup.snapshot())
+        })
+        .join()
+        .unwrap();
+        assert_eq!(cached, 8);
+        assert_eq!((pending.pending_records, pending.in_flight_records), (0, 0));
         fs::remove_dir_all(&dir).unwrap();
     }
 }
