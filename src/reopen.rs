@@ -8,7 +8,8 @@
 //! through the changed records' own revisions. Bumping such records only produced conflicts
 //! and journal noise. A quarantined record is never reopened and never passed through: its
 //! effective status is Complete whatever changes around it, and its own status must survive
-//! for when the quarantine is lifted.
+//! for when the quarantine is lifted. A context-only record is inventory, not part of its
+//! parent's required research, so a change to it does not reach its parent either.
 use super::*;
 use std::collections::{HashMap, HashSet};
 
@@ -16,8 +17,9 @@ use std::collections::{HashMap, HashSet};
 /// changed records themselves are the caller's to update. `old_parents` gives the previous
 /// parent of moved or removed records; `consumers` maps a function to the functions that
 /// tag it as a prerequisite; `sealed` is the quarantined set in `after`. A quarantined record
-/// that changed reaches only its consumers (they stamp its text) and its old parent (which
-/// lost it), not its current parent, whose completion cannot depend on it.
+/// or context-only record that changed reaches only its consumers (they stamp its text) and
+/// its old parent (which lost it), not its current parent, whose completion cannot depend on
+/// it.
 pub(super) fn reopen_affected(
     after: &mut Project,
     changed: &HashSet<u64>,
@@ -33,8 +35,12 @@ pub(super) fn reopen_affected(
         .collect();
     let reached = |id: u64, after: &Project| -> Vec<u64> {
         let mut next: Vec<u64> = consumers.get(&id).cloned().unwrap_or_default();
+        // A parent's completion depends on its required children only: not on a context-only
+        // child (inventory), nor on a quarantined one (always complete).
         if !sealed.contains(&id)
-            && let Some(parent) = positions.get(&id).and_then(|i| after.nodes[*i].parent)
+            && let Some(node) = positions.get(&id).map(|i| &after.nodes[*i])
+            && !node.context_only
+            && let Some(parent) = node.parent
         {
             next.push(parent);
         }

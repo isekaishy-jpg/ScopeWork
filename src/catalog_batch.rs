@@ -1833,6 +1833,35 @@ mod tests {
         assert!(lib.projects[0].nodes[3].accepted_hash.is_none());
     }
     #[test]
+    fn a_context_only_edit_leaves_its_completed_ancestors_complete() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        let revision = lib.projects[0].nodes[4].revision;
+        let batch: Batch = serde_json::from_value(serde_json::json!({"schema":2,
+            "binary":lib.projects[0].binary,
+            "update":[{"id":4,"context_only":true,"expect_node_revision":revision}]}))
+        .unwrap();
+        lib.apply_batch(0, &batch).unwrap();
+        for id in [3, 2, 1, 0] {
+            let token = lib.completion_token(0, id).unwrap();
+            lib.save_report(0, id, "Reviewed", "Evidence", true, &token)
+                .unwrap();
+        }
+        assert_eq!(lib.effective(0, 0), Status::Complete);
+        let token = lib.report_token(0, 4).unwrap();
+        lib.save_report(0, 4, "An inventory note", "", false, &token)
+            .unwrap();
+        for id in [0, 1, 2, 3] {
+            assert_eq!(
+                lib.projects[0].nodes[id].status,
+                Status::Complete,
+                "node {id}"
+            );
+            assert_eq!(lib.effective(0, id as u64), Status::Complete, "node {id}");
+        }
+        assert_eq!(lib.projects[0].nodes[4].status, Status::InProgress);
+    }
+    #[test]
     fn batch_reopens_consumers_and_ancestors_preserving_evidence_files() {
         let workspace = Workspace::new();
         let mut lib = workspace.populate("alpha");
