@@ -948,7 +948,7 @@ fn select(waiting: &mut Vec<Operation>, now: Instant) -> Vec<Operation> {
 
 /// The direct-mode queue view: who holds the project lock and who waits for it.
 pub fn lock_queue(root: &Path, project: &str) -> Result<Value, String> {
-    let locks = research::lock_status(root, project)?;
+    let locks = research::lock_status_probing(root, project, false)?;
     // The holder file is advisory: a held lock without one is still a running writer.
     let running = match (locks["writer_active"].as_bool(), &locks["writer"]) {
         (Some(true), Value::Object(_)) => vec![locks["writer"].clone()],

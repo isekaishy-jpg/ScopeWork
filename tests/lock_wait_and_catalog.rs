@@ -233,3 +233,12 @@ fn project_list_skips_and_reports_an_unreadable_folder() {
     assert_eq!(warning["kind"], "unreadable_project");
     assert_eq!(warning["project"], "fixture - Copy");
 }
+
+#[test]
+fn reading_a_missing_project_leaves_no_lock_file() {
+    let f = Fixture::new();
+    let o = f.run(&["status", "typo"]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("Unknown project"));
+    assert!(!f.projects().join(".project-locks/typo.lock").exists());
+}

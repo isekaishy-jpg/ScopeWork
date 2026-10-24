@@ -160,9 +160,13 @@ pub(crate) fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .create_new(true)
         .open(&temp)
         .map_err(|e| e.to_string())?;
-    file.write_all(bytes).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
+    let written = file.write_all(bytes).and_then(|_| file.sync_all());
     drop(file);
+    if let Err(e) = written {
+        // A full disk or an I/O error must not leave the temporary file behind.
+        let _ = fs::remove_file(&temp);
+        return Err(format!("Cannot write {}: {e}", path.display()));
+    }
     rename_retrying(&temp, path).map_err(|e| {
         let _ = fs::remove_file(&temp);
         format!("Cannot replace {}: {e}", path.display())
@@ -465,7 +469,12 @@ fn take_ticket(folder: &Path, id: &str, writable: bool) -> Option<Ticket> {
         .create_new(true)
         .open(&lock)
         .ok()?;
-    held.try_lock().ok()?;
+    if held.try_lock().is_err() {
+        // Another process's queue check holds it for a moment: never leave a ticket nobody holds.
+        drop(held);
+        let _ = fs::remove_file(&lock);
+        return None;
+    }
     let record = waiters.join(format!("{name}.json"));
     let command: Vec<String> = std::env::args().skip(1).take(3).collect();
     let since = std::time::SystemTime::now()
@@ -509,6 +518,8 @@ fn live_tickets(folder: &Path, id: &str) -> Vec<(String, bool)> {
             // about to be locked: give a fresh ticket a second.
             let _ = file.unlock();
             drop(file);
+            // A ticket dated in the future (the clock moved back) is not fresh: only its lock
+            // can show that its waiter lives.
             let young = name
                 .split('-')
                 .next()
@@ -517,8 +528,8 @@ fn live_tickets(folder: &Path, id: &str) -> Vec<(String, bool)> {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |d| d.as_nanos())
-                        .saturating_sub(n)
-                        < 1_000_000_000
+                        .checked_sub(n)
+                        .is_some_and(|age| age < 1_000_000_000)
                 });
             if !young {
                 let _ = fs::remove_file(&path);
@@ -541,10 +552,15 @@ fn queued_ahead(tickets: &[(String, bool)], me: Option<&str>, writable: bool) ->
 }
 /// Who holds and who waits for a project's lock, without taking it.
 pub fn lock_status(projects: &Path, id: &str) -> Result<serde_json::Value> {
+    lock_status_probing(projects, id, true)
+}
+/// `lock_status`, probing for shared readers only when `readers` is set. That probe briefly
+/// takes the project lock exclusively, so the queue view, polled every 2 s, skips it.
+pub fn lock_status_probing(projects: &Path, id: &str, readers: bool) -> Result<serde_json::Value> {
     if !valid_id(id) {
         return Err("Invalid project ID".into());
     }
-    let mut status = lock_entry(projects, id);
+    let mut status = lock_entry(projects, id, readers);
     // Tool resource locks taken by `job run` without a coordinator.
     let prefix = format!("{id}.res-");
     let mut resources = serde_json::Map::new();
@@ -558,7 +574,7 @@ pub fn lock_status(projects: &Path, id: &str) -> Result<serde_json::Value> {
             .strip_prefix(&prefix)
             .and_then(|rest| rest.strip_suffix(".lock"))
         {
-            let mut entry = lock_entry(projects, &resource_lock_id(id, resource));
+            let mut entry = lock_entry(projects, &resource_lock_id(id, resource), readers);
             if let Some(object) = entry.as_object_mut() {
                 object.remove("project");
             }
@@ -607,7 +623,7 @@ impl Drop for ResourceLock {
         let _ = fs::remove_file(&self.holder);
     }
 }
-fn lock_entry(projects: &Path, id: &str) -> serde_json::Value {
+fn lock_entry(projects: &Path, id: &str, probe_readers: bool) -> serde_json::Value {
     let folder = projects.join(".project-locks");
     let path = folder.join(format!("{id}.lock"));
     let (writer, readers) = match fs::OpenOptions::new().read(true).write(true).open(&path) {
@@ -617,8 +633,8 @@ fn lock_entry(projects: &Path, id: &str) -> serde_json::Value {
             if !writer {
                 let _ = file.unlock();
             }
-            let readers = !writer && file.try_lock().is_err();
-            if !writer && !readers {
+            let readers = probe_readers && !writer && file.try_lock().is_err();
+            if probe_readers && !writer && !readers {
                 let _ = file.unlock();
             }
             (writer, readers)
@@ -1014,6 +1030,19 @@ impl Library {
         };
         if !valid_id(id) {
             return Err("Invalid project identity".into());
+        }
+        if !writable && !root.join(id).join("project.json").is_file() {
+            // Nothing to read: no lock, so a mistyped ID leaves no lock file behind.
+            return Ok(Self {
+                root,
+                projects: vec![],
+                busy_projects: vec![],
+                unreadable: vec![],
+                recovery_blocked: None,
+                overlay: None,
+                staging: None,
+                _lock: None,
+            });
         }
         let acquire =
             |exclusive_gate: bool, write: bool| acquire_locks(&root, id, exclusive_gate, write);
@@ -2532,5 +2561,35 @@ mod background_ui_tests {
         assert_eq!(ui.fingerprint, "current");
         drop(ui);
         assert!(sender.try_post(solworker::SWPhase(1), |_| {}).is_err());
+    }
+}
+
+#[cfg(test)]
+mod lock_queue_tests {
+    use super::*;
+
+    #[test]
+    fn a_ticket_dated_in_the_future_is_judged_by_its_lock() {
+        let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("tickets-{}", uuid::Uuid::new_v4()));
+        let waiters = folder.join("p.waiters");
+        fs::create_dir_all(&waiters).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // Written before the clock moved back an hour; nobody holds its lock.
+        let dead = format!("{:020}-1-w-deadbeef", now + 3_600_000_000_000);
+        fs::write(waiters.join(format!("{dead}.lock")), b"").unwrap();
+        // A live waiter holds its own, whatever its date.
+        let live = format!("{:020}-2-w-cafef00d", now + 3_600_000_000_000);
+        let held = fs::File::create(waiters.join(format!("{live}.lock"))).unwrap();
+        held.lock().unwrap();
+        let tickets = live_tickets(&folder, "p");
+        assert_eq!(tickets, vec![(live, true)]);
+        assert!(!waiters.join(format!("{dead}.lock")).exists());
+        drop(held);
+        fs::remove_dir_all(&folder).unwrap();
     }
 }
