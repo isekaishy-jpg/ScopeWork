@@ -97,3 +97,31 @@ fn a_catalog_held_past_the_retries_answers_commit_pending_and_lands_later() {
         .collect();
     assert_eq!(names, ["Arch"]);
 }
+
+#[test]
+fn a_failed_receipt_write_after_the_rename_still_reports_success() {
+    let f = Fixture::new();
+    let o = f.run(
+        &[
+            "node", "create", "fixture", "--parent", "0", "--name", "Arch",
+        ],
+        &[
+            ("SCOPEWORK_RECEIPT_FAIL_TIMES", "1"),
+            ("SCOPEWORK_COMMIT_RETRY_MS", "2000"),
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let revision = serde_json::from_slice::<Value>(&o.stdout).unwrap()["revision"]
+        .as_u64()
+        .unwrap();
+    let receipts = f
+        .home
+        .join("projects/fixture/tools/workspaces/catalog-transactions-v4");
+    assert!(!receipts.join("pending").exists());
+    let journal: Value = serde_json::from_slice(
+        &fs::read(receipts.join(format!("revision-{revision}/journal.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(journal["kind"], "completed-catalog-delta");
+    assert!(journal["at_unix"].is_u64(), "{journal}");
+}

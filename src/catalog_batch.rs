@@ -426,13 +426,42 @@ fn finish(
     *project = j.after.clone();
     fault("catalog");
     let receipt = folder.with_file_name(format!("revision-{}", project.revision));
-    if receipt.exists() {
+    if !folder.exists() && receipt.join("journal.json").is_file() {
+        // An earlier attempt of this commit already turned the pending folder into its receipt
+        // and then failed to write the receipt's final journal: only that is left to do.
+    } else if receipt.exists() {
         return Err("Batch receipt already exists; preserve the pending journal.".into());
+    } else {
+        rename_retrying(&folder, &receipt).map_err(|e| at(&folder, e))?;
     }
-    rename_retrying(&folder, &receipt).map_err(|e| at(&folder, e))?;
     let committed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
+    // Debug builds only: fails the receipt's final journal write this many times, for the
+    // regression test of a retry after the pending folder became the receipt.
+    #[cfg(debug_assertions)]
+    {
+        static FAILURES: std::sync::OnceLock<std::sync::atomic::AtomicU32> =
+            std::sync::OnceLock::new();
+        let left = FAILURES.get_or_init(|| {
+            std::sync::atomic::AtomicU32::new(
+                std::env::var("SCOPEWORK_RECEIPT_FAIL_TIMES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+            )
+        });
+        if left
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |n| n.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err("injected receipt write failure".into());
+        }
+    }
     match delta {
         Some(mut delta) => {
             delta["kind"] = "completed-catalog-delta".into();
