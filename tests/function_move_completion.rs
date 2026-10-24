@@ -223,6 +223,47 @@ fn batch(f: &Fixture, request: Value) -> std::process::Output {
 }
 
 #[test]
+fn restating_current_values_changes_nothing() {
+    let f = Fixture::new();
+    complete_tree(&f);
+    let p = f.ok(&["project", "show", "fixture"]);
+    let revision = p["revision"].as_u64().unwrap();
+    let node = |id: u64| f.ok(&["node", "show", "fixture", &id.to_string()])["node"].clone();
+    // Schema 2, as reconciliation tools send it: every field restated at its current value.
+    let o = batch(
+        &f,
+        json!({"schema":2,"binary":p["binary"],
+            "update":[{"id":3,"parent":2,"name":"Moved","context_only":false,
+                "expect_node_revision":node(3)["revision"]}],
+            "reorder":[{"parent":2,"children":[3,4]}]}),
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    for id in [1, 2, 3, 4, 5, 6] {
+        assert_eq!(
+            f.status(id),
+            "Complete",
+            "node {id} must keep its completion"
+        );
+    }
+    assert_eq!(
+        f.ok(&["project", "revision", "fixture"])["revision"],
+        revision,
+        "nothing changed, so nothing is committed"
+    );
+    assert_eq!(f.ok(&["review-queue", "fixture"])["count"], 0);
+    // A real rename beside a restated name still applies, and restating keeps the record.
+    let o = batch(
+        &f,
+        json!({"schema":2,"binary":p["binary"],
+            "update":[{"id":3,"name":"Moved","expect_node_revision":node(3)["revision"]},
+                {"id":4,"name":"Renamed","expect_node_revision":node(4)["revision"]}]}),
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(node(4)["name"], "Renamed");
+    assert_eq!(f.status(3), "Complete");
+}
+
+#[test]
 fn names_cannot_carry_report_section_markers() {
     let f = Fixture::new();
     complete_tree(&f);

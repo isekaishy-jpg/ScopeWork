@@ -915,11 +915,17 @@ impl Library {
             changed.insert(c.parent);
         }
         let mut updates = HashSet::new();
+        // Records whose parent or membership actually changed, and those moved.
+        let mut reclassified = HashSet::new();
+        let mut moved_ids = vec![];
         for u in &batch.update {
             if !updates.insert(u.id) {
                 return Err("Duplicate node update in batch".into());
             }
             let i = *positions.get(&u.id).ok_or("Unknown update node")?;
+            // Only fields whose values differ change anything: restating a record's current
+            // parent, name or membership must not reopen it.
+            let mut touched = false;
             if let Some(parent) = u.parent {
                 let p = *positions.get(&parent).ok_or("Unknown new parent")?;
                 if after.nodes[p].kind.child() != Some(after.nodes[i].kind) {
@@ -927,27 +933,42 @@ impl Library {
                         "Move must preserve App / Architecture / Chunk / Function hierarchy".into(),
                     );
                 }
-                if let Some(old) = after.nodes[i].parent {
-                    changed.insert(old);
+                if after.nodes[i].parent != Some(parent) {
+                    if let Some(old) = after.nodes[i].parent {
+                        changed.insert(old);
+                    }
+                    after.nodes[i].parent = Some(parent);
+                    changed.insert(parent);
+                    moved_ids.push(u.id);
+                    reclassified.insert(u.id);
+                    touched = true;
                 }
-                after.nodes[i].parent = Some(parent);
-                changed.insert(parent);
             }
-            if let Some(name) = &u.name {
+            if let Some(name) = &u.name
+                && after.nodes[i].name != name.trim()
+            {
                 after.nodes[i].name = record_name(name)?;
+                touched = true;
             }
             if let Some(context) = u.context_only {
                 if u.id == 0 && context {
                     return Err("App cannot be context-only".into());
                 }
-                after.nodes[i].context_only = context;
+                if after.nodes[i].context_only != context {
+                    after.nodes[i].context_only = context;
+                    reclassified.insert(u.id);
+                    touched = true;
+                }
             }
-            changed.insert(u.id);
-            if let Some(parent) = after.nodes[i].parent {
-                changed.insert(parent);
+            if touched {
+                changed.insert(u.id);
+                if let Some(parent) = after.nodes[i].parent {
+                    changed.insert(parent);
+                }
             }
         }
         let mut ordered = HashSet::new();
+        let mut reordered = vec![];
         for order in &batch.reorder {
             if !positions.contains_key(&order.parent) || !ordered.insert(order.parent) {
                 return Err("Unknown or duplicate reorder parent".into());
@@ -965,6 +986,14 @@ impl Library {
             {
                 return Err("Reorder must list every child exactly once".into());
             }
+            // The order already in place changes nothing.
+            if slots
+                .iter()
+                .map(|i| after.nodes[*i].id)
+                .eq(order.children.iter().copied())
+            {
+                continue;
+            }
             let nodes: Vec<_> = order
                 .children
                 .iter()
@@ -980,6 +1009,7 @@ impl Library {
                 .map(|(i, n)| (n.id, i))
                 .collect();
             changed.insert(order.parent);
+            reordered.push(order.parent);
         }
         if changed.is_empty() && !batch.repair_legacy_links {
             return Ok(BatchOutcome {
@@ -1202,15 +1232,13 @@ impl Library {
             structural.insert(*id);
             structural.insert(*parent);
         }
-        for u in &batch.update {
-            if u.parent.is_some() || u.context_only.is_some() {
-                structural.insert(u.id);
-                if let Some(parent) = after.nodes[positions[&u.id]].parent {
-                    structural.insert(parent);
-                }
+        for id in &reclassified {
+            structural.insert(*id);
+            if let Some(parent) = after.nodes[positions[id]].parent {
+                structural.insert(parent);
             }
         }
-        structural.extend(batch.reorder.iter().map(|o| o.parent));
+        structural.extend(reordered.iter().copied());
         structural.extend(dependencies.iter().copied());
         structural.extend(
             old.paths
@@ -1231,7 +1259,11 @@ impl Library {
         let renamed: HashSet<u64> = batch
             .update
             .iter()
-            .filter(|u| u.name.is_some())
+            .filter(|u| {
+                u.name
+                    .as_ref()
+                    .is_some_and(|name| old.nodes.get(&u.id).is_some_and(|n| n.name != name.trim()))
+            })
             .map(|u| u.id)
             .collect();
         let accepted: HashMap<u64, (String, String)> = edits
@@ -1291,18 +1323,12 @@ impl Library {
             .chain(reached)
             .collect();
         if !reopened.is_empty() {
-            let moved: Vec<u64> = batch
-                .update
-                .iter()
-                .filter(|u| u.parent.is_some())
-                .map(|u| u.id)
-                .collect();
             let original = coordination::ensure(&root, coordination::REVIEW_QUEUE, "entries")?;
             let updated = coordination::queue_reopened(
                 &original,
                 &after,
                 &reopened,
-                &coordination::batch_reason(&moved),
+                &coordination::batch_reason(&moved_ids),
             )?;
             sidecars.push(Sidecar {
                 path: coordination::REVIEW_QUEUE.into(),
