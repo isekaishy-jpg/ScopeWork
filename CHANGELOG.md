@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.14.0a - 2026-10-24
+
+Release notes, validation and the commit ledger: [docs/releases/0.14.0a.md](docs/releases/0.14.0a.md). A minor release: new features since 0.13.1a, listed below with the fixes from three code reviews.
 
 Maintenance from the 2026-10-21 TODO pass; each item has its proposal in `docs/`.
 
