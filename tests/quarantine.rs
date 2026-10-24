@@ -644,3 +644,75 @@ fn a_status_reset_leaves_quarantined_records_alone() {
         "its own status survived the reset"
     );
 }
+
+#[test]
+fn edits_around_a_quarantined_record_keep_its_own_status() {
+    let f = Fixture::new();
+    // F1 (3) complete, and F2 (5) completed again on top of it as its prerequisite.
+    f.save("3", "F1 behaviour.");
+    f.complete("3");
+    let structural = f.ok(&["node", "show", "fixture", "5"])["structural_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.ok(&[
+        "deps",
+        "set",
+        "fixture",
+        "5",
+        "1000",
+        "--expect",
+        &structural,
+    ]);
+    f.complete("5");
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "5",
+        "--origin",
+        "human",
+        "--reason",
+        "Sealed after review",
+    ]);
+    let stored = |id: &str| {
+        f.ok(&["node", "show", "fixture", id])["node"]["status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // Editing the prerequisite outside the seal reopens nothing inside it.
+    f.save("3", "F1 behaviour, revised.");
+    assert_eq!(stored("5"), "Complete");
+    f.ok(&["node", "unquarantine", "fixture", "5", "--reason", "Lifted"]);
+    assert_eq!(
+        stored("5"),
+        "Complete",
+        "lifting restores the stored status"
+    );
+    // Its own completion survives; its prerequisite did change, so it now needs review.
+    assert_eq!(f.status("5"), "InProgress");
+}
+
+#[test]
+fn an_edit_inside_a_completed_quarantined_chunk_leaves_the_chunk_complete() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "4",
+        "--origin",
+        "human",
+        "--reason",
+        "Sealed chunk",
+    ]);
+    f.save("5", "F2 notes kept for the record.");
+    let chunk = f.ok(&["node", "show", "fixture", "4"]);
+    assert_eq!(chunk["node"]["status"], "Complete", "{chunk}");
+    f.ok(&["node", "unquarantine", "fixture", "4", "--reason", "Lifted"]);
+    assert_eq!(
+        f.ok(&["node", "show", "fixture", "4"])["node"]["status"],
+        "Complete"
+    );
+}

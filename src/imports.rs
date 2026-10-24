@@ -668,7 +668,11 @@ fn publish(
             }
         }
         let consumers = reopen::consumers_of(&after.dependencies);
-        reopen::reopen_affected(&mut after, &parents, &HashMap::new(), &consumers);
+        let sealed = super::quarantine::effective(
+            &after,
+            &super::quarantine::read_records(&project_root),
+        );
+        reopen::reopen_affected(&mut after, &parents, &HashMap::new(), &consumers, &sealed);
         after.revision += 1;
         after.structural_epoch += 1;
         after.active_import = None;

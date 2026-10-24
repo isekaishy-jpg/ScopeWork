@@ -6,19 +6,24 @@
 //! function, transitively through records it reopens. A record that is not complete is left
 //! untouched: it has no acceptance to lose, and its completion token will see the change
 //! through the changed records' own revisions. Bumping such records only produced conflicts
-//! and journal noise.
+//! and journal noise. A quarantined record is never reopened and never passed through: its
+//! effective status is Complete whatever changes around it, and its own status must survive
+//! for when the quarantine is lifted.
 use super::*;
 use std::collections::{HashMap, HashSet};
 
 /// Reopens the complete records that `changed` reaches in `after` and returns them. The
 /// changed records themselves are the caller's to update. `old_parents` gives the previous
 /// parent of moved or removed records; `consumers` maps a function to the functions that
-/// tag it as a prerequisite.
+/// tag it as a prerequisite; `sealed` is the quarantined set in `after`. A quarantined record
+/// that changed reaches only its consumers (they stamp its text) and its old parent (which
+/// lost it), not its current parent, whose completion cannot depend on it.
 pub(super) fn reopen_affected(
     after: &mut Project,
     changed: &HashSet<u64>,
     old_parents: &HashMap<u64, u64>,
     consumers: &HashMap<u64, Vec<u64>>,
+    sealed: &HashSet<u64>,
 ) -> Vec<u64> {
     let positions: HashMap<u64, usize> = after
         .nodes
@@ -28,7 +33,9 @@ pub(super) fn reopen_affected(
         .collect();
     let reached = |id: u64, after: &Project| -> Vec<u64> {
         let mut next: Vec<u64> = consumers.get(&id).cloned().unwrap_or_default();
-        if let Some(parent) = positions.get(&id).and_then(|i| after.nodes[*i].parent) {
+        if !sealed.contains(&id)
+            && let Some(parent) = positions.get(&id).and_then(|i| after.nodes[*i].parent)
+        {
             next.push(parent);
         }
         if let Some(parent) = old_parents.get(&id) {
@@ -40,7 +47,7 @@ pub(super) fn reopen_affected(
     let mut seen: HashSet<u64> = changed.clone();
     let mut reopened = vec![];
     while let Some(id) = queue.pop() {
-        if !seen.insert(id) {
+        if !seen.insert(id) || sealed.contains(&id) {
             continue;
         }
         let Some(&i) = positions.get(&id) else {
@@ -146,7 +153,13 @@ mod tests {
     fn reopens_complete_ancestors_and_consumers_only() {
         let mut p = project();
         let consumers = consumers_of(&p.dependencies);
-        let mut reopened = reopen_affected(&mut p, &[4].into(), &HashMap::new(), &consumers);
+        let mut reopened = reopen_affected(
+            &mut p,
+            &[4].into(),
+            &HashMap::new(),
+            &consumers,
+            &HashSet::new(),
+        );
         reopened.sort_unstable();
         // Chunk 2 (complete ancestor), 5 (consumer of 4) and 6 (consumer of 5) reopen.
         assert_eq!(reopened, vec![2, 5, 6]);
@@ -166,7 +179,13 @@ mod tests {
         let mut p = project();
         p.nodes[5].status = Status::InProgress; // function 5: its consumer 6 cannot depend on it
         let consumers = consumers_of(&p.dependencies);
-        let reopened = reopen_affected(&mut p, &[4].into(), &HashMap::new(), &consumers);
+        let reopened = reopen_affected(
+            &mut p,
+            &[4].into(),
+            &HashMap::new(),
+            &consumers,
+            &HashSet::new(),
+        );
         assert_eq!(reopened, vec![2]);
         assert_eq!(revision(&p, 6), 1);
     }
@@ -176,7 +195,13 @@ mod tests {
         let mut p = project();
         // Function 4 now sits in chunk 3; its old chunk 2 is complete and must reopen.
         p.nodes[4].parent = Some(3);
-        let reopened = reopen_affected(&mut p, &[4].into(), &[(4, 2)].into(), &HashMap::new());
+        let reopened = reopen_affected(
+            &mut p,
+            &[4].into(),
+            &[(4, 2)].into(),
+            &HashMap::new(),
+            &HashSet::new(),
+        );
         assert_eq!(reopened, vec![2]);
     }
 }

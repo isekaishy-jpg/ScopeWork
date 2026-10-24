@@ -839,7 +839,8 @@ impl Library {
             }
         }
         let consumers = reopen::consumers_of(&before.dependencies);
-        reopen::reopen_affected(&mut after, &edited, &HashMap::new(), &consumers);
+        let sealed = self.quarantined(p);
+        reopen::reopen_affected(&mut after, &edited, &HashMap::new(), &consumers, &sealed);
         after.revision += 1;
         let journal = Journal {
             before,
@@ -1375,7 +1376,9 @@ impl Library {
             .collect();
         kept_complete.sort_unstable();
         let consumers = reopen::consumers_of(&after.dependencies);
-        let reached = reopen::reopen_affected(&mut after, &existing, &old_parents, &consumers);
+        let sealed = quarantine::effective(&after, &self.quarantines(p)?);
+        let reached =
+            reopen::reopen_affected(&mut after, &existing, &old_parents, &consumers, &sealed);
         after.revision += 1;
         after.layout_version = before.layout_version.max(3);
         after.structural_epoch += 1;

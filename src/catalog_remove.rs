@@ -337,7 +337,9 @@ impl Library {
             .filter_map(|id| Some((*id, old.nodes[id].parent?)))
             .collect();
         let consumers = reopen::consumers_of(&before.dependencies);
-        let reached = reopen::reopen_affected(&mut after, &changed, &old_parents, &consumers);
+        let quarantined = crate::research::quarantine::effective(&after, &self.quarantines(p)?);
+        let reached =
+            reopen::reopen_affected(&mut after, &changed, &old_parents, &consumers, &quarantined);
         let invalid: HashSet<u64> = edited.iter().copied().chain(reached).collect();
         let mut dependencies: Vec<_> = removed_dependencies
             .iter()

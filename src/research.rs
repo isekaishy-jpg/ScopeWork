@@ -1315,11 +1315,13 @@ impl Library {
     /// Reopens the complete records a change to `id` reaches (see `reopen.rs`).
     fn reopen_affected(&mut self, p: usize, id: u64) {
         let consumers = reopen::consumers_of(&self.projects[p].dependencies);
+        let sealed = self.quarantined(p);
         reopen::reopen_affected(
             &mut self.projects[p],
             &[id].into(),
             &Default::default(),
             &consumers,
+            &sealed,
         );
     }
     pub fn effective_all(&self, p: usize) -> std::collections::HashMap<u64, Status> {
