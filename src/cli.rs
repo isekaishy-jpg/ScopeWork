@@ -1756,6 +1756,13 @@ pub(crate) fn error_kind(error: &str) -> &str {
             "operation_failed"
         })
 }
+/// Writes a command's answer to stdout. A reader that has gone (`research ... | head`) ends the
+/// output quietly: the command's work is done, and `println!` would panic instead.
+fn print_answer(text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{text}").and_then(|()| out.flush());
+}
 /// Entry point of the `research` executable.
 pub fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -1785,7 +1792,7 @@ pub fn main() {
     let job = matches!(args.command, Command::Job(JobCommand::Run { .. }));
     match run(args) {
         Ok(value) => {
-            println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            print_answer(&serde_json::to_string_pretty(&value).unwrap());
             // `job run` exits with its own result: the command's failure, or an error result.
             if job && let Some(exit) = value["exit"].as_i64().filter(|e| *e != 0) {
                 std::process::exit(i32::try_from(exit).unwrap_or(1));
@@ -1822,10 +1829,7 @@ fn through_coordinator(raw: &[String], args: &Args) -> Option<i32> {
         Ok(answer) if answer.exit == 75 => None,
         Ok(answer) => {
             if let Some(stdout) = &answer.stdout {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(stdout).unwrap_or_default()
-                );
+                print_answer(&serde_json::to_string_pretty(stdout).unwrap_or_default());
             }
             for line in &answer.stderr {
                 eprintln!("{line}");

@@ -285,3 +285,23 @@ fn reading_a_missing_project_leaves_no_lock_file() {
         );
     }
 }
+
+#[test]
+fn a_closed_output_pipe_ends_the_answer_quietly() {
+    let f = Fixture::new();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_research"))
+        .env("SCOPEWORK_COORDINATOR", "off")
+        .arg("--home")
+        .arg(&f.home)
+        .args(["node", "list", "fixture"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The reader goes away before the answer is written (as `| head -c 1` would).
+    drop(child.stdout.take());
+    let o = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(o.status.success(), "{stderr}");
+}
