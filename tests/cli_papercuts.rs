@@ -313,5 +313,16 @@ fn header_text_and_unchanged_identities_are_handled() {
     let o = run(&["project", "set-binary", "p", "--binary", marker]);
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("one line"));
+    // Restating the identity commits nothing.
+    let revision = |o: std::process::Output| {
+        serde_json::from_slice::<serde_json::Value>(&o.stdout).unwrap()["revision"].clone()
+    };
+    let before = revision(run(&["project", "revision", "p"]));
+    assert!(
+        run(&["project", "set-binary", "p", "--binary", "b"])
+            .status
+            .success()
+    );
+    assert_eq!(revision(run(&["project", "revision", "p"])), before);
     std::fs::remove_dir_all(&home).unwrap();
 }

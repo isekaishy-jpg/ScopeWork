@@ -873,6 +873,10 @@ impl Library {
             return Err("Binary identity cannot be empty.".into());
         }
         header_text("Binary identity", binary)?;
+        // Compared exactly as given: batches name the identity byte for byte.
+        if self.projects[p].binary == binary {
+            return Ok(());
+        }
         let amendment = self.projects[p]
             .nodes
             .iter()
@@ -891,9 +895,6 @@ impl Library {
                     "Binary identity is locked after adding functions: an amendment must keep every pinned value; missing {}.",
                     missing.join(", ")
                 ));
-            }
-            if self.projects[p].binary == binary {
-                return Ok(());
             }
         }
         let before = self.projects[p].clone();
