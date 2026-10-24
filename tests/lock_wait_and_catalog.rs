@@ -241,4 +241,11 @@ fn reading_a_missing_project_leaves_no_lock_file() {
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("Unknown project"));
     assert!(!f.projects().join(".project-locks/typo.lock").exists());
+    // Writes too: only creating a project takes the lock of one that does not exist yet.
+    let o = f.run(&["node", "flag", "typo-write", "3", "--reason", "x"]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("Unknown project"));
+    assert!(!f.projects().join(".project-locks/typo-write.lock").exists());
+    f.ok(&["project", "create", "second", "--name", "Second"]);
+    assert!(f.projects().join("second/project.json").is_file());
 }

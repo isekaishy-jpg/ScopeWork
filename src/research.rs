@@ -984,6 +984,21 @@ impl Library {
     pub fn open_project(root: PathBuf, selected: Option<&str>) -> Result<Self> {
         Self::open_mode(root, selected, true, true)
     }
+    /// A library of no projects at `root`, holding no lock: what creating a project starts from,
+    /// without opening (and recovering) every project in the home.
+    pub fn empty(root: PathBuf) -> Result<Self> {
+        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        Ok(Self {
+            root,
+            projects: vec![],
+            busy_projects: vec![],
+            unreadable: vec![],
+            recovery_blocked: None,
+            overlay: None,
+            staging: None,
+            _lock: None,
+        })
+    }
     /// Releases this library's locks while keeping its catalog in memory (the coordinator's
     /// writer between batches). Only `relock` makes it writable again.
     pub(crate) fn release_locks(&mut self) {
@@ -1038,18 +1053,10 @@ impl Library {
         if !valid_id(id) {
             return Err("Invalid project identity".into());
         }
+        // A writable open of a project that does not exist yet takes its lock, so the caller
+        // can create it in place (`create`); a read-only one has nothing to read and takes none.
         if !writable && !root.join(id).join("project.json").is_file() {
-            // Nothing to read: no lock, so a mistyped ID leaves no lock file behind.
-            return Ok(Self {
-                root,
-                projects: vec![],
-                busy_projects: vec![],
-                unreadable: vec![],
-                recovery_blocked: None,
-                overlay: None,
-                staging: None,
-                _lock: None,
-            });
+            return Self::empty(root);
         }
         let acquire =
             |exclusive_gate: bool, write: bool| acquire_locks(&root, id, exclusive_gate, write);

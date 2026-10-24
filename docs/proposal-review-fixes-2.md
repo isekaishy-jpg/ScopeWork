@@ -82,10 +82,7 @@ Every caller passes the set: report saves, prerequisite changes, batches, remova
 
 **Problem.** The first round stopped read-only opens of a missing project from taking a lock. Writable opens still take it before checking that the project exists.
 
-**Design.**
-- A writable open of a project without a catalog returns no project and takes no lock.
-- Only project creation, which must serialize two creations of the same ID, takes the lock of a project that does not exist yet.
-- `project create`, `init` and the GUI's New project no longer open, and recover, every project in the home just to create one.
+**Design.** A writable open of a missing project must keep taking its lock: that is how `create` works, opening the project and then creating it in place under the lock. So the CLI answers a command on a project without a catalog with "Unknown project" before opening anything. The coordinator already refuses one when it loads it. `project create`, `init` and the GUI's New project start from an empty library instead of opening, and recovering, every project in the home.
 
 ## 13. An empty pending folder looks like a transaction in flight
 

@@ -1036,8 +1036,28 @@ fn run(args: Args) -> Result<Value, String> {
             | Command::Journal { compact: false, .. }
             | Command::Impl(ImplCommand::Show { .. } | ImplCommand::Where { .. })
     );
+    let creating = matches!(
+        args.command,
+        Command::Init | Command::Project(ProjectCommand::Create { .. })
+    );
+    // A command on a project that does not exist answers without opening it: a writable open
+    // would take the missing project's lock (that is how creation works) and leave its file.
+    if let Some(id) = selected
+        && !creating
+        && valid_id(id)
+        && !home
+            .join("projects")
+            .join(id)
+            .join("project.json")
+            .is_file()
+    {
+        return Err(format!("Unknown project: {id}"));
+    }
     let mut lib = if read_only {
         Library::read_project(home.join("projects"), selected.unwrap())?
+    } else if creating {
+        // Creating one project needs none of the others opened, or recovered.
+        Library::empty(home.join("projects"))?
     } else {
         Library::open_project(home.join("projects"), selected)?
     };

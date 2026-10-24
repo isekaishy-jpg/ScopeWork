@@ -917,7 +917,7 @@ impl ResearchUi {
             self.new_project_open = false;
             self.open = true;
             self.action(move |root| {
-                let mut lib = Library::open(root)?;
+                let mut lib = Library::empty(root)?;
                 lib.create(&id, &name, "")?;
                 Ok(Some((id, 0)))
             });
