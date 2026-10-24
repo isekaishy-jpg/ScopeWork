@@ -1879,7 +1879,7 @@ impl ResearchUi {
                                 self.dirty = false;
                                 self.scope_dirty = false;
                             }
-                            self.refresh_library();
+                            self.refresh_after_action();
                         }
                         Err(e) => {
                             self.message = e;
@@ -2088,10 +2088,16 @@ impl ResearchUi {
             .collect::<Vec<_>>()
             .join(" ")
     }
+    /// Re-reads every project at once (the Refresh menu item).
     pub fn refresh_library(&mut self) {
+        self.signatures.clear();
+        self.refresh_after_action();
+    }
+    /// Refreshes at once after an action: only what changed is read again (the action's commit
+    /// changes its project's signature), not every project in the home.
+    fn refresh_after_action(&mut self) {
         self.refresh_generation += 1;
         self.fingerprint.clear();
-        self.signatures.clear();
         self.last_poll = std::time::Instant::now() - std::time::Duration::from_secs(3);
     }
     pub fn snapshot(&self) -> Vec<ProjectView> {
@@ -2583,6 +2589,17 @@ mod background_ui_tests {
         assert_eq!(ui.body, "unsaved prose");
         assert!(ui.dirty);
         assert!(ui.requested.is_none());
+    }
+    #[test]
+    fn an_action_refreshes_only_what_changed_and_the_menu_refreshes_all() {
+        let mut ui = isolated_ui();
+        ui.fingerprint = "f".into();
+        ui.signatures = [("alpha".to_string(), "s".to_string())].into();
+        ui.refresh_after_action();
+        assert!(ui.fingerprint.is_empty(), "the next poll refreshes");
+        assert_eq!(ui.signatures.len(), 1, "unchanged projects are reused");
+        ui.refresh_library();
+        assert!(ui.signatures.is_empty(), "Refresh re-reads every project");
     }
     #[test]
     fn the_unreadable_note_survives_record_loads_and_clears_when_resolved() {
