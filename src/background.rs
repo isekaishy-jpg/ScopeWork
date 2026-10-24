@@ -95,6 +95,8 @@ pub(super) struct Loaded {
     pub dependencies: String,
     pub status: Status,
     pub blockers: Vec<String>,
+    /// Where the record is implemented, from the implementation tracker.
+    pub implemented_in: Option<String>,
 }
 pub(super) fn load(project: &str, id: u64) -> Result<Loaded> {
     let root = crate::paths::home(None)?.join("projects");
@@ -117,6 +119,7 @@ pub(super) fn load(project: &str, id: u64) -> Result<Loaded> {
         dependencies: record.dependency_rvas,
         status: record.effective_status,
         blockers: lib.completion_blockers(0, id)?,
+        implemented_in: lib.impl_where(0, id)?["path"].as_str().map(str::to_string),
     })
 }
 

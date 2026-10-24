@@ -56,6 +56,10 @@ pub(crate) enum Command {
     /// Group related projects into one dashboard tab (presentation only; no project changes).
     #[command(subcommand)]
     Group(GroupCommand),
+    /// Track the recreation: a free-form tree of its organisation, the research functions placed
+    /// where they are implemented, implementation-only items and their completion.
+    #[command(subcommand)]
+    Impl(ImplCommand),
     /// Who holds a project's lock and which processes are waiting for it (takes no lock).
     Locks { project: String },
     /// Block until a condition holds instead of polling from outside.
@@ -247,6 +251,115 @@ fn job_result(job: imports::Job) -> Result<Value, String> {
         ));
     }
     serde_json::to_value(job).map_err(|e| e.to_string())
+}
+#[derive(Subcommand)]
+pub(crate) enum ImplCommand {
+    /// The tree with counters per node and totals; --node adds one node's placements and items.
+    Show {
+        project: String,
+        #[arg(long)]
+        node: Option<u64>,
+        /// List the function records not placed anywhere yet.
+        #[arg(long)]
+        unplaced: bool,
+    },
+    /// Where a research record is implemented.
+    Where {
+        project: String,
+        record: u64,
+    },
+    /// Set the implementation repository's local path and optional remote.
+    Repo {
+        project: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long, default_value = "")]
+        remote: String,
+    },
+    /// Add a node (crate, module, file or any grouping) under --parent, or at the top level.
+    Add {
+        project: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        parent: Option<u64>,
+    },
+    Rename {
+        project: String,
+        node: u64,
+        #[arg(long)]
+        name: String,
+    },
+    /// Move a node under --parent, or to the top level without it.
+    Move {
+        project: String,
+        node: u64,
+        #[arg(long)]
+        parent: Option<u64>,
+    },
+    /// Remove a node that holds no child nodes, placements or items.
+    Remove {
+        project: String,
+        node: u64,
+    },
+    /// Place research function records on a node (each record on at most one node).
+    Place {
+        project: String,
+        node: u64,
+        #[arg(required = true)]
+        records: Vec<u64>,
+    },
+    Unplace {
+        project: String,
+        #[arg(required = true)]
+        records: Vec<u64>,
+    },
+    /// Add an implementation-only item (needed to make the recreation match) to a node.
+    ItemAdd {
+        project: String,
+        node: u64,
+        #[arg(long)]
+        name: String,
+    },
+    ItemRemove {
+        project: String,
+        item: u64,
+    },
+    /// Mark placed records and implementation-only items complete.
+    Complete {
+        project: String,
+        #[arg(long = "record")]
+        records: Vec<u64>,
+        #[arg(long = "item")]
+        items: Vec<u64>,
+    },
+    /// Clear the completion of placed records and implementation-only items.
+    Reopen {
+        project: String,
+        #[arg(long = "record")]
+        records: Vec<u64>,
+        #[arg(long = "item")]
+        items: Vec<u64>,
+    },
+}
+impl ImplCommand {
+    pub(crate) fn project(&self) -> &str {
+        match self {
+            Self::Show { project, .. }
+            | Self::Where { project, .. }
+            | Self::Repo { project, .. }
+            | Self::Add { project, .. }
+            | Self::Rename { project, .. }
+            | Self::Move { project, .. }
+            | Self::Remove { project, .. }
+            | Self::Place { project, .. }
+            | Self::Unplace { project, .. }
+            | Self::ItemAdd { project, .. }
+            | Self::ItemRemove { project, .. }
+            | Self::Complete { project, .. }
+            | Self::Reopen { project, .. } => project,
+        }
+    }
 }
 #[derive(Subcommand)]
 pub(crate) enum GroupCommand {
@@ -881,6 +994,7 @@ fn run(args: Args) -> Result<Value, String> {
         Command::Deps(DepsCommand::Get { project, .. } | DepsCommand::Set { project, .. })
         | Command::Journal { project, .. }
         | Command::Status { project, .. } => Some(project.as_str()),
+        Command::Impl(command) => Some(command.project()),
         _ => None,
     };
     let read_only = matches!(
@@ -904,6 +1018,7 @@ fn run(args: Args) -> Result<Value, String> {
             | Command::History(HistoryCommand::Show { .. })
             | Command::Status { .. }
             | Command::Journal { compact: false, .. }
+            | Command::Impl(ImplCommand::Show { .. } | ImplCommand::Where { .. })
     );
     let mut lib = if read_only {
         Library::read_project(home.join("projects"), selected.unwrap())?
@@ -983,6 +1098,49 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             lib.journal_maintenance(p, compact || compact_sidecars, compact_sidecars)
         }
         Command::Import(_) => unreachable!("import commands handled before opening a library"),
+        Command::Impl(command) => {
+            let p = project(lib, command.project())?;
+            match command {
+                ImplCommand::Show { node, unplaced, .. } => lib.impl_view(p, node, unplaced),
+                ImplCommand::Where { record, .. } => lib.impl_where(p, record),
+                ImplCommand::Repo { path, remote, .. } => {
+                    lib.impl_set_repository(p, &path, &remote)?;
+                    Ok(json!({"repository": path.trim(), "remote": remote.trim()}))
+                }
+                ImplCommand::Add { name, parent, .. } => {
+                    let id = lib.impl_add(p, parent, &name)?;
+                    Ok(json!({"node": id}))
+                }
+                ImplCommand::Rename { node, name, .. } => {
+                    lib.impl_rename(p, node, &name)?;
+                    Ok(json!({"node": node, "name": name.trim()}))
+                }
+                ImplCommand::Move { node, parent, .. } => {
+                    lib.impl_move(p, node, parent)?;
+                    Ok(json!({"node": node, "parent": parent}))
+                }
+                ImplCommand::Remove { node, .. } => {
+                    lib.impl_remove(p, node)?;
+                    Ok(json!({"removed": node}))
+                }
+                ImplCommand::Place { node, records, .. } => lib.impl_place(p, node, &records),
+                ImplCommand::Unplace { records, .. } => lib.impl_unplace(p, &records),
+                ImplCommand::ItemAdd { node, name, .. } => {
+                    let id = lib.impl_add_item(p, node, &name)?;
+                    Ok(json!({"node": node, "item": id}))
+                }
+                ImplCommand::ItemRemove { item, .. } => {
+                    lib.impl_remove_item(p, item)?;
+                    Ok(json!({"removed_item": item}))
+                }
+                ImplCommand::Complete { records, items, .. } => {
+                    lib.impl_set_complete(p, &records, &items, true)
+                }
+                ImplCommand::Reopen { records, items, .. } => {
+                    lib.impl_set_complete(p, &records, &items, false)
+                }
+            }
+        }
         Command::Project(command) => match command {
             ProjectCommand::List => {
                 if !lib.busy_projects.is_empty() {
@@ -1880,6 +2038,18 @@ pub(crate) fn route(command: &Command) -> Route {
             0,
         ),
         Command::Claim(ClaimCommand::List { project }) => read_route(project, None),
+        Command::Impl(command @ (ImplCommand::Show { .. } | ImplCommand::Where { .. })) => {
+            read_route(command.project(), None)
+        }
+        // Tracker changes touch only its sidecars: record operations that may share a commit.
+        Command::Impl(command) => write_route(
+            command.project(),
+            "implementation",
+            vec![],
+            &["implementation"],
+            true,
+            0,
+        ),
         Command::Claim(
             ClaimCommand::Set { project, node, .. } | ClaimCommand::Release { project, node, .. },
         ) => write_route(project, "claim", vec![*node], &["claim"], true, 0),

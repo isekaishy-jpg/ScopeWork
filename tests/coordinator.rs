@@ -824,3 +824,76 @@ fn a_waiting_coordinator_writer_does_not_hide_another_processes_commit_from_read
         pair(&read)
     );
 }
+
+#[test]
+fn concurrent_tracker_changes_merge_without_losing_any() {
+    let f = Fixture::new(30);
+    let node = f.coordinated(&["impl", "add", "fixture", "--name", "crate"])["node"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let before = f.receipts();
+    // A burst of placements and items: merged commits must read each other's changes.
+    let running: Vec<_> = (3..33u64)
+        .map(|id| {
+            let args: Vec<String> = if id % 5 == 0 {
+                vec![
+                    "impl".into(),
+                    "item-add".into(),
+                    "fixture".into(),
+                    node.clone(),
+                    "--name".into(),
+                    format!("Item {id}"),
+                ]
+            } else {
+                vec![
+                    "impl".into(),
+                    "place".into(),
+                    "fixture".into(),
+                    node.clone(),
+                    id.to_string(),
+                ]
+            };
+            f.command("required", &[])
+                .args(args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for child in running {
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let commits = f.receipts() - before;
+    assert!(
+        commits < 30,
+        "30 concurrent operations took {commits} commits"
+    );
+    let view = f.direct(&["impl", "show", "fixture", "--node", &node]);
+    let placed: Vec<u64> = view["node"]["placements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_u64().unwrap())
+        .collect();
+    let mut expected: Vec<u64> = (3..33u64).filter(|id| id % 5 != 0).collect();
+    let mut sorted = placed.clone();
+    sorted.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(sorted, expected, "no placement lost");
+    let items: Vec<u64> = view["node"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(items.len(), 6, "no item lost");
+    let unique: std::collections::HashSet<u64> = items.iter().copied().collect();
+    assert_eq!(unique.len(), 6, "item IDs are unique");
+}

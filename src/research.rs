@@ -108,6 +108,8 @@ mod edit_tokens;
 pub mod history;
 #[path = "history_ui.rs"]
 mod history_ui;
+#[path = "implementation.rs"]
+mod implementation;
 #[path = "imports.rs"]
 pub mod imports;
 #[path = "layout.rs"]
@@ -1612,6 +1614,8 @@ pub struct ResearchUi {
     /// The loaded record's effective status and what blocks its completion.
     status: Status,
     blockers: Vec<String>,
+    /// Where the loaded record is implemented, from the implementation tracker.
+    implemented_in: Option<String>,
     /// Message styling: errors in the alert colour.
     message_error: bool,
     tab: usize,
@@ -1678,6 +1682,7 @@ impl ResearchUi {
             flag_reason: String::new(),
             status: Status::NotStarted,
             blockers: vec![],
+            implemented_in: None,
             message_error: false,
             tab: 0,
             confirm_complete: false,
@@ -1818,6 +1823,7 @@ impl ResearchUi {
                                 self.dependency_rvas = v.dependencies;
                                 self.status = v.status;
                                 self.blockers = v.blockers;
+                                self.implemented_in = v.implemented_in;
                                 self.dirty = false;
                                 self.scope_dirty = false;
                                 self.confirm_complete = false;
@@ -2313,6 +2319,7 @@ mod background_ui_tests {
             dependencies: String::new(),
             status: Status::NotStarted,
             blockers: vec![],
+            implemented_in: None,
         }
     }
     fn fixture_project(id: &str) -> std::sync::Arc<Project> {

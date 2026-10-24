@@ -54,6 +54,24 @@ research group clear 3-3-5a
 
 Related projects can share one dashboard tab. A group tab reads `Group: Project`; clicking it shows that project, and clicking it again (or its arrow) opens a menu of the group's projects. Groups are one level, each project is in at most one, and a group left empty is removed. They are kept in the research home's `settings.json`, not in any project, and change no project data or history. Research records > Project > **Dashboard group** sets the same thing from the GUI. Group names are one line of at most 40 characters.
 
+## Implementation tracker
+
+```powershell
+research impl repo example --path C:/src/example-rs --remote https://github.com/me/example-rs.git
+research impl add example --name example_rs                 # returns {"node": 1}
+research impl add example --name src/heap.rs --parent 1
+research impl place example 2 1234 1235                     # research function records
+research impl item-add example 2 --name "Host heap shim"   # implementation-only
+research impl complete example --record 1234 --item 3
+research impl show example --node 2
+research impl show example --unplaced
+research impl where example 1235
+```
+
+The tracker records the recreation: a free-form tree of its own organisation (crates, modules, files, or any grouping, decided by whoever builds it), the research function records placed where they are implemented, implementation-only items needed to make the recreation match, and completion marks with who set them and when (`SCOPEWORK_SUBMITTER`, else the Windows user name). A record is placed on at most one node; placing it elsewhere is refused until it is unplaced. `show` returns every node with its own and subtree counters (`research` and `implementation_only`, each `done` of `total`), the project totals and the number of functions not placed; `--node` adds a node's placements and items and `--unplaced` lists the functions not placed. `rename`, `move` (no `--parent`: top level) and `remove` (only an empty node) reshape the tree; `unplace`, `item-remove` and `reopen` undo.
+
+Completion is a tracker, not a proof: it is the builder's discipline, and the running product is the proof. The tracker lives in the project's journaled sidecars `implementation/tree.json` and `implementation/nodes/<id>.json`, so every change has a receipt and history. Through the coordinator its changes are record operations that may share a commit. The dashboard's **Implementation** tab (at the right end of the project tabs) shows the tree with its counters, the selected node's placements and items, and the totals; clicking a placement opens the record. Research records > Organize shows where a function is implemented.
+
 ## Edit and review
 
 Read the node before editing. Its draft `token` binds that record, its authored content and relevant structural context. Unrelated draft saves, import ID reservations and scope-label edits do not invalidate it. Write UTF-8 Markdown body and evidence inputs, then save through the CLI. These are editing inputs; the canonical report remains the file returned by `node show`. Saving leaves the record open for review.

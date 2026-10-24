@@ -539,6 +539,13 @@ impl ResearchUi {
             let report = root.join(&project.id).join(&data.paths[&n.id]);
             classic::group(ui, "Files", |ui| {
                 classic::label(ui, report.display().to_string(), None);
+                if n.kind == Kind::Function {
+                    let placed = match &self.implemented_in {
+                        Some(path) => format!("Implemented in: {path}"),
+                        None => "Not placed in the implementation tracker.".into(),
+                    };
+                    classic::label(ui, placed, None);
+                }
                 if n.kind == Kind::Function
                     && classic::button(ui, true, "Open data folder").clicked()
                     && let Err(e) = open_data_folder(&report.parent().unwrap().join("data"))

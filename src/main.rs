@@ -51,8 +51,63 @@ fn tab_list(
     tabs.into_iter().map(|(_, tab)| tab).collect()
 }
 
+/// What the selected project's panel shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum InnerView {
+    Research,
+    Implementation,
+}
+/// The implementation tracker as last loaded for a project (`research impl show`).
+type TrackerResult = Result<serde_json::Value, String>;
+
+/// Loads the tracker of `project`, with node `node`'s detail when it still exists.
+fn load_tracker(project: &str, node: Option<u64>) -> TrackerResult {
+    let root = research_dashboard::paths::home(None)?.join("projects");
+    let lib = research::Library::read_project(root, project)?;
+    if lib.projects.is_empty() {
+        return Err("Project was removed".into());
+    }
+    lib.impl_view(0, node, false)
+        .or_else(|_| lib.impl_view(0, None, false))
+}
+
+/// The tree's nodes in display order (each after its parent, siblings in their order), with
+/// their depth.
+fn tracker_rows(view: &serde_json::Value) -> Vec<(usize, serde_json::Value)> {
+    let nodes = view["nodes"].as_array().cloned().unwrap_or_default();
+    fn visit(
+        parent: Option<u64>,
+        depth: usize,
+        nodes: &[serde_json::Value],
+        out: &mut Vec<(usize, serde_json::Value)>,
+    ) {
+        for n in nodes.iter().filter(|n| n["parent"].as_u64() == parent) {
+            out.push((depth, n.clone()));
+            visit(n["id"].as_u64(), depth + 1, nodes, out);
+        }
+    }
+    let mut out = vec![];
+    visit(None, 0, &nodes, &mut out);
+    out
+}
+/// `done / total` for a counter object.
+fn counter(value: &serde_json::Value) -> String {
+    format!(
+        "{} / {}",
+        value["done"].as_u64().unwrap_or(0),
+        value["total"].as_u64().unwrap_or(0)
+    )
+}
+
 struct Dashboard {
     project: usize,
+    inner: InnerView,
+    /// The tracker shown in the Implementation view: project, data, selected node.
+    tracker: Option<(String, serde_json::Value)>,
+    tracker_node: Option<u64>,
+    tracker_task: Option<std::sync::mpsc::Receiver<(String, TrackerResult)>>,
+    tracker_stale: bool,
+    tracker_error: Option<String>,
     /// The research home's settings (project groups), reread when the file changes.
     settings: research_dashboard::settings::Settings,
     settings_stamp: Option<std::time::SystemTime>,
@@ -75,6 +130,12 @@ impl Default for Dashboard {
     fn default() -> Self {
         Self {
             project: 0,
+            inner: InnerView::Research,
+            tracker: None,
+            tracker_node: None,
+            tracker_task: None,
+            tracker_stale: true,
+            tracker_error: None,
             settings: Default::default(),
             settings_stamp: None,
             settings_checked: None,
@@ -228,6 +289,177 @@ impl eframe::App for Dashboard {
 }
 
 impl Dashboard {
+    /// The Implementation view inside the project panel: the tracker's tree with counters, the
+    /// selected node's placements and items, and the project's totals.
+    fn implementation_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &egui::Painter,
+        o: egui::Pos2,
+        w: f32,
+        h: f32,
+        ink: Color32,
+    ) {
+        let r = |x, y, width, height| {
+            egui::Rect::from_min_size(o + Vec2::new(x, y), Vec2::new(width, height))
+        };
+        let top = 82.0;
+        // The same space the research view's meters and total progress use.
+        let content = (h - 270.0).max(218.0) + 154.0;
+        let boxes = content - 74.0;
+        let tree_box = r(15.0, top, 320.0, boxes);
+        let detail_box = r(347.0, top, w - 362.0, boxes);
+        let totals_box = r(15.0, top + boxes + 18.0, w - 30.0, 56.0);
+        let project = self.projects.get(self.project).cloned();
+        let view = match (&self.tracker, &project) {
+            (Some((id, view)), Some(project)) if *id == project.id => Some(view.clone()),
+            _ => None,
+        };
+        group_box(p, tree_box, "Implementation tree");
+        group_box(
+            p,
+            detail_box,
+            view.as_ref()
+                .and_then(|v| v["node"]["path"].as_str())
+                .unwrap_or("No node selected"),
+        );
+        group_box(p, totals_box, "Implementation progress");
+        let Some(view) = view else {
+            let message = self
+                .tracker_error
+                .clone()
+                .unwrap_or_else(|| "Loading the implementation tracker...".into());
+            text(p, o.x + 26.0, o.y + top + 24.0, message, ink);
+            return;
+        };
+        let rows = tracker_rows(&view);
+        if rows.is_empty() {
+            text(
+                p,
+                o.x + 26.0,
+                o.y + top + 24.0,
+                "No implementation tree yet. Agents build it with research impl.",
+                ink,
+            );
+        }
+        let mut chosen = None;
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(tree_box.shrink2(Vec2::new(8.0, 16.0))),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("implementation tree")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        for (depth, node) in &rows {
+                            let id = node["id"].as_u64().unwrap_or(0);
+                            let subtree = &node["subtree"];
+                            let mut label = format!(
+                                "{}{}   {}",
+                                "    ".repeat(*depth),
+                                node["name"].as_str().unwrap_or(""),
+                                counter(&subtree["research"])
+                            );
+                            if subtree["implementation_only"]["total"]
+                                .as_u64()
+                                .unwrap_or(0)
+                                > 0
+                            {
+                                label += &format!(
+                                    "   items {}",
+                                    counter(&subtree["implementation_only"])
+                                );
+                            }
+                            let selected = self.tracker_node == Some(id);
+                            if ui.selectable_label(selected, label).clicked() {
+                                chosen = Some(id);
+                            }
+                        }
+                    });
+            },
+        );
+        if let Some(id) = chosen {
+            self.tracker_node = Some(id);
+            self.tracker_stale = true;
+        }
+        let mut open = None;
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(detail_box.shrink2(Vec2::new(8.0, 16.0))),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("implementation detail")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        let node = &view["node"];
+                        if node.is_null() {
+                            ui.label("Select a node to see its research items.");
+                            return;
+                        }
+                        let placements = node["placements"].as_array().cloned().unwrap_or_default();
+                        let items = node["items"].as_array().cloned().unwrap_or_default();
+                        if placements.is_empty() && items.is_empty() {
+                            ui.label("Nothing is placed on this node itself.");
+                        }
+                        for pl in &placements {
+                            let mark = if pl["completed"].is_null() {
+                                "\u{2610}"
+                            } else {
+                                "\u{2611}"
+                            };
+                            let name = if pl["missing"].as_bool() == Some(true) {
+                                format!("record {} (no longer in the research)", pl["id"])
+                            } else {
+                                format!(
+                                    "{} ({})",
+                                    pl["name"].as_str().unwrap_or(""),
+                                    pl["rva"].as_str().unwrap_or("")
+                                )
+                            };
+                            let response = ui
+                                .selectable_label(false, format!("{mark} {name}"))
+                                .on_hover_text("Open in Research records");
+                            if response.clicked() {
+                                open = pl["id"].as_u64();
+                            }
+                        }
+                        if !items.is_empty() {
+                            ui.add_space(6.0);
+                            ui.label("Implementation-only items");
+                            for item in &items {
+                                let mark = if item["completed"].is_null() {
+                                    "\u{2610}"
+                                } else {
+                                    "\u{2611}"
+                                };
+                                ui.label(format!("{mark} {}", item["name"].as_str().unwrap_or("")));
+                            }
+                        }
+                    });
+            },
+        );
+        if let (Some(record), Some(project)) = (open, &project) {
+            self.research.open_record(&project.id, record);
+        }
+        let totals = &view["totals"];
+        let mut line = format!(
+            "Research items: {}    Implementation-only: {}    Not placed: {}",
+            counter(&totals["research"]),
+            counter(&totals["implementation_only"]),
+            view["not_placed"].as_u64().unwrap_or(0)
+        );
+        if let Some(repository) = view["repository"].as_str().filter(|r| !r.is_empty()) {
+            line += &format!("    Repository: {repository}");
+        }
+        text(
+            p,
+            o.x + 26.0,
+            o.y + totals_box.top() - o.y + 30.0,
+            line,
+            ink,
+        );
+    }
+
     /// One frame of the dashboard (`eframe::App::update` without the eframe frame).
     fn frame(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) && self.research.has_unsaved() {
@@ -243,6 +475,7 @@ impl Dashboard {
                 .unwrap_or(0);
             self.research.changed = false;
             self.selection = None;
+            self.tracker_stale = true;
         }
         if self
             .settings_checked
@@ -259,6 +492,39 @@ impl Dashboard {
         }
         if ctx.style().visuals.dark_mode != self.dark {
             ctx.set_visuals(classic::visuals(self.dark));
+        }
+        if let Some(task) = &self.tracker_task
+            && let Ok((project, result)) = task.try_recv()
+        {
+            self.tracker_task = None;
+            match result {
+                Ok(view) => {
+                    self.tracker_node = view["node"]["id"].as_u64();
+                    self.tracker = Some((project, view));
+                    self.tracker_error = None;
+                }
+                Err(e) => self.tracker_error = Some(e),
+            }
+        }
+        if self.inner == InnerView::Implementation
+            && self.tracker_task.is_none()
+            && let Some(project) = self.projects.get(self.project)
+            && (self.tracker_stale
+                || self
+                    .tracker
+                    .as_ref()
+                    .is_none_or(|(id, _)| *id != project.id))
+        {
+            self.tracker_stale = false;
+            let (send, recv) = std::sync::mpsc::channel();
+            let id = project.id.clone();
+            let shown = self.tracker.as_ref().is_some_and(|(p, _)| *p == id);
+            let node = if shown { self.tracker_node } else { None };
+            std::thread::spawn(move || {
+                let result = load_tracker(&id, node);
+                let _ = send.send((id, result));
+            });
+            self.tracker_task = Some(recv);
         }
         let queue_project = self.projects.get(self.project).map(|p| p.id.clone());
         self.research.watch_queues(queue_project.as_deref());
@@ -454,6 +720,36 @@ impl Dashboard {
                         clicked = Some((shown, group, selected || arrow, tab));
                     }
                 }
+                if !self.projects.is_empty() {
+                    let mut x = w - 5.0;
+                    for (view, label) in [
+                        (InnerView::Implementation, "Implementation"),
+                        (InnerView::Research, "Research"),
+                    ] {
+                        let size = p
+                            .layout_no_wrap(label.to_string(), egui::FontId::proportional(11.0), ink)
+                            .size()
+                            .x;
+                        let width = tab_width(size);
+                        x -= width;
+                        let tab = r(x, 43.0, width, 22.0);
+                        p.rect_filled(tab, 0.0, bg);
+                        bevel(&p, tab, false);
+                        if self.inner == view {
+                            p.line_segment(
+                                [tab.left_bottom(), tab.right_bottom()],
+                                egui::Stroke::new(2.0_f32, bg),
+                            );
+                        }
+                        t(x + 12.0, 54.0, label.to_string());
+                        if ui
+                            .interact(tab, ui.id().with(("inner", label)), egui::Sense::click())
+                            .clicked()
+                        {
+                            self.inner = view;
+                        }
+                    }
+                }
                 if let Some((shown, group, menu, tab)) = clicked {
                     if let Some(name) = group.filter(|_| menu) {
                         self.group_menu = match &self.group_menu {
@@ -476,6 +772,9 @@ impl Dashboard {
                 let done_chunks:usize=live_meters.iter().flat_map(|m|m.states.iter()).filter(|&&s|s==0).count();
                 let selected=self.selection.filter(|&(r,g)|r<data.len()&&g<data[r].groups.len()).unwrap_or((0,0));
                 let (name,n,status,completed)=data.get(selected.0).and_then(|row|row.groups.get(selected.1)).cloned().unwrap_or(("No meter selected".into(),0,2,0));
+                if self.inner == InnerView::Implementation {
+                    self.implementation_view(ui, &p, o, w, h, ink);
+                } else {
                 let top=82.0;
                 let meter_h=(h-270.0).max(218.0);
                 let detail=r(15.0,top,174.0,meter_h);
@@ -628,6 +927,7 @@ impl Dashboard {
                 t(26.0,bottom+80.0,format!("Chunks: {done_chunks} / {total_chunks}    Funcs: {} / {total}    Done: {}%",counts[0],counts[0]*100/total.max(1)));
                 t(26.0,bottom+101.0,format!("Functions in progress: {}    Not done: {}",counts[1],counts[2]));
                 t(26.0,bottom+122.0,format!("Selected: {}    Funcs: {} / {}    {}",name,completed,n,["Done","In progress","Not done"][status]));
+                }
                 let mut sx = 0.0;
                 for (width, label) in [
                     (w * 0.24, format!("Funcs: {} / {total}", counts[0])),
@@ -1024,6 +1324,89 @@ mod group_tab_tests {
         let _ = ctx.run(input, |ctx| dash.frame(ctx));
     }
 
+    /// The dashboard reads the research home from the environment, which is shared by the whole
+    /// test process: tests that set it hold this lock.
+    static HOME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A new empty research home for one test, made the process's home.
+    fn fixture_home(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let home = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("{name}-{}", uuid::Uuid::new_v4()));
+        let root = home.join("projects");
+        std::fs::create_dir_all(&root).unwrap();
+        // SAFETY: tests that read or set the variable hold `HOME`, so no other thread of this
+        // binary reads the environment concurrently.
+        unsafe { std::env::set_var("RESEARCH_DASHBOARD_HOME", &home) };
+        (home, root)
+    }
+
+    /// Runs frames until `ready` holds (30 s at most).
+    fn settle(ctx: &egui::Context, dash: &mut Dashboard, ready: impl Fn(&Dashboard) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !ready(dash) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the dashboard never settled"
+            );
+            step(ctx, dash, vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The width of `label` in the dashboard's tab font.
+    fn label_width(ctx: &egui::Context, label: &str) -> f32 {
+        ctx.fonts_mut(|f| {
+            f.layout_no_wrap(
+                label.to_string(),
+                egui::FontId::proportional(11.0),
+                Color32::WHITE,
+            )
+            .size()
+            .x
+        })
+    }
+
+    #[test]
+    fn the_implementation_view_shows_the_trackers_counters() {
+        let _home = HOME.lock().unwrap_or_else(|e| e.into_inner());
+        let (home, root) = fixture_home("dashboard-tracker");
+        let mut lib = research::Library::open(root.clone()).unwrap();
+        lib.create("alpha", "Alpha", "synthetic").unwrap();
+        drop(lib);
+        let mut lib = research::Library::open_project(root.clone(), Some("alpha")).unwrap();
+        let arch = lib.add(0, 0, "Arch", "").unwrap();
+        let chunk = lib.add(0, arch, "Chunk", "").unwrap();
+        let first = lib.add(0, chunk, "Alloc", "1000").unwrap();
+        lib.add(0, chunk, "Free", "2000").unwrap();
+        let krate = lib.impl_add(0, None, "alpha_rs").unwrap();
+        lib.impl_place(0, krate, &[first]).unwrap();
+        lib.impl_set_complete(0, &[first], &[], true).unwrap();
+        drop(lib);
+
+        let ctx = egui::Context::default();
+        let mut dash = Dashboard::default();
+        settle(&ctx, &mut dash, |d| !d.projects.is_empty());
+        assert_eq!(dash.inner, InnerView::Research);
+        // The Implementation tab is the last one in the row, at its right end.
+        let width = tab_width(label_width(&ctx, "Implementation"));
+        click(
+            &ctx,
+            &mut dash,
+            egui::pos2(4.0 + 1100.0 - 8.0 - 5.0 - width / 2.0, 4.0 + 54.0),
+        );
+        assert_eq!(dash.inner, InnerView::Implementation);
+        settle(&ctx, &mut dash, |d| d.tracker.is_some());
+        let (project, view) = dash.tracker.clone().unwrap();
+        assert_eq!(project, "alpha");
+        assert_eq!(counter(&view["totals"]["research"]), "1 / 1");
+        assert_eq!(view["not_placed"], 1);
+        let rows = tracker_rows(&view);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1["name"], "alpha_rs");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// Clicks at `at`: pointer moves there, presses, releases (each in its own frame).
     fn click(ctx: &egui::Context, dash: &mut Dashboard, at: egui::Pos2) {
         step(ctx, dash, vec![egui::Event::PointerMoved(at)]);
@@ -1033,16 +1416,9 @@ mod group_tab_tests {
 
     #[test]
     fn a_group_tab_selects_its_project_and_opens_its_menu() {
-        // An isolated home with three projects, two of them grouped. This test binary holds
-        // only the dashboard's unit tests, none of which read the home.
-        let home = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/test-workspaces")
-            .join(format!("dashboard-groups-{}", uuid::Uuid::new_v4()));
-        let root = home.join("projects");
-        std::fs::create_dir_all(&root).unwrap();
-        // SAFETY: set before any thread of this test reads the environment; no other test in
-        // this binary reads it.
-        unsafe { std::env::set_var("RESEARCH_DASHBOARD_HOME", &home) };
+        // An isolated home with three projects, two of them grouped.
+        let _home = HOME.lock().unwrap_or_else(|e| e.into_inner());
+        let (home, root) = fixture_home("dashboard-groups");
         let mut lib = research::Library::open(root.clone()).unwrap();
         for (id, name) in [("alpha", "Alpha"), ("demo", "Demo"), ("demo2", "Demo two")] {
             lib.create(id, name, "").unwrap();
