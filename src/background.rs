@@ -80,6 +80,10 @@ pub(super) struct Snapshot {
     pub views: Vec<ProjectView>,
     pub jobs: HashMap<String, imports::Job>,
     pub fingerprint: String,
+    /// Per project read successfully, its part of the fingerprint (see `signature`).
+    pub signatures: HashMap<String, String>,
+    /// Projects that could not be read, with why; they keep what was shown before.
+    pub unreadable: Vec<(String, String)>,
 }
 pub(super) struct Loaded {
     pub project: String,
@@ -123,8 +127,46 @@ pub(super) fn load(project: &str, id: u64) -> Result<Loaded> {
     })
 }
 
+/// What one project contributes to the refresh fingerprint: its catalog's stamp, plus the stamps
+/// of its completed reports (their hashes decide acceptance) and of the selected record.
+fn signature(
+    root: &Path,
+    id: &str,
+    known: Option<(&Project, &catalog_browser::BrowserData)>,
+    selected: &(String, u64),
+) -> String {
+    let stamp = |path: &Path| {
+        format!(
+            "{:?};",
+            fs::metadata(path).map(|m| (m.len(), m.modified().ok()))
+        )
+    };
+    let mut signature = stamp(&root.join(id).join("project.json"));
+    if let Some((project, browser)) = known {
+        for n in &project.nodes {
+            if (n.status == Status::Complete || (project.id == selected.0 && n.id == selected.1))
+                && let Some(path) = browser.paths.get(&n.id)
+            {
+                signature += &stamp(&root.join(id).join(path));
+            }
+        }
+    }
+    signature
+}
+
+/// One project in a refresh: its catalog, meters and browser data, reused or read anew.
+struct Entry {
+    project: Arc<Project>,
+    view: Option<ProjectView>,
+    browser: Option<Arc<catalog_browser::BrowserData>>,
+    sidecars: Option<Sidecars>,
+    /// Read, or reused unchanged, successfully: the next refresh may reuse it.
+    fresh: bool,
+}
+
 pub(super) fn snapshot(
     previous: String,
+    signatures: HashMap<String, String>,
     projects: Vec<Arc<Project>>,
     browsers: Vec<Arc<catalog_browser::BrowserData>>,
     previous_views: Vec<ProjectView>,
@@ -132,40 +174,73 @@ pub(super) fn snapshot(
 ) -> Result<Snapshot> {
     let home = crate::paths::home(None)?;
     crate::paths::initialize(&home)?;
-    let root = home.join("projects");
-    let mut paths = fs::read_dir(&root)
+    let refresh = Refresh {
+        previous,
+        signatures,
+        projects,
+        browsers,
+        previous_views,
+        selected,
+    };
+    snapshot_in(home.join("projects"), refresh)
+}
+
+/// What the dashboard showed after its last refresh.
+pub(super) struct Refresh {
+    pub previous: String,
+    pub signatures: HashMap<String, String>,
+    pub projects: Vec<Arc<Project>>,
+    pub browsers: Vec<Arc<catalog_browser::BrowserData>>,
+    pub previous_views: Vec<ProjectView>,
+    pub selected: (String, u64),
+}
+
+/// The next snapshot of the projects under `root`, reusing what `last` shows of every project
+/// unchanged since it was last read.
+pub(super) fn snapshot_in(root: PathBuf, last: Refresh) -> Result<Snapshot> {
+    let Refresh {
+        previous,
+        signatures,
+        projects,
+        browsers,
+        previous_views,
+        selected,
+    } = last;
+    let mut ids = fs::read_dir(&root)
         .map_err(|e| e.to_string())?
         .flatten()
-        .map(|e| e.path().join("project.json"))
-        .filter(|p| p.is_file())
+        .filter(|e| e.path().join("project.json").is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    paths.sort();
-    let mut signature = String::new();
+    ids.sort();
+    let known: HashMap<&str, (&Arc<Project>, &Arc<catalog_browser::BrowserData>)> = projects
+        .iter()
+        .zip(&browsers)
+        .map(|(p, b)| (p.id.as_str(), (p, b)))
+        .collect();
+    let current: Vec<(String, String)> = ids
+        .iter()
+        .map(|id| {
+            let pair = known
+                .get(id.as_str())
+                .map(|(p, b)| (p.as_ref(), b.as_ref()));
+            (id.clone(), signature(&root, id, pair, &selected))
+        })
+        .collect();
     let mut jobs = HashMap::new();
-    for path in paths {
-        signature += &format!(
-            "{}:{:?};",
-            path.display(),
-            fs::metadata(&path).map(|m| (m.len(), m.modified().ok()))
-        );
-    }
-    for (p, b) in projects.iter().zip(&browsers) {
-        for n in &p.nodes {
-            if n.status == Status::Complete || (p.id == selected.0 && n.id == selected.1) {
-                signature += &format!(
-                    "{:?};",
-                    fs::metadata(root.join(&p.id).join(&b.paths[&n.id]))
-                        .map(|m| (m.len(), m.modified().ok()))
-                );
-            }
-        }
+    for p in &projects {
         if let Some(id) = p.active_import.as_ref().or(p.last_import.as_ref())
             && let Ok(job) = imports::status(&root, &p.id, id)
         {
             jobs.insert(p.id.clone(), job);
         }
     }
-    let mut fingerprint = hash(&signature);
+    let mut fingerprint = hash(
+        &current
+            .iter()
+            .map(|(id, signature)| format!("{id}:{signature}"))
+            .collect::<String>(),
+    );
     if fingerprint == previous {
         return Ok(Snapshot {
             root: None,
@@ -174,85 +249,117 @@ pub(super) fn snapshot(
             views: vec![],
             jobs,
             fingerprint,
+            signatures,
+            unreadable: vec![],
         });
     }
-    // Keep each shared lease through catalog, accepted-report and meter reads.
-    let mut library = Library {
-        root: root.clone(),
-        projects: vec![],
-        busy_projects: vec![],
-        unreadable: vec![],
-        _lock: None,
-        recovery_blocked: None,
-        overlay: None,
-        staging: None,
+    let reuse = |id: &str| -> Option<Entry> {
+        let (project, browser) = known.get(id)?;
+        let view = previous_views.iter().find(|v| v.id == id)?.clone();
+        Some(Entry {
+            project: Arc::clone(project),
+            view: Some(view),
+            browser: Some(Arc::clone(browser)),
+            sidecars: None,
+            fresh: false,
+        })
     };
-    let mut views = vec![];
-    // Each project's sidecars, read under the same shared lock as its catalog so both come from
-    // one revision.
-    let mut sidecars: HashMap<String, Sidecars> = HashMap::new();
-    let mut ids = fs::read_dir(&root)
-        .map_err(|e| e.to_string())?
-        .flatten()
-        .filter(|e| e.path().join("project.json").is_file())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    ids.sort();
-    for id in ids {
-        match Library::read_project(root.clone(), &id) {
+    let mut entries: Vec<Entry> = vec![];
+    let mut unreadable = vec![];
+    let mut retry = false;
+    for (id, signature) in &current {
+        // Unchanged since it was last read successfully: nothing to read again.
+        if signatures.get(id) == Some(signature)
+            && let Some(mut entry) = reuse(id)
+        {
+            entry.fresh = true;
+            entries.push(entry);
+            continue;
+        }
+        match Library::read_project(root.clone(), id) {
             Ok(mut lib) => {
-                if let Some(project) = lib.projects.first() {
-                    let read = Sidecars::read(&root.join(&project.id), project);
-                    sidecars.insert(project.id.clone(), read);
-                }
+                let Some(project) = lib.projects.first() else {
+                    continue;
+                };
+                // Read under the same shared lock as the catalog, so both come from one revision.
+                let sidecars = Sidecars::read(&root.join(&project.id), project);
                 // Meters hash reports and walk the tree; do that without holding the lock,
                 // which would otherwise delay agents' writes on every refresh.
                 lib.release();
-                views.extend(lib.views());
-                library.projects.append(&mut lib.projects);
-            }
-            Err(e) if e.contains("is busy") => {
-                if let Some(old) = projects.iter().find(|p| p.id == id) {
-                    library.projects.push((**old).clone());
+                let view = lib.views().pop();
+                if let Some(project) = lib.projects.pop() {
+                    entries.push(Entry {
+                        project: Arc::new(project),
+                        view,
+                        browser: None,
+                        sidecars: Some(sidecars),
+                        fresh: true,
+                    });
                 }
-                if let Some(old) = previous_views.iter().find(|p| p.id == id) {
-                    views.push(old.clone());
-                }
-                library.busy_projects.push(id);
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // A busy project keeps what was shown, and so does one that cannot be read;
+                // both are tried again at the next refresh.
+                retry = true;
+                if !e.contains("is busy") {
+                    unreadable.push((id.clone(), e));
+                }
+                if let Some(entry) = reuse(id) {
+                    entries.push(entry);
+                }
+            }
         }
     }
-    if !library.busy_projects.is_empty() {
-        fingerprint.clear();
-    }
-    library.projects.sort_by_key(|p| p.name.clone());
-    views.sort_by_key(|p| p.name.clone());
-    let projects = library
-        .projects
-        .into_iter()
-        .map(Arc::new)
-        .collect::<Vec<_>>();
-    let input = projects.clone();
+    entries.sort_by(|a, b| a.project.name.cmp(&b.project.name));
+    // Browser data for the projects read anew, built off this thread.
+    let pending: Vec<(usize, Arc<Project>, Option<Sidecars>)> = entries
+        .iter_mut()
+        .enumerate()
+        .filter(|(_, e)| e.browser.is_none())
+        .map(|(i, e)| (i, Arc::clone(&e.project), e.sidecars.take()))
+        .collect();
     let flag_root = root.clone();
-    let browser = join(spawn(SWExecutionClass::Mid, move || {
-        input
-            .iter()
-            .map(|p| {
-                // A busy project keeps its previous catalog; its sidecars are read as they are.
-                let read = sidecars.remove(&p.id).unwrap_or_else(|| {
-                    let dir = flag_root.join(&p.id);
-                    Sidecars::read(&dir, p)
-                });
-                Arc::new(catalog_browser::BrowserData::new(
-                    p,
-                    &read.flags,
-                    &read.queued,
-                    &super::quarantine::descriptions(p, &read.quarantine),
-                ))
-            })
-            .collect()
-    })?)?;
+    let built: Vec<(usize, Arc<catalog_browser::BrowserData>)> =
+        join(spawn(SWExecutionClass::Mid, move || {
+            pending
+                .into_iter()
+                .map(|(i, p, sidecars)| {
+                    let read =
+                        sidecars.unwrap_or_else(|| Sidecars::read(&flag_root.join(&p.id), &p));
+                    let data = catalog_browser::BrowserData::new(
+                        &p,
+                        &read.flags,
+                        &read.queued,
+                        &super::quarantine::descriptions(&p, &read.quarantine),
+                    );
+                    (i, Arc::new(data))
+                })
+                .collect()
+        })?)?;
+    for (i, browser) in built {
+        entries[i].browser = Some(browser);
+    }
+    let mut next = HashMap::new();
+    for entry in entries.iter().filter(|e| e.fresh) {
+        let pair = entry
+            .browser
+            .as_deref()
+            .map(|b| (entry.project.as_ref(), b));
+        next.insert(
+            entry.project.id.clone(),
+            signature(&root, &entry.project.id, pair, &selected),
+        );
+    }
+    if retry {
+        // The fingerprint of nothing that was read: the next poll looks again.
+        fingerprint.push('*');
+    }
+    let mut views: Vec<ProjectView> = entries.iter().filter_map(|e| e.view.clone()).collect();
+    views.sort_by_key(|p| p.name.clone());
+    let (projects, browser) = entries
+        .into_iter()
+        .map(|e| (e.project, e.browser.unwrap_or_default()))
+        .unzip();
     Ok(Snapshot {
         root: Some(root),
         projects,
@@ -260,6 +367,8 @@ pub(super) fn snapshot(
         views,
         jobs,
         fingerprint,
+        signatures: next,
+        unreadable,
     })
 }
 
@@ -347,5 +456,102 @@ impl Drop for SnapshotInbox {
     fn drop(&mut self) {
         // The shared runtime outlives this inbox; closing the owner rejects late deliveries.
         self.owner.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Home(PathBuf);
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn next(root: &Path, last: &Snapshot, previous: &str) -> Snapshot {
+        snapshot_in(
+            root.to_path_buf(),
+            Refresh {
+                previous: previous.into(),
+                signatures: last.signatures.clone(),
+                projects: last.projects.clone(),
+                browsers: last.browser.clone(),
+                previous_views: last.views.clone(),
+                selected: (String::new(), 0),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_refresh_reads_only_changed_projects_and_skips_unreadable_ones() {
+        let home = Home(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target/test-workspaces")
+                .join(format!("refresh-{}", uuid::Uuid::new_v4())),
+        );
+        let root = home.0.join("projects");
+        fs::create_dir_all(&root).unwrap();
+        let mut lib = Library::open(root.clone()).unwrap();
+        lib.create("alpha", "Alpha", "synthetic").unwrap();
+        lib.create("beta", "Beta", "synthetic").unwrap();
+        drop(lib);
+        let empty = Snapshot {
+            root: None,
+            projects: vec![],
+            browser: vec![],
+            views: vec![],
+            jobs: HashMap::new(),
+            fingerprint: String::new(),
+            signatures: HashMap::new(),
+            unreadable: vec![],
+        };
+        let first = next(&root, &empty, "");
+        assert_eq!(first.projects.len(), 2);
+        assert_eq!(first.signatures.len(), 2);
+        // Forced past the fingerprint, unchanged projects are reused, not read again.
+        let second = next(&root, &first, "forced");
+        for (a, b) in first.projects.iter().zip(&second.projects) {
+            assert!(Arc::ptr_eq(a, b), "{} was read again", a.id);
+        }
+        // A changed project that is busy keeps what was shown and is retried; the others are
+        // still reused. (An unchanged one is reused without being read, busy or not.)
+        let mut beta = Library::open_project(root.clone(), Some("beta")).unwrap();
+        let revision = beta.projects[0].revision;
+        beta.set_scope(0, "Changed", revision).unwrap();
+        drop(beta);
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join(".project-locks/beta.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let busy = next(&root, &second, "forced");
+        lock.unlock().unwrap();
+        assert_eq!(busy.projects.len(), 2);
+        assert!(
+            busy.projects
+                .iter()
+                .zip(&second.projects)
+                .all(|(a, b)| Arc::ptr_eq(a, b))
+        );
+        assert!(busy.fingerprint.ends_with('*'), "the next poll looks again");
+        assert!(!busy.signatures.contains_key("beta"));
+        // A stray copy of a project folder is reported, and hides nothing.
+        let stray = root.join("Alpha - Copy");
+        fs::create_dir_all(&stray).unwrap();
+        fs::copy(root.join("alpha/project.json"), stray.join("project.json")).unwrap();
+        let skipped = next(&root, &busy, "forced");
+        assert_eq!(skipped.projects.len(), 2);
+        assert_eq!(skipped.unreadable.len(), 1);
+        assert_eq!(skipped.unreadable[0].0, "Alpha - Copy");
+        assert!(
+            skipped.signatures.contains_key("beta"),
+            "beta is read again"
+        );
+        let beta = skipped.projects.iter().find(|p| p.id == "beta").unwrap();
+        assert_eq!(beta.research_scope, "Changed");
     }
 }

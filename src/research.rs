@@ -1613,6 +1613,10 @@ pub struct ResearchUi {
     project_id: String,
     last_poll: std::time::Instant,
     fingerprint: String,
+    /// Each project's part of the fingerprint when it was last read successfully.
+    signatures: std::collections::HashMap<String, String>,
+    /// Projects the last refresh could not read, with why.
+    unreadable: Vec<(String, String)>,
     views: Vec<ProjectView>,
     browser_data: Vec<std::sync::Arc<catalog_browser::BrowserData>>,
     refresh_task: Option<(u64, std::sync::mpsc::Receiver<Result<()>>)>,
@@ -1683,6 +1687,8 @@ impl ResearchUi {
             project_id: String::new(),
             last_poll: std::time::Instant::now() - std::time::Duration::from_secs(3),
             fingerprint: String::new(),
+            signatures: Default::default(),
+            unreadable: vec![],
             views: vec![],
             browser_data: vec![],
             refresh_task: None,
@@ -1909,8 +1915,26 @@ impl ResearchUi {
                 Ok(Ok(v)) if generation == self.refresh_generation => {
                     self.refresh_task = None;
                     self.fingerprint = v.fingerprint;
+                    self.signatures = v.signatures;
                     self.jobs = v.jobs;
                     if let Some(root) = v.root {
+                        if v.unreadable != self.unreadable {
+                            if v.unreadable.is_empty() && self.message.contains("could not be read")
+                            {
+                                self.message.clear();
+                                self.message_error = false;
+                            }
+                            if !v.unreadable.is_empty() {
+                                self.message = v
+                                    .unreadable
+                                    .iter()
+                                    .map(|(id, e)| format!("Project {id} could not be read: {e}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                self.message_error = true;
+                            }
+                            self.unreadable = v.unreadable;
+                        }
                         self.root = Some(root);
                         let retired = (
                             std::mem::replace(&mut self.ui_projects, v.projects),
@@ -1975,12 +1999,20 @@ impl ResearchUi {
             let (send, recv) = std::sync::mpsc::sync_channel(1);
             self.refresh_task = Some((self.refresh_generation, recv));
             let fingerprint = self.fingerprint.clone();
+            let signatures = self.signatures.clone();
             let projects = self.ui_projects.clone();
             let browser = self.browser_data.clone();
             let selected = (self.project_id.clone(), self.node);
             let views = self.views.clone();
             let job: background::RefreshJob = Box::new(move || {
-                let result = background::snapshot(fingerprint, projects, browser, views, selected);
+                let result = background::snapshot(
+                    fingerprint,
+                    signatures,
+                    projects,
+                    browser,
+                    views,
+                    selected,
+                );
                 let posted = owner
                     .try_post(solworker::SWPhase(1), move |slot| *slot = Some(result))
                     .map(|_| ())
@@ -2002,6 +2034,7 @@ impl ResearchUi {
     pub fn refresh_library(&mut self) {
         self.refresh_generation += 1;
         self.fingerprint.clear();
+        self.signatures.clear();
         self.last_poll = std::time::Instant::now() - std::time::Duration::from_secs(3);
     }
     pub fn snapshot(&self) -> Vec<ProjectView> {
@@ -2450,6 +2483,8 @@ mod background_ui_tests {
             }],
             jobs: Default::default(),
             fingerprint: "new".into(),
+            signatures: Default::default(),
+            unreadable: vec![],
         };
         assert!(
             inbox
@@ -2480,6 +2515,8 @@ mod background_ui_tests {
             views: vec![],
             jobs: Default::default(),
             fingerprint: "obsolete".into(),
+            signatures: Default::default(),
+            unreadable: vec![],
         };
         assert!(
             sender
