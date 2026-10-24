@@ -700,10 +700,12 @@ impl Library {
         reports: Vec<(u64, String, String)>,
         dependencies: Vec<u64>,
     ) -> Result<()> {
-        self.commit_metadata_with(p, before, after, reports, dependencies, false)
+        self.commit_metadata_with(p, before, after, reports, dependencies, false, None)
     }
     /// `commit_metadata`, optionally re-pinning annotation-ledger rows of the rewritten reports
-    /// (for mechanical rewrites that keep completion).
+    /// (for mechanical rewrites that keep completion), and recording the human's direction for
+    /// a change to quarantined records.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_metadata_with(
         &mut self,
         p: usize,
@@ -712,6 +714,7 @@ impl Library {
         reports: Vec<(u64, String, String)>,
         dependencies: Vec<u64>,
         repin_ledger: bool,
+        directed_by: Option<String>,
     ) -> Result<()> {
         let index = catalog_index::Index::new(&before);
         let edits = reports
@@ -736,7 +739,7 @@ impl Library {
             sidecars: vec![],
             ledger: false,
             repin_ledger,
-            directed_by: None,
+            directed_by,
             repin_ids: vec![],
         };
         self.commit_or_stage(p, journal).map(|_| ())

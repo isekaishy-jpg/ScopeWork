@@ -918,7 +918,7 @@ impl Library {
                     }
                 }
             }
-            return self.commit_metadata_with(p, before, after, reports, vec![], true);
+            return self.commit_metadata_with(p, before, after, reports, vec![], true, None);
         }
         for node in &mut after.nodes {
             node.accepted_hash = None;
@@ -1205,7 +1205,7 @@ impl Library {
     /// `before` is the catalog before the change.
     fn commit_catalog(&mut self, p: usize, before: Project) -> Result<()> {
         let after = std::mem::replace(&mut self.projects[p], before.clone());
-        self.commit_metadata_with(p, before, after, vec![], vec![], false)
+        self.commit_metadata_with(p, before, after, vec![], vec![], false, None)
     }
     pub fn create(&mut self, id: &str, name: &str, binary: &str) -> Result<()> {
         if self
@@ -2272,7 +2272,20 @@ impl Library {
         self.reopen_affected(p, id);
         self.projects[p].revision += 1;
         let after = std::mem::replace(&mut self.projects[p], before.clone());
-        self.commit_metadata(p, before, after, vec![], affected.into_iter().collect())
+        // The human's direction is stored with the change, as batches and removals store it.
+        let directed_by = directed_by
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_string);
+        self.commit_metadata_with(
+            p,
+            before,
+            after,
+            vec![],
+            affected.into_iter().collect(),
+            false,
+            directed_by,
+        )
     }
     pub fn set_dependencies_by_rva(
         &mut self,
