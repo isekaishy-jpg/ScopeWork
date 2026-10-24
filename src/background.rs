@@ -300,6 +300,7 @@ fn snapshot_observed(root: PathBuf, last: Refresh, after_read: &dyn Fn(&str)) ->
     let mut entries: Vec<Entry> = vec![];
     let mut unreadable = vec![];
     let mut retry = false;
+    let mut read_any = false;
     for (id, signature) in &current {
         // Unchanged since it was last read successfully: nothing to read again.
         if signatures.get(id) == Some(signature)
@@ -320,6 +321,7 @@ fn snapshot_observed(root: PathBuf, last: Refresh, after_read: &dyn Fn(&str)) ->
                 // which would otherwise delay agents' writes on every refresh.
                 lib.release();
                 after_read(id);
+                read_any = true;
                 let view = lib.views().pop();
                 if let Some(project) = lib.projects.pop() {
                     entries.push(Entry {
@@ -343,6 +345,38 @@ fn snapshot_observed(root: PathBuf, last: Refresh, after_read: &dyn Fn(&str)) ->
                 }
             }
         }
+    }
+    // The signature each project had before anything was read: one taken after reading could
+    // already describe a commit that landed meanwhile, which would then never be read.
+    let before: HashMap<&str, &String> = current
+        .iter()
+        .map(|(id, signature)| (id.as_str(), signature))
+        .collect();
+    let next: HashMap<String, String> = entries
+        .iter()
+        .filter(|e| e.fresh)
+        .filter_map(|e| {
+            let id = e.project.id.as_str();
+            Some((id.to_string(), before.get(id)?.to_string()))
+        })
+        .collect();
+    if retry {
+        // The fingerprint of nothing that was read: the next poll looks again.
+        fingerprint.push('*');
+    }
+    // Nothing read anew and every shown project still shown: the dashboard has nothing to
+    // replace (republishing would reload the open record and reset selections every poll).
+    if !read_any && entries.len() == projects.len() {
+        return Ok(Snapshot {
+            root: None,
+            projects: vec![],
+            browser: vec![],
+            views: vec![],
+            jobs,
+            fingerprint,
+            signatures: next,
+            unreadable,
+        });
     }
     entries.sort_by(|a, b| a.project.name.cmp(&b.project.name));
     // Browser data for the projects read anew, built off this thread.
@@ -372,24 +406,6 @@ fn snapshot_observed(root: PathBuf, last: Refresh, after_read: &dyn Fn(&str)) ->
         })?)?;
     for (i, browser) in built {
         entries[i].browser = Some(browser);
-    }
-    // The signature each project had before anything was read: one taken after reading could
-    // already describe a commit that landed meanwhile, which would then never be read.
-    let before: HashMap<&str, &String> = current
-        .iter()
-        .map(|(id, signature)| (id.as_str(), signature))
-        .collect();
-    let next: HashMap<String, String> = entries
-        .iter()
-        .filter(|e| e.fresh)
-        .filter_map(|e| {
-            let id = e.project.id.as_str();
-            Some((id.to_string(), before.get(id)?.to_string()))
-        })
-        .collect();
-    if retry {
-        // The fingerprint of nothing that was read: the next poll looks again.
-        fingerprint.push('*');
     }
     let mut views: Vec<ProjectView> = entries.iter().filter_map(|e| e.view.clone()).collect();
     views.sort_by_key(|p| p.name.clone());
@@ -507,21 +523,6 @@ mod tests {
         }
     }
 
-    fn next(root: &Path, last: &Snapshot, previous: &str) -> Snapshot {
-        snapshot_in(
-            root.to_path_buf(),
-            Refresh {
-                previous: previous.into(),
-                signatures: last.signatures.clone(),
-                projects: last.projects.clone(),
-                browsers: last.browser.clone(),
-                previous_views: last.views.clone(),
-                selected: (String::new(), 0),
-            },
-        )
-        .unwrap()
-    }
-
     /// What the dashboard shows: it keeps its projects when an answer is unchanged.
     #[derive(Clone)]
     struct Shown {
@@ -579,24 +580,17 @@ mod tests {
         lib.create("alpha", "Alpha", "synthetic").unwrap();
         lib.create("beta", "Beta", "synthetic").unwrap();
         drop(lib);
-        let empty = Snapshot {
-            root: None,
-            projects: vec![],
-            browser: vec![],
-            views: vec![],
-            jobs: HashMap::new(),
-            fingerprint: String::new(),
-            signatures: HashMap::new(),
-            unreadable: vec![],
-        };
-        let first = next(&root, &empty, "");
+        let mut shown = Shown::empty();
+        let first = shown.refresh(&root, None);
         assert_eq!(first.projects.len(), 2);
         assert_eq!(first.signatures.len(), 2);
-        // Forced past the fingerprint, unchanged projects are reused, not read again.
-        let second = next(&root, &first, "forced");
-        for (a, b) in first.projects.iter().zip(&second.projects) {
-            assert!(Arc::ptr_eq(a, b), "{} was read again", a.id);
-        }
+        // Forced past the fingerprint, unchanged projects are reused, not read again: the answer
+        // is "unchanged", so the dashboard keeps what it shows.
+        let second = shown.refresh(&root, Some("forced"));
+        assert!(
+            second.root.is_none(),
+            "nothing was read, nothing is republished"
+        );
         // A changed project that is busy keeps what was shown and is retried; the others are
         // still reused. (An unchanged one is reused without being read, busy or not.)
         let mut beta = Library::open_project(root.clone(), Some("beta")).unwrap();
@@ -609,31 +603,37 @@ mod tests {
             .open(root.join(".project-locks/beta.lock"))
             .unwrap();
         lock.lock().unwrap();
-        let busy = next(&root, &second, "forced");
+        let busy = shown.refresh(&root, None);
+        let again = shown.refresh(&root, None);
         lock.unlock().unwrap();
-        assert_eq!(busy.projects.len(), 2);
-        assert!(
-            busy.projects
-                .iter()
-                .zip(&second.projects)
-                .all(|(a, b)| Arc::ptr_eq(a, b))
-        );
-        assert!(busy.fingerprint.ends_with('*'), "the next poll looks again");
-        assert!(!busy.signatures.contains_key("beta"));
+        for answer in [&busy, &again] {
+            assert!(answer.root.is_none(), "a busy project republishes nothing");
+            assert!(
+                answer.fingerprint.ends_with('*'),
+                "the next poll looks again"
+            );
+            assert!(!answer.signatures.contains_key("beta"));
+        }
+        assert_eq!(shown.projects.len(), 2);
         // A stray copy of a project folder is reported, and hides nothing.
         let stray = root.join("Alpha - Copy");
         fs::create_dir_all(&stray).unwrap();
         fs::copy(root.join("alpha/project.json"), stray.join("project.json")).unwrap();
-        let skipped = next(&root, &busy, "forced");
-        assert_eq!(skipped.projects.len(), 2);
+        let skipped = shown.refresh(&root, None);
         assert_eq!(skipped.unreadable.len(), 1);
         assert_eq!(skipped.unreadable[0].0, "Alpha - Copy");
         assert!(
             skipped.signatures.contains_key("beta"),
             "beta is read again"
         );
-        let beta = skipped.projects.iter().find(|p| p.id == "beta").unwrap();
+        let beta = shown.projects.iter().find(|p| p.id == "beta").unwrap();
         assert_eq!(beta.research_scope, "Changed");
+        assert_eq!(shown.projects.len(), 2);
+        // With only the stray folder left unreadable, refreshes answer "unchanged" but keep
+        // reporting it.
+        let quiet = shown.refresh(&root, None);
+        assert!(quiet.root.is_none());
+        assert_eq!(quiet.unreadable.len(), 1);
     }
 
     #[test]

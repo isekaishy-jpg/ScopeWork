@@ -1906,7 +1906,9 @@ impl ResearchUi {
                                 self.dirty = false;
                                 self.scope_dirty = false;
                                 self.confirm_complete = false;
-                                self.message.clear();
+                                // A loaded record leaves the status bar to what still holds.
+                                self.message = self.unreadable_note();
+                                self.message_error = !self.message.is_empty();
                             }
                             Err(e) => {
                                 self.message = e;
@@ -1957,24 +1959,16 @@ impl ResearchUi {
                     self.fingerprint = v.fingerprint;
                     self.signatures = v.signatures;
                     self.jobs = v.jobs;
-                    if let Some(root) = v.root {
-                        if v.unreadable != self.unreadable {
-                            if v.unreadable.is_empty() && self.message.contains("could not be read")
-                            {
-                                self.message.clear();
-                                self.message_error = false;
-                            }
-                            if !v.unreadable.is_empty() {
-                                self.message = v
-                                    .unreadable
-                                    .iter()
-                                    .map(|(id, e)| format!("Project {id} could not be read: {e}"))
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                self.message_error = true;
-                            }
-                            self.unreadable = v.unreadable;
+                    // Every answer carries the unreadable projects, changed or not.
+                    if v.unreadable != self.unreadable {
+                        let shown = self.message == self.unreadable_note();
+                        self.unreadable = v.unreadable;
+                        if !self.unreadable.is_empty() || shown {
+                            self.message = self.unreadable_note();
+                            self.message_error = !self.message.is_empty();
                         }
+                    }
+                    if let Some(root) = v.root {
                         self.root = Some(root);
                         let retired = (
                             std::mem::replace(&mut self.ui_projects, v.projects),
@@ -2070,6 +2064,14 @@ impl ResearchUi {
                 self.refresh_worker = Some(worker);
             }
         }
+    }
+    /// The status-bar note for projects the last refresh could not read (empty when none).
+    fn unreadable_note(&self) -> String {
+        self.unreadable
+            .iter()
+            .map(|(id, e)| format!("Project {id} could not be read: {e}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
     pub fn refresh_library(&mut self) {
         self.refresh_generation += 1;
@@ -2540,6 +2542,48 @@ mod background_ui_tests {
         assert_eq!(ui.body, "unsaved prose");
         assert!(ui.dirty);
         assert!(ui.requested.is_none());
+    }
+    #[test]
+    fn the_unreadable_note_survives_record_loads_and_clears_when_resolved() {
+        let mut ui = isolated_ui();
+        let deliver = |ui: &mut ResearchUi, unreadable: Vec<(String, String)>| {
+            let inbox = background::SnapshotInbox::new().unwrap();
+            let value = background::Snapshot {
+                root: None,
+                projects: vec![],
+                browser: vec![],
+                views: vec![],
+                jobs: Default::default(),
+                fingerprint: "f*".into(),
+                signatures: Default::default(),
+                unreadable,
+            };
+            assert!(
+                inbox
+                    .sender()
+                    .try_post(solworker::SWPhase(1), move |slot| *slot = Some(Ok(value)))
+                    .is_ok()
+            );
+            let (_send, recv) = std::sync::mpsc::sync_channel(1);
+            ui.refresh_task = Some((ui.refresh_generation, recv));
+            ui.snapshot_inbox = Some(inbox);
+            ui.poll(&egui::Context::default());
+        };
+        deliver(
+            &mut ui,
+            vec![("stray".into(), "Invalid project identity".into())],
+        );
+        assert!(ui.message.contains("Project stray could not be read"));
+        assert!(ui.message_error);
+        // A record load no longer wipes it.
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        send.send(Ok(loaded("fixture", 0))).unwrap();
+        ui.load_task = Some((ui.generation, recv));
+        ui.poll(&egui::Context::default());
+        assert!(ui.message.contains("Project stray could not be read"));
+        // Resolved: the note goes.
+        deliver(&mut ui, vec![]);
+        assert!(ui.message.is_empty());
     }
     #[test]
     fn obsolete_snapshot_is_rejected_and_owner_shutdown_rejects_late_delivery() {
