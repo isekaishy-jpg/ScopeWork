@@ -738,8 +738,17 @@ impl Server {
             if let Ok(mut resident) = state.resident.lock() {
                 *resident = None;
             }
-            if let Some(committed) = self.committed_catalog(&state.id) {
-                self.publish(state, committed);
+            if let Some((committed, stamp)) = self.committed_catalog(&state.id) {
+                // Unwinding released the lock: the stamp from before the read keeps a commit
+                // landing meanwhile from passing as this catalog.
+                Self::replace(
+                    state,
+                    Arc::new(Snapshot {
+                        project: committed,
+                        stamp,
+                        overlay: new_overlay(),
+                    }),
+                );
             }
             let error = "writer_failed: the coordinator's writer failed while applying this operation; it may or may not have been applied. Check the record before retrying.";
             batch.iter().map(|_| Answer::of(Err(error.to_string()))).collect()
@@ -831,7 +840,7 @@ impl Server {
         if current.as_ref() != Some(&lib.projects[0]) {
             if answers.iter().all(|a| a.exit == 0) {
                 self.publish(state, lib.projects[0].clone());
-            } else if let Some(committed) = self.committed_catalog(&state.id)
+            } else if let Some((committed, _)) = self.committed_catalog(&state.id)
                 && current.as_ref() != Some(&committed)
             {
                 // A failure may leave the in-memory catalog ahead of the disk: readers get
@@ -882,10 +891,13 @@ impl Drop for Writing<'_> {
 }
 
 impl Server {
-    /// The catalog as committed on disk, or `None` if it cannot be read.
-    fn committed_catalog(&self, id: &str) -> Option<Project> {
-        let bytes = std::fs::read(self.root.join(id).join("project.json")).ok()?;
-        serde_json::from_slice(&bytes).ok()
+    /// The catalog as committed on disk with the stamp taken before reading it, or `None` if it
+    /// cannot be read.
+    fn committed_catalog(&self, id: &str) -> Option<(Project, Option<(u64, SystemTime)>)> {
+        let path = self.root.join(id).join("project.json");
+        let stamp = stamp(&path);
+        let bytes = std::fs::read(&path).ok()?;
+        Some((serde_json::from_slice(&bytes).ok()?, stamp))
     }
 }
 
