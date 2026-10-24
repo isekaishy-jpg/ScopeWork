@@ -296,11 +296,12 @@ fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
 fn new_overlay() -> Overlay {
     Arc::new(RwLock::new(HashMap::new()))
 }
-/// Whether a catalog transaction of either journal format is pending for `project`.
+/// Whether a catalog transaction of either journal format is pending for `project`: its
+/// journal exists, the rule recovery uses (an empty pending folder is reused by the next commit).
 fn pending_journal(root: &Path, project: &str) -> bool {
     let dir = root.join(project);
-    dir.join("tools/workspaces/catalog-transactions-v4/pending")
-        .exists()
+    dir.join("tools/workspaces/catalog-transactions-v4/pending/journal.json")
+        .is_file()
         || dir
             .join("tools/workspaces/catalog-transactions/pending/journal.json")
             .is_file()
@@ -1420,6 +1421,22 @@ mod tests {
             queued: Instant::now() - waited,
             reply,
         }
+    }
+
+    #[test]
+    fn only_a_pending_journal_is_a_transaction_in_flight() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("pending-{}", uuid::Uuid::new_v4()));
+        let pending = root.join("p/tools/workspaces/catalog-transactions-v4/pending");
+        std::fs::create_dir_all(&pending).unwrap();
+        assert!(
+            !pending_journal(&root, "p"),
+            "an empty folder is reused by the next commit"
+        );
+        std::fs::write(pending.join("journal.json"), "{}").unwrap();
+        assert!(pending_journal(&root, "p"));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

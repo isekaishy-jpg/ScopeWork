@@ -126,7 +126,9 @@ impl Watch {
 
         // Scopework's own catalog writes since the last check, and whether a transaction among
         // them repathed the ledger.
-        let in_flight = dir.join(PENDING).exists();
+        // A pending journal, the rule recovery uses: an empty pending folder is reused by the
+        // next commit and holds no transaction.
+        let in_flight = dir.join(PENDING).join("journal.json").is_file();
         let catalog = dir.join("project.json");
         let catalog_stamp = stamp(&catalog);
         // The racy-timestamp rule again: a catalog rewritten within one clock tick keeps its stamp.
@@ -341,6 +343,7 @@ mod tests {
         // A transaction in flight has rewritten the ledger and the catalog, but its receipt is
         // still the pending folder: nothing is judged yet.
         std::fs::create_dir_all(d.join(PENDING)).unwrap();
+        std::fs::write(d.join(PENDING).join("journal.json"), "{}").unwrap();
         std::fs::write(d.join(LEDGER), r#"{"report_sha256":"new"}"#).unwrap();
         std::fs::write(
             d.join("project.json"),
