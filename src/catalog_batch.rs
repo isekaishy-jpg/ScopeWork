@@ -1101,7 +1101,6 @@ impl Library {
             }
         }
         let rewriter = layout::Rewriter::new(&rewrites, &root);
-        rewrites.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
         // Only reports that mention a moved folder can hold a reference that must change;
         // legacy link repair still reads every report.
         let mentioning = if rewrites.is_empty() || batch.repair_legacy_links {
