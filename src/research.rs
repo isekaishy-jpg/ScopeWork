@@ -1510,6 +1510,7 @@ impl Library {
                     evidence: evidence.into(),
                 }],
                 evidence_only: false,
+                reopen: false,
             };
             self.save_reports(p, &batch)?;
             return Ok(());
@@ -1624,6 +1625,32 @@ impl Library {
                 evidence: evidence.into(),
             }],
             evidence_only: true,
+            reopen: false,
+        };
+        self.save_reports(p, &batch).map(|_| ())
+    }
+    /// Reopens a completed record for review: its status returns to In Progress and its
+    /// acceptance is cleared, as if its text had changed, and the records that depend on it
+    /// reopen with it. A quarantined record keeps its status (lifting restores it).
+    pub fn reopen(&mut self, p: usize, id: u64, expected: &str) -> Result<()> {
+        if !self.writable(p) {
+            return self.write_project(p, |l, p| l.reopen(p, id, expected));
+        }
+        self.refuse_quarantined(p, id, "reopening")?;
+        self.check_edit_token(p, id, expected, "draft")?;
+        let (body, evidence) = self.read(p, id)?;
+        let batch = catalog_batch::ReportBatch {
+            schema: 2,
+            binary: self.projects[p].binary.clone(),
+            expect_revision: None,
+            reports: vec![catalog_batch::ReportSave {
+                id,
+                expect: expected.into(),
+                body,
+                evidence,
+            }],
+            evidence_only: false,
+            reopen: true,
         };
         self.save_reports(p, &batch).map(|_| ())
     }

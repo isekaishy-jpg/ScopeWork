@@ -102,7 +102,7 @@ The dashboard can stay open during CLI work. Writes reload the latest catalog un
 
 ## Evidence-only saves and status reset (0.7.0)
 
-Generated evidence (inventories, census or decoding sections) should not count as research started. Add `--evidence-only` to `node save`, or `"evidence_only": true` to a `save-batch` request. The report is saved with the usual token checks and journaling, but a Not Started record stays Not Started. A completed record still reopens, because its accepted text changed.
+Generated evidence (inventories, census or decoding sections) should not count as research started. Add `--evidence-only` to `node save`, or `"evidence_only": true` to a `save-batch` request. The report is saved with the usual token checks and journaling, but a Not Started record stays Not Started. A completed record still reopens when its text changes, because its accepted text changed. Saving a report unchanged (with or without `--evidence-only`) changes nothing; `node reopen` is how a completed record is reopened without editing it.
 
 To return records that were marked In Progress only by generated evidence:
 

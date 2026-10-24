@@ -91,9 +91,13 @@ pub struct ReportBatch {
     pub expect_revision: Option<u64>,
     pub reports: Vec<ReportSave>,
     /// Attach generated evidence without starting research: Not Started stays Not Started.
-    /// A completed report still reopens, because its accepted text changes.
+    /// A completed report whose text changes still reopens, because its accepted text changes.
     #[serde(default)]
     pub evidence_only: bool,
+    /// Reopen the (single) completed record even though its text is unchanged: what
+    /// `Library::reopen` asks for. Never read from a request file.
+    #[serde(skip)]
+    pub(super) reopen: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -806,7 +810,9 @@ impl Library {
             }
             parts(&original)?;
             let output = index.render(&before, input.id, &input.body, &input.evidence);
-            if original == output && node.status != Status::Complete {
+            // An unchanged report changes nothing, completed or not; only an explicit reopen
+            // reopens the record its text still matches.
+            if original == output && !(batch.reopen && node.status == Status::Complete) {
                 continue;
             }
             if !batch.evidence_only {
@@ -1597,6 +1603,7 @@ mod tests {
                 })
                 .collect(),
             evidence_only: false,
+            reopen: false,
         }
     }
     #[test]
@@ -1788,6 +1795,42 @@ mod tests {
         assert!(lib.save_reports(0, &batch).is_err());
         assert!(serde_json::from_value::<ReportBatch>(serde_json::json!({"schema":1,"binary":"b","expect_revision":1,"reports":[],"complete":true})).is_err());
         assert!(!pending(&lib.dir(0)).exists());
+    }
+    #[test]
+    fn unchanged_saves_keep_a_completed_record_and_only_reopen_reopens_it() {
+        let workspace = Workspace::new();
+        let mut lib = workspace.populate("alpha");
+        let token = lib.completion_token(0, 3).unwrap();
+        lib.save_report(0, 3, "Reviewed", "Evidence", true, &token)
+            .unwrap();
+        let accepted = lib.projects[0].nodes[3].accepted_hash.clone();
+        let revision = lib.projects[0].revision;
+        // The same text saved again, as a draft and as generated evidence, changes nothing.
+        let token = lib.report_token(0, 3).unwrap();
+        lib.save_report(0, 3, "Reviewed", "Evidence", false, &token)
+            .unwrap();
+        lib.save_evidence(0, 3, "Reviewed", "Evidence", &token)
+            .unwrap();
+        let mut batch = inputs(&lib, &[3]);
+        batch.reports[0].body = "Reviewed".into();
+        batch.reports[0].evidence = "Evidence".into();
+        batch.evidence_only = true;
+        assert!(lib.save_reports(0, &batch).unwrap().is_empty());
+        assert_eq!(lib.projects[0].revision, revision, "nothing was committed");
+        assert_eq!(lib.projects[0].nodes[3].status, Status::Complete);
+        assert_eq!(lib.projects[0].nodes[3].accepted_hash, accepted);
+        // Changed evidence still reopens: the accepted text changed.
+        lib.save_evidence(0, 3, "Reviewed", "More evidence", &token)
+            .unwrap();
+        assert_eq!(lib.projects[0].nodes[3].status, Status::InProgress);
+        // An explicit reopen of unchanged text reopens.
+        let token = lib.completion_token(0, 3).unwrap();
+        lib.save_report(0, 3, "Reviewed", "More evidence", true, &token)
+            .unwrap();
+        let token = lib.report_token(0, 3).unwrap();
+        lib.reopen(0, 3, &token).unwrap();
+        assert_eq!(lib.projects[0].nodes[3].status, Status::InProgress);
+        assert!(lib.projects[0].nodes[3].accepted_hash.is_none());
     }
     #[test]
     fn batch_reopens_consumers_and_ancestors_preserving_evidence_files() {

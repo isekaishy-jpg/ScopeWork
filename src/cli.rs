@@ -498,7 +498,7 @@ pub(crate) enum NodeCommand {
     },
     /// Read the report, scope criteria, paths and current optimistic edit token.
     Show { project: String, node: u64 },
-    /// Save UTF-8 Markdown inputs. Always leaves the report open for review.
+    /// Save UTF-8 Markdown inputs. Never completes; a changed report is left open for review, an unchanged one as it is.
     Save {
         project: String,
         node: u64,
@@ -1459,8 +1459,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 expect: token,
             } => {
                 let p = project(lib, &id)?;
-                let (body, evidence) = lib.read(p, node)?;
-                lib.save_report(p, node, &body, &evidence, false, &token)?;
+                lib.reopen(p, node, &token)?;
                 node_view(lib, p, node)
             }
         },

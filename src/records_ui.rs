@@ -364,7 +364,11 @@ impl ResearchUi {
             }
             if self.status == Status::Complete && !self.dirty {
                 if classic::button(ui, !working, "Reopen").clicked() {
-                    self.save(false);
+                    let token = self.loaded_hash.clone();
+                    self.mutate(move |lib, p, id| {
+                        lib.reopen(p, id, &token)?;
+                        Ok(id)
+                    });
                 }
             } else if classic::button(ui, !working && self.dirty, "Discard changes").clicked() {
                 nav = Some((self.project, self.node));
