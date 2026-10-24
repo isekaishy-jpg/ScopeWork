@@ -240,6 +240,9 @@ pub fn entry_line(entry: &Value) -> String {
         if let Some(name) = project["name"]["after"].as_str() {
             parts.push(format!("name -> {name}"));
         }
+        if let Some(job) = entry["import"].as_str() {
+            parts.push(format!("import {job} published"));
+        }
         if project["binary"].is_object() {
             parts.push("binary identity amended".into());
         }
@@ -283,6 +286,46 @@ pub fn entry_line(entry: &Value) -> String {
             .collect();
         format!("r{revision}  {at}  {kind}: {summary}")
     }
+}
+
+/// Committed import publications as history entries. A publication changes the catalog under
+/// its own journal in its job folder, so the catalog receipts never list it; its job receipt
+/// names the revision it published and the records it created.
+fn publications(root: &Path) -> Vec<Value> {
+    let mut entries = vec![];
+    let jobs = root.join("tools/workspaces/import-jobs");
+    for entry in fs::read_dir(&jobs).into_iter().flatten().flatten() {
+        let path = entry.path().join("receipt.json");
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok(job) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        let (Some(revision), Some(first), Some(end)) = (
+            job["revision"].as_u64(),
+            job["first_id"].as_u64(),
+            job["end_id"].as_u64(),
+        ) else {
+            continue;
+        };
+        if job["state"] != "Committed" {
+            continue;
+        }
+        let at = fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        entries.push(json!({
+            "kind": "catalog",
+            "revision": revision,
+            "import": job["id"],
+            "records_changed": end.saturating_sub(first),
+            "created": {"first": first, "end": end},
+            "changes": [],
+            "at_unix": at,
+        }));
+    }
+    entries
 }
 
 /// Receipts newest first, with the journal's modification time (the commit time; compaction keeps it).
@@ -571,6 +614,15 @@ impl Library {
                     found += 1;
                 }
             }
+            entries.extend(publications(&root).into_iter().filter(|entry| {
+                let created = &entry["created"];
+                in_range(entry["revision"].as_u64().unwrap_or(0))
+                    && in_time(entry["at_unix"].as_u64())
+                    && filter.node.is_none_or(|n| {
+                        created["first"].as_u64().is_some_and(|first| n >= first)
+                            && created["end"].as_u64().is_some_and(|end| n < end)
+                    })
+            }));
         }
         // Newest first; tooling entries record the catalog revision current when they were made.
         entries.sort_by_key(|e| {

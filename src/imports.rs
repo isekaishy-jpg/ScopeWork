@@ -661,18 +661,32 @@ fn publish(
         }
         drop(index);
         drop(lib);
-        // Parents gain source links; complete records they reach need review again.
+        // Parents gain source links; complete records they reach need review again, and are
+        // queued for it as any other change queues them.
+        // Quarantined records keep no queue entries (quarantining clears them).
+        let sealed =
+            super::quarantine::effective(&after, &super::quarantine::read_records(&project_root));
+        let mut reopened: Vec<u64> = after
+            .nodes
+            .iter()
+            .filter(|n| {
+                parents.contains(&n.id) && n.status == Status::Complete && !sealed.contains(&n.id)
+            })
+            .map(|n| n.id)
+            .collect();
         for node in &mut after.nodes {
             if parents.contains(&node.id) {
                 reopen::mark_changed(node, None);
             }
         }
         let consumers = reopen::consumers_of(&after.dependencies);
-        let sealed = super::quarantine::effective(
-            &after,
-            &super::quarantine::read_records(&project_root),
-        );
-        reopen::reopen_affected(&mut after, &parents, &HashMap::new(), &consumers, &sealed);
+        reopened.extend(reopen::reopen_affected(
+            &mut after,
+            &parents,
+            &HashMap::new(),
+            &consumers,
+            &sealed,
+        ));
         after.revision += 1;
         after.structural_epoch += 1;
         after.active_import = None;
@@ -680,7 +694,7 @@ fn publish(
         let bytes = catalog_bytes(&after)?;
         let candidate = format!("candidate-{}.json", uuid::Uuid::new_v4());
         atomic(&publication.join(&candidate), &bytes)?;
-        let journal = Publication {
+        let mut journal = Publication {
             before_hash,
             after_hash: digest(&bytes),
             catalog: candidate,
@@ -708,6 +722,8 @@ fn publish(
             || digest(&fs::read(project_root.join("project.json")).map_err(|e| e.to_string())?)
                 != journal.before_hash
         {
+            // This attempt's candidate is never published: do not leave it behind.
+            let _ = fs::remove_file(publication.join(&journal.catalog));
             continue;
         }
         for edit in &journal.edits {
@@ -717,6 +733,24 @@ fn publish(
                 return Err(
                     "report_conflict: parent changed outside the app during publication".into(),
                 );
+            }
+        }
+        if !reopened.is_empty() {
+            // Read under the commit lease, so the queue cannot change before recovery applies it.
+            let original =
+                coordination::ensure(&project_root, coordination::REVIEW_QUEUE, "entries")?;
+            let updated = coordination::queue_reopened(
+                &original,
+                &after,
+                &reopened,
+                &format!("Reopened by import {} adding records", job.id),
+            )?;
+            if updated != original {
+                journal.edits.push(ParentEdit {
+                    path: coordination::REVIEW_QUEUE.into(),
+                    before: original,
+                    after: updated,
+                });
             }
         }
         job.state = JobState::Publishing;

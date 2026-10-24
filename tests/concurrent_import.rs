@@ -833,3 +833,58 @@ fn format_five_upgrade_preserves_reports_and_original_catalog() {
     .unwrap();
     assert_eq!(backup, catalog);
 }
+
+#[test]
+fn a_publication_queues_what_it_reopens_and_appears_in_history() {
+    let f = Fixture::new();
+    let complete = |id: &str, body: &str| {
+        let token = f.ok(&["node", "show", "fixture", id])["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(f.save(id, &token, body).status.success());
+        let token = f.ok(&["node", "show", "fixture", id])["completion_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.ok(&[
+            "node",
+            "complete",
+            "fixture",
+            id,
+            "--expect",
+            &token,
+            "--reviewed",
+        ]);
+    };
+    complete("3", "First behaviour");
+    complete("4", "Second behaviour");
+    complete("2", "Chunk synthesis");
+    let input = f.input(2);
+    let job = f.ok(&[
+        "import",
+        "start",
+        "fixture",
+        "--file",
+        input.to_str().unwrap(),
+    ]);
+    assert_eq!(job["state"], "Committed", "{job}");
+    let queue = f.ok(&["review-queue", "fixture"]);
+    assert!(
+        queue["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["node"] == 2),
+        "the reopened chunk waits for review: {queue}"
+    );
+    let history = f.ok(&["history", "show", "fixture", "--only", "catalog"]);
+    let published = history["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["import"] == job["id"])
+        .cloned()
+        .unwrap_or_else(|| panic!("no publication entry: {history}"));
+    assert_eq!(published["records_changed"], 2);
+}
