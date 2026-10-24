@@ -427,6 +427,10 @@ pub(crate) enum NodeCommand {
         file: PathBuf,
         #[arg(long)]
         expect: Option<String>,
+        /// The human's instruction, required to remove quarantined records (overrides the
+        /// request's `directed_by`).
+        #[arg(long)]
+        directed_by: Option<String>,
     },
     /// Preview empty architecture/chunk pruning; authored scopes are retained by default.
     Prune {
@@ -435,6 +439,9 @@ pub(crate) enum NodeCommand {
         file: PathBuf,
         #[arg(long)]
         expect: Option<String>,
+        /// The human's instruction; without it, quarantined records are never pruned.
+        #[arg(long)]
+        directed_by: Option<String>,
     },
     /// Read multiple canonical reports and edit tokens from one project snapshot.
     ReadBatch {
@@ -682,6 +689,24 @@ fn node_view(lib: &Library, p: usize, id: u64) -> Result<Value, String> {
     serde_json::to_value(lib.record(p, id)?).map_err(|e| e.to_string())
 }
 
+/// `node delete` and `node prune`: the request file, with `--directed-by` taking precedence.
+fn remove(
+    lib: &mut Library,
+    id: &str,
+    file: &PathBuf,
+    expect: Option<&str>,
+    directed_by: Option<String>,
+    prune: bool,
+) -> Result<Value, String> {
+    let p = project(lib, id)?;
+    let mut request: crate::research::Removal =
+        serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    if directed_by.is_some() {
+        request.directed_by = directed_by;
+    }
+    lib.remove_nodes(p, &request, prune, expect)
+}
 fn expect(lib: &Library, p: usize, id: u64, token: &str) -> Result<(), String> {
     lib.check_edit_token(p, id, token, "structural")
 }
@@ -1218,22 +1243,14 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 project: id,
                 file,
                 expect,
-            } => {
-                let p = project(lib, &id)?;
-                let request = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
-                lib.remove_nodes(p, &request, false, expect.as_deref())
-            }
+                directed_by,
+            } => remove(lib, &id, &file, expect.as_deref(), directed_by, false),
             NodeCommand::Prune {
                 project: id,
                 file,
                 expect,
-            } => {
-                let p = project(lib, &id)?;
-                let request = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
-                lib.remove_nodes(p, &request, true, expect.as_deref())
-            }
+                directed_by,
+            } => remove(lib, &id, &file, expect.as_deref(), directed_by, true),
             NodeCommand::ReadBatch { project: id, nodes } => {
                 lib.read_reports(project(lib, &id)?, &nodes)
             }

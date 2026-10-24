@@ -386,12 +386,22 @@ fn deleting_a_quarantined_chunk_drops_its_record() {
         serde_json::json!({"schema":1,"binary":binary,"expect_revision":f.revision(),"ids":[2]});
     let path = f.home.join("delete.json");
     fs::write(&path, request.to_string()).unwrap();
+    let path = path.to_str().unwrap();
+    // Removal takes work out of the seal: it needs the human's direction.
+    let error = f.refused(&["node", "delete", "fixture", "--file", path]);
+    assert!(
+        error.contains("\"kind\":\"quarantined\"") && error.contains("Removing"),
+        "{error}"
+    );
+    let direction = "The human: drop the voice chunk";
     let preview = f.ok(&[
         "node",
         "delete",
         "fixture",
         "--file",
-        path.to_str().unwrap(),
+        path,
+        "--directed-by",
+        direction,
     ]);
     let token = preview["token"].as_str().unwrap().to_string();
     f.ok(&[
@@ -399,13 +409,158 @@ fn deleting_a_quarantined_chunk_drops_its_record() {
         "delete",
         "fixture",
         "--file",
-        path.to_str().unwrap(),
+        path,
         "--expect",
         &token,
+        "--directed-by",
+        direction,
     ]);
     let listed = f.ok(&["node", "quarantined", "fixture"]);
     assert!(
         listed["quarantined"].as_array().unwrap().is_empty(),
         "{listed}"
     );
+    let history = f.ok(&["history", "show", "fixture", "--limit", "1"]);
+    assert_eq!(history["entries"][0]["directed_by"], direction, "{history}");
+}
+
+#[test]
+fn deleting_a_function_of_a_quarantined_chunk_needs_direction() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "human",
+        "--reason",
+        "Voice code only",
+    ]);
+    let binary = f.ok(&["project", "revision", "fixture"])["binary"].clone();
+    let request =
+        serde_json::json!({"schema":1,"binary":binary,"expect_revision":f.revision(),"ids":[3]});
+    let path = f.home.join("delete.json");
+    fs::write(&path, request.to_string()).unwrap();
+    let error = f.refused(&[
+        "node",
+        "delete",
+        "fixture",
+        "--file",
+        path.to_str().unwrap(),
+    ]);
+    assert!(error.contains("through chunk 2"), "{error}");
+}
+
+#[test]
+fn prune_passes_over_quarantined_records() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node", "create", "fixture", "--parent", "1", "--name", "Empty",
+    ]);
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "6",
+        "--origin",
+        "human",
+        "--reason",
+        "Sealed placeholder",
+    ]);
+    let binary = f.ok(&["project", "revision", "fixture"])["binary"].clone();
+    let request =
+        serde_json::json!({"schema":1,"binary":binary,"expect_revision":f.revision(),"ids":[6]});
+    let path = f.home.join("prune.json");
+    fs::write(&path, request.to_string()).unwrap();
+    let path = path.to_str().unwrap();
+    let preview = f.ok(&["node", "prune", "fixture", "--file", path]);
+    assert!(
+        preview["candidates"].as_array().unwrap().is_empty(),
+        "{preview}"
+    );
+    assert_eq!(preview["excluded"][0]["reason"], "quarantined", "{preview}");
+    let directed = f.ok(&[
+        "node",
+        "prune",
+        "fixture",
+        "--file",
+        path,
+        "--directed-by",
+        "The human: remove the placeholder",
+    ]);
+    assert_eq!(directed["candidates"][0]["id"], 6, "{directed}");
+}
+
+#[test]
+fn a_quarantined_function_may_be_named_as_a_prerequisite() {
+    let f = Fixture::new();
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "human",
+        "--reason",
+        "Voice code only",
+    ]);
+    let structural = |id: &str| {
+        f.ok(&["node", "show", "fixture", id])["structural_token"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // F2 (outside the seal) builds on F1 (inside it): no direction needed, any spelling.
+    for spelling in ["0X1000", "0x1000", "1000"] {
+        f.ok(&[
+            "deps",
+            "set",
+            "fixture",
+            "5",
+            spelling,
+            "--expect",
+            &structural("5"),
+        ]);
+        assert_eq!(
+            f.ok(&["deps", "get", "fixture", "5"])["requires"][0],
+            3,
+            "{spelling}"
+        );
+        f.ok(&["deps", "set", "fixture", "5", "--expect", &structural("5")]);
+    }
+    // F1's own prerequisites stay sealed, however they are spelled.
+    for spelling in ["2000", "0X2000"] {
+        let error = f.refused(&[
+            "deps",
+            "set",
+            "fixture",
+            "3",
+            spelling,
+            "--expect",
+            &structural("3"),
+        ]);
+        assert!(error.contains("quarantined"), "{spelling}: {error}");
+    }
+    f.ok(&[
+        "deps",
+        "set",
+        "fixture",
+        "3",
+        "0X2000",
+        "--expect",
+        &structural("3"),
+        "--directed-by",
+        "The human: F1 calls F2",
+    ]);
+    let error = f.refused(&[
+        "deps",
+        "set",
+        "fixture",
+        "5",
+        "0x1000 zz",
+        "--expect",
+        &structural("5"),
+    ]);
+    assert!(error.contains("Invalid hexadecimal RVA: zz"), "{error}");
 }

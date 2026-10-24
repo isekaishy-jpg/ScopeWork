@@ -50,6 +50,10 @@ Regression tests in a small temporary project: a quarantined chunk with an incom
 3. **Existing prerequisites** on a quarantined function count as satisfied; new edges to or from quarantined records are refused.
 4. **Authority:** a quarantine comes from the human's verbal request or from a Claude cyber stop, recorded as its origin. The human personally directs any agent working on a quarantined chunk (`--directed-by`); Astra may choose such work only when no other work is available (rare). No standing collector list.
 
+## Amendment (user, 2026-10-24): seal only structure
+
+Decision 3 is narrowed. Some agents must work with sealed records, and later products (behaviour artifacts, the implementation tracker, specifications) build on them. A prerequisite **on** a quarantined record may now be added or removed without direction; changing the prerequisites **of** a quarantined record still needs `--directed-by`. Removal is sealed too: `node delete` of a quarantined record, or of a function in a quarantined chunk, needs `--directed-by`, and `node prune` passes over quarantined records without it. See [proposal-review-fixes.md](proposal-review-fixes.md), sections 2 and 3.
+
 ## Implementation notes (2026-10-21)
 
 - Implemented as designed: the `quarantine.json` sidecar (records plus a `lifted` log), effective status Complete through the catalog index, the seal in batches, creation-only imports, `node create` and `deps set` with `--directed-by` stored on the transaction and shown by `history show`, refusals for completion, flags and claims, clearing of flags, claims and queue entries, the CLI commands and fields, the GUI marker, filter and editor notice, and the coordinator's drift watch.

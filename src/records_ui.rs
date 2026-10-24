@@ -282,7 +282,7 @@ impl ResearchUi {
                 classic::label(
                     ui,
                     format!(
-                        "⊘ Quarantined ({reason}). It counts as complete; moves, renames and new prerequisites need the human's direction (--directed-by). Report text stays editable."
+                        "⊘ Quarantined ({reason}). It counts as complete; moves, renames, removal and changes to its own prerequisites need the human's direction (--directed-by). Other records may name it as a prerequisite, and its report text stays editable."
                     ),
                     Some(classic::alert(dark)),
                 );

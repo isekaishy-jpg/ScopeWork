@@ -20,6 +20,9 @@ pub struct Removal {
     pub include_authored: bool,
     #[serde(default)]
     pub recursive: bool,
+    /// The human's instruction, required to remove quarantined records.
+    #[serde(default)]
+    pub directed_by: Option<String>,
 }
 
 impl Library {
@@ -64,6 +67,18 @@ impl Library {
                 return Err("Unknown node or App selected; App cannot be removed.".into());
             }
         }
+        // Quarantined records are sealed: removing one, or a function out of a quarantined chunk,
+        // needs the human's direction. Prune passes over them instead of failing.
+        let directed_by = request
+            .directed_by
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty());
+        let sealed = if directed_by.is_some() {
+            HashSet::new()
+        } else {
+            self.quarantined(p)
+        };
         let mut removed = HashSet::new();
         // Why each requested node (or, without `ids`, up to 50 scopes) was not selected, so an empty preview
         // explains itself. The last reason seen wins; a node removed in a later recursive pass is dropped.
@@ -96,6 +111,14 @@ impl Library {
                     }
                     if request.keep.contains(&n.id) {
                         report_exclusion(&mut excluded, n, json!({"reason":"keep"}));
+                        continue;
+                    }
+                    if sealed.contains(&n.id) {
+                        report_exclusion(
+                            &mut excluded,
+                            n,
+                            json!({"reason":"quarantined","detail":"removing a quarantined record needs --directed-by"}),
+                        );
                         continue;
                     }
                     if request.context_only && !n.context_only {
@@ -194,6 +217,9 @@ impl Library {
                     queue.extend(kids);
                 }
             }
+            let mut ordered: Vec<u64> = removed.iter().copied().collect();
+            ordered.sort_unstable();
+            self.check_seal(p, ordered, directed_by, "Removing")?;
         }
         let archive = format!(
             "tools/workspaces/deleted-nodes/revision-{}",
@@ -401,7 +427,7 @@ impl Library {
             edits,
             ledger: !removed.is_empty(),
             repin_ledger: false,
-            directed_by: None,
+            directed_by: directed_by.map(str::to_string),
             repin_ids: vec![],
             moves,
             dependencies,

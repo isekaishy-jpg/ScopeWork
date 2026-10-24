@@ -218,6 +218,19 @@ pub(crate) fn valid_id(id: &str) -> bool {
             && (id.starts_with("com") || id.starts_with("lpt"))
             && matches!(id.as_bytes()[3], b'1'..=b'9'))
 }
+/// A list of hexadecimal RVAs separated by commas or whitespace, each with an optional `0x`.
+pub(crate) fn parse_rvas(text: &str) -> Result<Vec<u32>> {
+    text.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|rva| {
+            let digits = rva
+                .strip_prefix("0x")
+                .or_else(|| rva.strip_prefix("0X"))
+                .unwrap_or(rva);
+            u32::from_str_radix(digits, 16).map_err(|_| format!("Invalid hexadecimal RVA: {rva}"))
+        })
+        .collect()
+}
 /// A record name as stored: trimmed, one line and free of the markers that delimit a report's
 /// sections. A name is rendered into its own report's heading and its parent's source list,
 /// ahead of those markers, so a name holding one would split both reports in the wrong place.
@@ -2102,18 +2115,9 @@ impl Library {
             });
         }
         self.ensure_structural(p)?;
-        let prerequisites: Vec<u64> = rvas
-            .split(',')
-            .filter_map(|t| u32::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok())
-            .filter_map(|rva| self.projects[p].nodes.iter().find(|n| n.rva == Some(rva)))
-            .map(|n| n.id)
-            .collect();
-        self.check_seal(
-            p,
-            std::iter::once(id).chain(prerequisites),
-            directed_by,
-            "Changing prerequisites of",
-        )?;
+        // The seal covers the record whose prerequisites change; a quarantined record may itself
+        // be named as a prerequisite, since later work builds on sealed research.
+        self.check_seal(p, [id], directed_by, "Changing prerequisites of")?;
         if !self.projects[p]
             .nodes
             .iter()
@@ -2127,18 +2131,14 @@ impl Library {
             .filter(|e| e.dependent != id)
             .cloned()
             .collect();
-        for rva in rvas
-            .split(|c: char| c == ',' || c.is_whitespace())
-            .filter(|s| !s.is_empty())
-        {
-            let address =
-                u32::from_str_radix(rva.trim_start_matches("0x").trim_start_matches("0X"), 16)
-                    .map_err(|_| format!("Invalid hexadecimal RVA: {rva}"))?;
+        for address in parse_rvas(rvas)? {
             let n = self.projects[p]
                 .nodes
                 .iter()
                 .find(|n| n.rva == Some(address))
-                .ok_or_else(|| format!("RVA {rva} has no function report in this project."))?;
+                .ok_or_else(|| {
+                    format!("RVA 0x{address:08X} has no function report in this project.")
+                })?;
             edges.push(Dependency {
                 dependent: id,
                 prerequisite: n.id,
