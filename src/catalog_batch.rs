@@ -651,10 +651,17 @@ impl Library {
         {
             return Err("Unknown node in status reset".into());
         }
+        // A quarantined record keeps its own status for when the quarantine is lifted.
+        for id in &request.ids {
+            self.refuse_quarantined(p, *id, "a status reset")?;
+        }
+        let sealed = self.quarantined(p);
         let mut after = before.clone();
         let mut reset = vec![];
         for n in &mut after.nodes {
-            if n.status == Status::InProgress && (request.all_in_progress || wanted.contains(&n.id))
+            if n.status == Status::InProgress
+                && !sealed.contains(&n.id)
+                && (request.all_in_progress || wanted.contains(&n.id))
             {
                 n.status = Status::NotStarted;
                 n.revision += 1;

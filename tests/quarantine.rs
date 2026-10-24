@@ -597,3 +597,50 @@ fn restating_a_sealed_records_values_needs_no_direction() {
     );
     assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("quarantined"));
 }
+
+#[test]
+fn a_status_reset_leaves_quarantined_records_alone() {
+    let f = Fixture::new();
+    f.save("3", "Started research.");
+    f.ok(&[
+        "node",
+        "quarantine",
+        "fixture",
+        "2",
+        "--origin",
+        "human",
+        "--reason",
+        "Voice code only",
+    ]);
+    let binary = f.ok(&["project", "revision", "fixture"])["binary"].clone();
+    let path = f.home.join("reset.json");
+    for request in [
+        serde_json::json!({"schema":1,"binary":binary,"expect_revision":f.revision(),"ids":[3]}),
+        serde_json::json!({"schema":1,"binary":binary,"expect_revision":f.revision(),"all_in_progress":true}),
+    ] {
+        fs::write(&path, request.to_string()).unwrap();
+        let o = f.run_in(
+            "off",
+            &[
+                "node",
+                "reset-status",
+                "fixture",
+                "--file",
+                path.to_str().unwrap(),
+            ],
+        );
+        if request["ids"].is_array() {
+            assert!(
+                !o.status.success() && String::from_utf8_lossy(&o.stderr).contains("quarantined")
+            );
+        } else {
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        }
+    }
+    f.ok(&["node", "unquarantine", "fixture", "2", "--reason", "lifted"]);
+    assert_eq!(
+        f.status("3"),
+        "InProgress",
+        "its own status survived the reset"
+    );
+}
