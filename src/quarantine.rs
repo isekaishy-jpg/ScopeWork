@@ -141,8 +141,27 @@ impl Library {
         if directed_by.is_some_and(|d| !d.trim().is_empty()) {
             return Ok(());
         }
+        // Read once for every record checked (an unreadable file counts as no quarantine).
+        let records = self.quarantines(p).unwrap_or_default();
+        if records.is_empty() {
+            return Ok(());
+        }
+        let parents: HashMap<u64, Option<u64>> = self.projects[p]
+            .nodes
+            .iter()
+            .map(|n| (n.id, n.parent))
+            .collect();
         for id in touched {
-            if let Some((carrier, q)) = self.quarantine_of(p, id) {
+            let carrier = if records.contains_key(&id) {
+                Some(id)
+            } else {
+                parents
+                    .get(&id)
+                    .copied()
+                    .flatten()
+                    .filter(|parent| records.contains_key(parent))
+            };
+            if let Some((carrier, q)) = carrier.map(|c| (c, &records[&c])) {
                 let through = if carrier == id {
                     String::new()
                 } else {
