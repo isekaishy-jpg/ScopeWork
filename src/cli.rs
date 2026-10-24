@@ -1058,20 +1058,9 @@ fn run(args: Args) -> Result<Value, String> {
     execute(args.command, &mut lib)
 }
 /// The project IDs in `root`, sorted: folders with a catalog.
-fn project_ids(root: &std::path::Path) -> Vec<String> {
-    let mut ids: Vec<String> = fs::read_dir(root)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().join("project.json").is_file())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    ids.sort();
-    ids
-}
 /// `research group`: reads and writes the research home's settings, never a project.
 fn groups(home: &std::path::Path, command: &GroupCommand) -> Result<Value, String> {
-    let existing = project_ids(&home.join("projects"));
+    let existing = crate::settings::existing_projects(home);
     let known = |project: &str| {
         if existing.iter().any(|id| id == project) {
             Ok(())

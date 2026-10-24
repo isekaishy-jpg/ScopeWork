@@ -92,6 +92,20 @@ pub fn valid_name(name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
+/// The projects of `home`: its project folders that hold a catalog, sorted. Groups are pruned
+/// against this list, the folders on disk, never against a list some view loaded earlier.
+pub fn existing_projects(home: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = fs::read_dir(home.join("projects"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("project.json").is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+
 fn file(home: &Path) -> PathBuf {
     home.join(FILE)
 }
@@ -166,6 +180,22 @@ mod tests {
         assert_eq!(s.group_of("a"), None);
         s.retain_projects(&["a".into()]);
         assert!(s.groups.is_empty());
+    }
+
+    #[test]
+    fn existing_projects_are_the_folders_that_hold_a_catalog() {
+        let home = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("settings-projects-{}", uuid::Uuid::new_v4()));
+        for (folder, catalog) in [("beta", true), ("alpha", true), ("scratch", false)] {
+            let dir = home.join("projects").join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            if catalog {
+                fs::write(dir.join("project.json"), "{}").unwrap();
+            }
+        }
+        assert_eq!(existing_projects(&home), ["alpha", "beta"]);
+        fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

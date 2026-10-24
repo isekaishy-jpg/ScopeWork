@@ -103,6 +103,11 @@ impl HistoryView {
             return;
         };
         match task.try_recv() {
+            // An answer for the project shown before a switch: the new one is read next.
+            Ok(Ok(value)) if value["project"].as_str() != Some(self.project.as_str()) => {
+                self.task = None;
+                self.reload = true;
+            }
             Ok(Ok(value)) => {
                 self.task = None;
                 self.entries = value["entries"].as_array().cloned().unwrap_or_default();
@@ -326,6 +331,29 @@ mod tests {
             "r44  ----------------  catalog: review-flags.json"
         );
         assert_eq!(entry_node(&catalog, Some(9)), Some(7));
+    }
+
+    #[test]
+    fn an_answer_for_the_previous_project_is_discarded() {
+        let mut view = HistoryView::default();
+        view.follow("alpha");
+        let (send, recv) = std::sync::mpsc::sync_channel(1);
+        view.task = Some(recv);
+        view.reload = false;
+        view.follow("beta");
+        send.send(Ok(
+            json!({"project": "alpha", "entries": [{"kind": "catalog"}]}),
+        ))
+        .unwrap();
+        view.poll();
+        assert!(
+            view.entries.is_empty(),
+            "alpha's history is not shown under beta"
+        );
+        assert!(
+            view.task.is_none() && view.reload,
+            "beta's history is read next"
+        );
     }
 
     #[test]

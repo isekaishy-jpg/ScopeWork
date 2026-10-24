@@ -641,8 +641,6 @@ impl ResearchUi {
                 );
                 ui.horizontal(|ui| {
                     classic::field(ui, &mut self.group_field, 220.0, "Not grouped");
-                    let existing: Vec<String> =
-                        self.ui_projects.iter().map(|p| p.id.clone()).collect();
                     let mut change = None;
                     if classic::button(ui, !self.group_field.trim().is_empty(), "Set group")
                         .clicked()
@@ -653,6 +651,7 @@ impl ResearchUi {
                         change = Some(None);
                     }
                     if let Some(group) = change {
+                        let existing = crate::settings::existing_projects(&home);
                         let saved = crate::settings::update(&home, |s| {
                             s.retain_projects(&existing);
                             s.assign(&project.id, group.as_deref())?;
