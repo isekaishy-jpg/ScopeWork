@@ -150,7 +150,7 @@ fn identity_pins(binary: &str) -> Vec<String> {
     out.dedup();
     out
 }
-fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let temp = path.with_extension(format!("{}.pending", uuid::Uuid::new_v4()));
     let mut file = fs::OpenOptions::new()
@@ -1624,6 +1624,9 @@ pub struct ResearchUi {
     queue_open: Option<String>,
     /// The Project history window.
     history: history_ui::HistoryView,
+    /// The dashboard group field on the Project tab, and the project it was loaded for.
+    group_field: String,
+    group_for: String,
 }
 impl Default for ResearchUi {
     fn default() -> Self {
@@ -1683,6 +1686,8 @@ impl ResearchUi {
             queue: None,
             queue_open: None,
             history: Default::default(),
+            group_field: String::new(),
+            group_for: String::new(),
         }
     }
     fn load(&mut self, p: usize, id: u64) {

@@ -13,8 +13,54 @@ struct Row {
     groups: Vec<(String, usize, usize, usize)>,
 }
 
+/// One tab in the dashboard's project row: an ungrouped project, or a group of projects.
+#[derive(Debug, PartialEq)]
+enum Tab {
+    Project(usize),
+    Group { name: String, members: Vec<usize> },
+}
+/// The tab row for `projects` (IDs and names, in name order) under `settings`: ungrouped projects
+/// and one tab per group, ordered by label (project or group name). Without groups this is the
+/// projects in their own order.
+fn tab_list(
+    projects: &[(&str, &str)],
+    settings: &research_dashboard::settings::Settings,
+) -> Vec<Tab> {
+    let mut tabs: Vec<(String, Tab)> = vec![];
+    for (i, (id, name)) in projects.iter().enumerate() {
+        let Some(group) = settings.group_of(id) else {
+            tabs.push((name.to_string(), Tab::Project(i)));
+            continue;
+        };
+        let existing = tabs.iter_mut().find_map(|(_, tab)| match tab {
+            Tab::Group { name, members } if name == group => Some(members),
+            _ => None,
+        });
+        match existing {
+            Some(members) => members.push(i),
+            None => tabs.push((
+                group.to_string(),
+                Tab::Group {
+                    name: group.to_string(),
+                    members: vec![i],
+                },
+            )),
+        }
+    }
+    tabs.sort_by(|a, b| a.0.cmp(&b.0));
+    tabs.into_iter().map(|(_, tab)| tab).collect()
+}
+
 struct Dashboard {
     project: usize,
+    /// The research home's settings (project groups), reread when the file changes.
+    settings: research_dashboard::settings::Settings,
+    settings_stamp: Option<std::time::SystemTime>,
+    settings_checked: Option<std::time::Instant>,
+    /// Per group, the project its tab shows.
+    group_shown: std::collections::HashMap<String, String>,
+    /// The group whose project menu is open, and where to draw it.
+    group_menu: Option<(String, egui::Pos2)>,
     selection: Option<(usize, usize)>,
     menu: Option<usize>,
     on_top: bool,
@@ -29,6 +75,11 @@ impl Default for Dashboard {
     fn default() -> Self {
         Self {
             project: 0,
+            settings: Default::default(),
+            settings_stamp: None,
+            settings_checked: None,
+            group_shown: Default::default(),
+            group_menu: None,
             selection: None,
             menu: None,
             on_top: false,
@@ -172,6 +223,13 @@ impl eframe::App for Dashboard {
         storage.set_string("dark_mode", self.dark.to_string());
     }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.frame(ctx);
+    }
+}
+
+impl Dashboard {
+    /// One frame of the dashboard (`eframe::App::update` without the eframe frame).
+    fn frame(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) && self.research.has_unsaved() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.research.prevent_close();
@@ -185,6 +243,19 @@ impl eframe::App for Dashboard {
                 .unwrap_or(0);
             self.research.changed = false;
             self.selection = None;
+        }
+        if self
+            .settings_checked
+            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1))
+        {
+            self.settings_checked = Some(std::time::Instant::now());
+            if let Ok(home) = research_dashboard::paths::home(None) {
+                let stamp = research_dashboard::settings::stamp(&home);
+                if stamp != self.settings_stamp {
+                    self.settings_stamp = stamp;
+                    self.settings = research_dashboard::settings::load(&home).unwrap_or_default();
+                }
+            }
         }
         if ctx.style().visuals.dark_mode != self.dark {
             ctx.set_visuals(classic::visuals(self.dark));
@@ -316,28 +387,84 @@ impl eframe::App for Dashboard {
                 let panel = r(3.0, 64.0, w - 6.0, h - 91.0);
                 bevel(&p, panel, false);
                 let mut tab_x = 5.0;
-                for (i, project) in self.projects.iter().enumerate() {
-                    let name=&project.name;
-                    let label = p.layout_no_wrap(name.to_string(), egui::FontId::proportional(11.0), ink).size().x;
-                    let width = tab_width(label);
+                let listed: Vec<(&str, &str)> = self
+                    .projects
+                    .iter()
+                    .map(|p| (p.id.as_str(), p.name.as_str()))
+                    .collect();
+                let tabs = tab_list(&listed, &self.settings);
+                let mut clicked = None;
+                for (i, entry) in tabs.iter().enumerate() {
+                    // The project this tab shows, and for a group its name.
+                    let (shown, group) = match entry {
+                        Tab::Project(index) => (*index, None),
+                        Tab::Group { name, members } => {
+                            let remembered = self.group_shown.get(name).and_then(|id| {
+                                members.iter().copied().find(|m| self.projects[*m].id == *id)
+                            });
+                            let shown = if members.contains(&self.project) {
+                                self.project
+                            } else {
+                                remembered.unwrap_or(members[0])
+                            };
+                            (shown, Some(name.clone()))
+                        }
+                    };
+                    let label_text = match &group {
+                        Some(name) => format!("{name}: {}", self.projects[shown].name),
+                        None => self.projects[shown].name.clone(),
+                    };
+                    let label = p
+                        .layout_no_wrap(label_text.clone(), egui::FontId::proportional(11.0), ink)
+                        .size()
+                        .x;
+                    // A group tab also holds its drop-down arrow.
+                    let width = tab_width(label + if group.is_some() { 12.0 } else { 0.0 });
                     let tab = r(tab_x, 43.0, width, 22.0);
                     p.rect_filled(tab, 0.0, bg);
                     bevel(&p, tab, false);
-                    if self.project == i {
+                    let selected = self.project == shown;
+                    if selected {
                         p.line_segment(
                             [tab.left_bottom(), tab.right_bottom()],
                             egui::Stroke::new(2.0_f32, bg),
                         );
                     }
-                    t(tab_x + 12.0, 54.0, name.to_string());
+                    t(tab_x + 12.0, 54.0, label_text);
+                    if group.is_some() {
+                        let c = egui::pos2(tab.right() - 14.0, tab.center().y + 1.0);
+                        p.add(egui::Shape::convex_polygon(
+                            vec![
+                                c + Vec2::new(-3.5, -2.0),
+                                c + Vec2::new(3.5, -2.0),
+                                c + Vec2::new(0.0, 2.0),
+                            ],
+                            ink,
+                            egui::Stroke::NONE,
+                        ));
+                    }
                     tab_x += width;
                     if ui
                         .interact(tab, ui.id().with(("tab", i)), egui::Sense::click())
                         .clicked()
                     {
-                        self.project = i;
-                        self.selection = None;
+                        let arrow = ctx
+                            .pointer_interact_pos()
+                            .is_some_and(|at| at.x >= tab.right() - 22.0);
+                        clicked = Some((shown, group, selected || arrow, tab));
                     }
+                }
+                if let Some((shown, group, menu, tab)) = clicked {
+                    if let Some(name) = group.filter(|_| menu) {
+                        self.group_menu = match &self.group_menu {
+                            Some((open, _)) if *open == name => None,
+                            _ => Some((name, tab.left_bottom())),
+                        };
+                    } else {
+                        self.group_menu = None;
+                    }
+                    self.project = shown;
+                    self.selection = None;
                 }
                 let project_view=self.projects.get(self.project).cloned();
                 let live_meters=project_view.as_ref().map(|p|p.meters.clone()).unwrap_or_default();
@@ -607,6 +734,51 @@ impl eframe::App for Dashboard {
                 self.menu = None;
             }
         }
+        if let Some((name, at)) = self.group_menu.clone() {
+            let members: Vec<usize> = (0..self.projects.len())
+                .filter(|&i| self.settings.group_of(&self.projects[i].id) == Some(name.as_str()))
+                .collect();
+            let mut chosen = None;
+            let popup = egui::Area::new(egui::Id::new("group menu"))
+                .fixed_pos(at)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    classic::menu_frame(self.dark).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for &i in &members {
+                            let current = i == self.project;
+                            if classic::menu_item(ui, &self.projects[i].name, current).clicked() {
+                                chosen = Some(i);
+                            }
+                        }
+                    });
+                });
+            if let Some(i) = chosen {
+                self.project = i;
+                self.selection = None;
+            }
+            // The tab's own click toggles the menu; any other click closes it.
+            let on_tab = ctx.pointer_interact_pos().is_some_and(|p| {
+                egui::Rect::from_min_max(at - Vec2::new(0.0, 22.0), at + Vec2::new(400.0, 0.0))
+                    .contains(p)
+            });
+            if members.is_empty()
+                || chosen.is_some()
+                || ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                || (ctx.input(|i| i.pointer.any_pressed())
+                    && !popup.response.contains_pointer()
+                    && !on_tab)
+            {
+                self.group_menu = None;
+            }
+        }
+        // Remember which project each group's tab shows.
+        if let Some(project) = self.projects.get(self.project)
+            && let Some(group) = self.settings.group_of(&project.id)
+        {
+            self.group_shown
+                .insert(group.to_string(), project.id.clone());
+        }
         // Research records follow the dashboard's selected project tab.
         if let Some(project) = self.projects.get(self.project) {
             self.research.follow_project(&project.id);
@@ -730,7 +902,7 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod meter_tests {
-    use super::{function_counts, meter_rows, tab_width};
+    use super::{Tab, function_counts, meter_rows, tab_list, tab_width};
     #[test]
     fn function_totals_count_each_function_by_its_own_status() {
         // One chunk holds a function in progress and one not started: one of each, not two in
@@ -751,6 +923,44 @@ mod meter_tests {
             [7, 1, 11]
         );
     }
+    #[test]
+    fn groups_share_one_tab_in_name_order() {
+        use research_dashboard::settings::Settings;
+        let projects = [
+            ("3-3-5a", "3.3.5a"),
+            ("forever", "Forever"),
+            ("populous-amiga", "Populous (Amiga)"),
+            ("populous-snes", "Populous (SNES)"),
+            ("wow-335a-12340", "WoW 3.3.5a"),
+        ];
+        let none = Settings::default();
+        assert_eq!(
+            tab_list(&projects, &none),
+            (0..5).map(Tab::Project).collect::<Vec<_>>()
+        );
+        let mut grouped = Settings::default();
+        for id in ["3-3-5a", "wow-335a-12340"] {
+            grouped.assign(id, Some("WoW")).unwrap();
+        }
+        for id in ["populous-amiga", "populous-snes"] {
+            grouped.assign(id, Some("Populous")).unwrap();
+        }
+        assert_eq!(
+            tab_list(&projects, &grouped),
+            vec![
+                Tab::Project(1),
+                Tab::Group {
+                    name: "Populous".into(),
+                    members: vec![2, 3]
+                },
+                Tab::Group {
+                    name: "WoW".into(),
+                    members: vec![0, 4]
+                },
+            ]
+        );
+    }
+
     #[test]
     fn project_tabs_fit_their_names() {
         // Short names keep the classic tab; long ones widen it instead of being overdrawn.
@@ -785,5 +995,122 @@ mod meter_tests {
         );
         assert_eq!(meter_rows(&[100.0; 6], 212.0, 12.0).2, 3);
         assert_eq!(meter_rows(&[100.0; 6], 660.0, 12.0).2, 1);
+    }
+}
+
+#[cfg(test)]
+mod group_tab_tests {
+    use super::*;
+
+    fn press(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// Runs one dashboard frame with `events`.
+    fn step(ctx: &egui::Context, dash: &mut Dashboard, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 820.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| dash.frame(ctx));
+    }
+
+    /// Clicks at `at`: pointer moves there, presses, releases (each in its own frame).
+    fn click(ctx: &egui::Context, dash: &mut Dashboard, at: egui::Pos2) {
+        step(ctx, dash, vec![egui::Event::PointerMoved(at)]);
+        step(ctx, dash, vec![press(at, true)]);
+        step(ctx, dash, vec![press(at, false)]);
+    }
+
+    #[test]
+    fn a_group_tab_selects_its_project_and_opens_its_menu() {
+        // An isolated home with three projects, two of them grouped. This test binary holds
+        // only the dashboard's unit tests, none of which read the home.
+        let home = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("dashboard-groups-{}", uuid::Uuid::new_v4()));
+        let root = home.join("projects");
+        std::fs::create_dir_all(&root).unwrap();
+        // SAFETY: set before any thread of this test reads the environment; no other test in
+        // this binary reads it.
+        unsafe { std::env::set_var("RESEARCH_DASHBOARD_HOME", &home) };
+        let mut lib = research::Library::open(root.clone()).unwrap();
+        for (id, name) in [("alpha", "Alpha"), ("demo", "Demo"), ("demo2", "Demo two")] {
+            lib.create(id, name, "").unwrap();
+        }
+        drop(lib);
+        research_dashboard::settings::update(&home, |s| {
+            s.assign("demo", Some("Demos"))?;
+            s.assign("demo2", Some("Demos"))
+        })
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut dash = Dashboard::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while dash.projects.len() < 3 || dash.settings.groups.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the snapshot never arrived"
+            );
+            step(&ctx, &mut dash, vec![]);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let names: Vec<&str> = dash.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "Demo", "Demo two"]);
+        assert_eq!(dash.project, 0);
+
+        // The group's tab follows Alpha's: just inside its left edge.
+        let alpha = dash.projects[0].name.clone();
+        let width = ctx.fonts_mut(|f| {
+            f.layout_no_wrap(alpha, egui::FontId::proportional(11.0), Color32::WHITE)
+                .size()
+                .x
+        });
+        let group_tab = egui::pos2(4.0 + 5.0 + tab_width(width) + 8.0, 4.0 + 54.0);
+        click(&ctx, &mut dash, group_tab);
+        assert_eq!(dash.projects[dash.project].id, "demo");
+        assert!(dash.group_menu.is_none(), "the first click only selects");
+        click(&ctx, &mut dash, group_tab);
+        assert_eq!(
+            dash.group_menu.as_ref().map(|(name, _)| name.as_str()),
+            Some("Demos")
+        );
+        // Its two items stack evenly inside the menu: pick the second.
+        let menu = ctx
+            .memory(|m| m.area_rect(egui::Id::new("group menu")))
+            .expect("the menu is drawn");
+        click(
+            &ctx,
+            &mut dash,
+            egui::pos2(menu.center().x, menu.top() + menu.height() * 0.75),
+        );
+        assert_eq!(dash.projects[dash.project].id, "demo2");
+        assert!(dash.group_menu.is_none(), "choosing closes the menu");
+        // The group remembers its project; reopen and close with Escape.
+        click(&ctx, &mut dash, group_tab);
+        assert!(dash.group_menu.is_some());
+        step(
+            &ctx,
+            &mut dash,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+        );
+        assert!(dash.group_menu.is_none());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

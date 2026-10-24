@@ -53,6 +53,9 @@ pub(crate) enum Command {
     /// Read the project history (catalog receipts and tooling entries) or append a tooling entry.
     #[command(subcommand)]
     History(HistoryCommand),
+    /// Group related projects into one dashboard tab (presentation only; no project changes).
+    #[command(subcommand)]
+    Group(GroupCommand),
     /// Who holds a project's lock and which processes are waiting for it (takes no lock).
     Locks { project: String },
     /// Block until a condition holds instead of polling from outside.
@@ -244,6 +247,15 @@ fn job_result(job: imports::Job) -> Result<Value, String> {
         ));
     }
     serde_json::to_value(job).map_err(|e| e.to_string())
+}
+#[derive(Subcommand)]
+pub(crate) enum GroupCommand {
+    /// Groups with their projects, then the ungrouped projects.
+    List,
+    /// Put a project in a group (created if new), moving it out of any other group.
+    Set { project: String, group: String },
+    /// Make a project ungrouped.
+    Clear { project: String },
 }
 #[derive(Subcommand)]
 pub(crate) enum ProjectCommand {
@@ -594,6 +606,9 @@ fn run(args: Args) -> Result<Value, String> {
     }
     paths::initialize(&home)?;
     let root = home.join("projects");
+    if let Command::Group(command) = &args.command {
+        return groups(&home, command);
+    }
     if let Command::Import(command) = &args.command {
         return match command {
             ImportCommand::Plan { project, file } => {
@@ -905,6 +920,55 @@ fn run(args: Args) -> Result<Value, String> {
         return Ok(locations);
     }
     execute(args.command, &mut lib)
+}
+/// The project IDs in `root`, sorted: folders with a catalog.
+fn project_ids(root: &std::path::Path) -> Vec<String> {
+    let mut ids: Vec<String> = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("project.json").is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+/// `research group`: reads and writes the research home's settings, never a project.
+fn groups(home: &std::path::Path, command: &GroupCommand) -> Result<Value, String> {
+    let existing = project_ids(&home.join("projects"));
+    let known = |project: &str| {
+        if existing.iter().any(|id| id == project) {
+            Ok(())
+        } else {
+            Err(format!("Unknown project: {project}"))
+        }
+    };
+    let settings = match command {
+        GroupCommand::List => crate::settings::load(home)?,
+        GroupCommand::Set { project, group } => {
+            known(project)?;
+            crate::settings::update(home, |s| {
+                s.retain_projects(&existing);
+                s.assign(project, Some(group))?;
+                Ok(s.clone())
+            })?
+        }
+        GroupCommand::Clear { project } => {
+            known(project)?;
+            crate::settings::update(home, |s| {
+                s.retain_projects(&existing);
+                s.assign(project, None)?;
+                Ok(s.clone())
+            })?
+        }
+    };
+    let mut shown = settings.clone();
+    shown.retain_projects(&existing);
+    let ungrouped: Vec<&String> = existing
+        .iter()
+        .filter(|id| shown.group_of(id).is_none())
+        .collect();
+    Ok(json!({"groups": shown.groups, "ungrouped": ungrouped}))
 }
 /// Runs a project command against an already opened library: a direct-mode library, a
 /// coordinator snapshot, or the coordinator writer's library (possibly staging).
@@ -1431,6 +1495,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
         Command::Home
         | Command::Init
         | Command::Gui
+        | Command::Group(_)
         | Command::Criteria { .. }
         | Command::Locks { .. }
         | Command::Wait { .. }
@@ -1829,6 +1894,7 @@ pub(crate) fn route(command: &Command) -> Route {
         Command::Home
         | Command::Init
         | Command::Gui
+        | Command::Group(_)
         | Command::Criteria { .. }
         | Command::Import(_)
         | Command::Locks { .. }

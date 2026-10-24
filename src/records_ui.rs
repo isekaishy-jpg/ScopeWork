@@ -612,6 +612,56 @@ impl ResearchUi {
                 }
             });
         });
+        if let Some(home) = self
+            .root
+            .as_ref()
+            .and_then(|root| root.parent())
+            .map(Path::to_path_buf)
+        {
+            if self.group_for != project.id {
+                self.group_for = project.id.clone();
+                self.group_field = crate::settings::load(&home)
+                    .ok()
+                    .and_then(|s| s.group_of(&project.id).map(str::to_string))
+                    .unwrap_or_default();
+            }
+            classic::group(ui, "Dashboard group", |ui| {
+                classic::label(
+                    ui,
+                    "Projects in the same group share one dashboard tab. Display only.",
+                    None,
+                );
+                ui.horizontal(|ui| {
+                    classic::field(ui, &mut self.group_field, 220.0, "Not grouped");
+                    let existing: Vec<String> =
+                        self.ui_projects.iter().map(|p| p.id.clone()).collect();
+                    let mut change = None;
+                    if classic::button(ui, !self.group_field.trim().is_empty(), "Set group")
+                        .clicked()
+                    {
+                        change = Some(Some(self.group_field.clone()));
+                    }
+                    if classic::button(ui, true, "Ungroup").clicked() {
+                        change = Some(None);
+                    }
+                    if let Some(group) = change {
+                        let saved = crate::settings::update(&home, |s| {
+                            s.retain_projects(&existing);
+                            s.assign(&project.id, group.as_deref())?;
+                            Ok(s.group_of(&project.id).map(str::to_string))
+                        });
+                        match saved {
+                            Ok(group) => {
+                                self.group_field = group.unwrap_or_default();
+                                self.message = "Dashboard group saved.".into();
+                                self.message_error = false;
+                            }
+                            Err(e) => self.set_error(e),
+                        }
+                    }
+                });
+            });
+        }
         if let Some(root) = self.root.clone() {
             let project_dir = root.join(&project.id);
             classic::group(ui, "Folders", |ui| {

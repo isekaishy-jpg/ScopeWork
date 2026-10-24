@@ -43,6 +43,17 @@ research project set-scope example --scope "Asset platform" --expect-revision $p
 
 The label appears above the project's meters and in `project show/list`, `node show`, and `status`. It identifies what agents are researching. Changing it does not reopen completed reports or change assignments. Pass an empty label to clear it.
 
+## Dashboard groups
+
+```powershell
+research group set 3-3-5a WoW
+research group set wow-335a-12340 WoW
+research group list
+research group clear 3-3-5a
+```
+
+Related projects can share one dashboard tab. A group tab reads `Group: Project`; clicking it shows that project, and clicking it again (or its arrow) opens a menu of the group's projects. Groups are one level, each project is in at most one, and a group left empty is removed. They are kept in the research home's `settings.json`, not in any project, and change no project data or history. Research records > Project > **Dashboard group** sets the same thing from the GUI. Group names are one line of at most 40 characters.
+
 ## Edit and review
 
 Read the node before editing. Its draft `token` binds that record, its authored content and relevant structural context. Unrelated draft saves, import ID reservations and scope-label edits do not invalidate it. Write UTF-8 Markdown body and evidence inputs, then save through the CLI. These are editing inputs; the canonical report remains the file returned by `node show`. Saving leaves the record open for review.

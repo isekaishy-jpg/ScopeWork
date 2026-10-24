@@ -6,4 +6,5 @@ pub mod crash_log;
 pub mod paths;
 pub mod queue_watch;
 pub mod research;
+pub mod settings;
 pub mod version;
