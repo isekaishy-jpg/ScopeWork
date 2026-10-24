@@ -56,6 +56,20 @@ Fixes from the second 2026-10-24 code review, two independent reviewers reading 
 - Smaller fixes: a waiter that loses the race for its own ticket takes a new one instead of leaving the fair queue; writing the v3 citation index removes `report-references.json` and `report-references-v2.json`; seal checks read `quarantine.json` once; retried publications remove their candidate catalog; the unused `Library::refresh` and an unreachable command arm are gone.
 - Measured and left unchanged: each coordinator read clones the catalog (median 13.5 ms for `forever`, against 101 ms to parse it). Sharing it belongs with the storage backend design.
 
+Fixes from the third 2026-10-24 code review, the ten real bugs among its findings ([proposal](docs/proposal-review-fixes-3.md)):
+
+- **Saving a report unchanged no longer reopens it.** A completed record saved with identical text, including an evidence-only save, lost its completion and acceptance, so a tool re-saving evidence over finished functions reopened all of them. An unchanged save now changes nothing; `node reopen` and the GUI's **Reopen** are an explicit operation that still reopens a record without editing it.
+- **Editing a context-only record no longer reopens its completed chunk, architecture and App.** Their completion never depended on inventory records.
+- **A damaged or newer `quarantine.json` no longer lifts every quarantine.** Writes to the project are refused with `quarantine_unreadable` until the file is repaired; reads keep working.
+- `node reopen` refuses a quarantined record, like `reset-status`, so its sign-off survives until the quarantine is lifted.
+- Deleting a function that a quarantined record depends on needs `--directed-by`, since it changes the sealed record's own prerequisites.
+- `deps set --directed-by` records the human's instruction in history, as batches and removals do.
+- After a save, Research records re-reads only the changed project instead of every project in the home. **Refresh** still re-reads everything.
+- Every command that names a project answers "Unknown project" for a missing one before it runs. `journal`, `wait`, `locks`, `queue`, `job status`, `tools audit` and `import` used to run anyway, and `journal typo` left lock files behind.
+- A prerequisite chain of tens of thousands of functions no longer overflows the stack when the project opens; validation is linear.
+- Piping a command's output into something that closes early (`| head`) no longer makes the CLI panic.
+- Left unchanged, as policy questions or unproven races: whether reordering an architecture moves its quarantined chunk, whether a directed import into a quarantined chunk keeps the chunk's status, rechecking the seal at publication, and a possible false drift entry when an import lands.
+
 ## 0.13.1a - 2026-10-18
 
 Release notes, validation and the commit ledger: [docs/releases/0.13.1a.md](docs/releases/0.13.1a.md). Fixes from a code review of 0.13.0a, whose draft release was not published:
