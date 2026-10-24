@@ -337,15 +337,25 @@ impl Library {
         wait_lock(&gate, false).map_err(|_| {
             "Research library is busy with another operation. Retry shortly.".to_owned()
         })?;
-        let lock = project_lock(&root, id, apply)?;
         let path = dir.join("project.json");
         contained(&root, &path)?;
+        if !path.is_file() {
+            return Err(format!("Unknown project: {id}"));
+        }
+        // Held before the catalog is read, so a catalog that cannot be read releases the lock
+        // and removes its holder record like any other failure.
+        let locks = OperationLocks {
+            project: Some(id.into()),
+            writable: apply,
+            _project: Some(project_lock(&root, id, apply)?),
+            _gate: gate,
+            holder: holder_path(&root, id, apply),
+        };
         let project: Project = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         if project.id != id || project.layout_version > 5 {
             return Err("Unsupported catalog or project identity mismatch".into());
         }
-        let holder = holder_path(&root, id, apply);
         let mut library = Library {
             root,
             projects: vec![project],
@@ -354,13 +364,7 @@ impl Library {
             recovery_blocked: None,
             overlay: None,
             staging: None,
-            _lock: Some(OperationLocks {
-                project: Some(id.into()),
-                writable: apply,
-                _project: Some(lock),
-                _gate: gate,
-                holder,
-            }),
+            _lock: Some(locks),
         };
         library.journal_maintenance(0, apply, sidecars)
     }

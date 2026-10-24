@@ -248,4 +248,40 @@ fn reading_a_missing_project_leaves_no_lock_file() {
     assert!(!f.projects().join(".project-locks/typo-write.lock").exists());
     f.ok(&["project", "create", "second", "--name", "Second"]);
     assert!(f.projects().join("second/project.json").is_file());
+    // Every command naming a project checks it first, also those that return early.
+    let request = f.home.join("import.json");
+    fs::write(&request, "{}").unwrap();
+    for args in [
+        vec!["journal", "typo"],
+        vec!["journal", "typo", "--compact"],
+        vec!["wait", "typo", "--idle", "--timeout", "1"],
+        vec!["locks", "typo"],
+        vec!["queue", "typo"],
+        vec!["job", "status", "typo"],
+        vec!["tools", "audit", "typo"],
+        vec![
+            "import",
+            "start",
+            "typo",
+            "--file",
+            request.to_str().unwrap(),
+        ],
+    ] {
+        let o = f.run(&args);
+        assert!(
+            !o.status.success(),
+            "{args:?} answered for a missing project"
+        );
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("Unknown project: typo"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+    for leftover in ["typo.lock", "typo.holder", "typo.waiters"] {
+        assert!(
+            !f.projects().join(".project-locks").join(leftover).exists(),
+            "{leftover}"
+        );
+    }
 }

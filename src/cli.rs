@@ -710,6 +710,68 @@ fn remove(
 fn expect(lib: &Library, p: usize, id: u64, token: &str) -> Result<(), String> {
     lib.check_edit_token(p, id, token, "structural")
 }
+/// The project a command names, if any: every such command answers "Unknown project" for a
+/// project without a catalog before it runs (creation aside).
+fn project_of(command: &Command) -> Option<&str> {
+    match command {
+        Command::Project(
+            ProjectCommand::Show { project }
+            | ProjectCommand::Revision { project }
+            | ProjectCommand::SetBinary { project, .. }
+            | ProjectCommand::SetScope { project, .. }
+            | ProjectCommand::Tidy { project, .. },
+        ) => Some(project.as_str()),
+        Command::Node(
+            NodeCommand::List { project, .. }
+            | NodeCommand::Delete { project, .. }
+            | NodeCommand::Prune { project, .. }
+            | NodeCommand::ReadBatch { project, .. }
+            | NodeCommand::SaveBatch { project, .. }
+            | NodeCommand::Batch { project, .. }
+            | NodeCommand::Resolve { project, .. }
+            | NodeCommand::RepairLinks { project, .. }
+            | NodeCommand::Create { project, .. }
+            | NodeCommand::Show { project, .. }
+            | NodeCommand::Save { project, .. }
+            | NodeCommand::ResetStatus { project, .. }
+            | NodeCommand::Flag { project, .. }
+            | NodeCommand::Unflag { project, .. }
+            | NodeCommand::Flagged { project, .. }
+            | NodeCommand::Quarantine { project, .. }
+            | NodeCommand::Unquarantine { project, .. }
+            | NodeCommand::Quarantined { project, .. }
+            | NodeCommand::Complete { project, .. }
+            | NodeCommand::Reopen { project, .. },
+        ) => Some(project.as_str()),
+        Command::Claim(
+            ClaimCommand::Set { project, .. }
+            | ClaimCommand::Release { project, .. }
+            | ClaimCommand::List { project },
+        )
+        | Command::ReviewQueue { project }
+        | Command::History(
+            HistoryCommand::Show { project, .. } | HistoryCommand::Append { project, .. },
+        ) => Some(project.as_str()),
+        Command::Deps(DepsCommand::Get { project, .. } | DepsCommand::Set { project, .. })
+        | Command::Journal { project, .. }
+        | Command::Status { project, .. } => Some(project.as_str()),
+        Command::Impl(command) => Some(command.project()),
+        Command::Wait { project, .. }
+        | Command::Locks { project }
+        | Command::Queue { project }
+        | Command::Job(JobCommand::Run { project, .. } | JobCommand::Status { project })
+        | Command::Tools(ToolsCommand::Audit { project })
+        | Command::Import(
+            ImportCommand::Plan { project, .. }
+            | ImportCommand::Start { project, .. }
+            | ImportCommand::Status { project, .. }
+            | ImportCommand::Pause { project, .. }
+            | ImportCommand::Resume { project, .. }
+            | ImportCommand::Cancel { project, .. },
+        ) => Some(project.as_str()),
+        _ => None,
+    }
+}
 fn run(args: Args) -> Result<Value, String> {
     if let Command::Criteria { scope } = &args.command {
         return Ok(
@@ -744,6 +806,15 @@ fn run(args: Args) -> Result<Value, String> {
     }
     paths::initialize(&home)?;
     let root = home.join("projects");
+    // A command on a project that does not exist answers before it runs: a writable open would
+    // take the missing project's lock (that is how creation works) and leave its file, and the
+    // lock and queue views would describe a project that is not there.
+    if let Some(id) = project_of(&args.command)
+        && valid_id(id)
+        && !root.join(id).join("project.json").is_file()
+    {
+        return Err(format!("Unknown project: {id}"));
+    }
     if let Command::Group(command) = &args.command {
         return groups(&home, command);
     }
@@ -970,51 +1041,7 @@ fn run(args: Args) -> Result<Value, String> {
         }
     }
 
-    let selected = match &args.command {
-        Command::Project(
-            ProjectCommand::Show { project }
-            | ProjectCommand::Revision { project }
-            | ProjectCommand::SetBinary { project, .. }
-            | ProjectCommand::SetScope { project, .. }
-            | ProjectCommand::Tidy { project, .. },
-        ) => Some(project.as_str()),
-        Command::Node(
-            NodeCommand::List { project, .. }
-            | NodeCommand::Delete { project, .. }
-            | NodeCommand::Prune { project, .. }
-            | NodeCommand::ReadBatch { project, .. }
-            | NodeCommand::SaveBatch { project, .. }
-            | NodeCommand::Batch { project, .. }
-            | NodeCommand::Resolve { project, .. }
-            | NodeCommand::RepairLinks { project, .. }
-            | NodeCommand::Create { project, .. }
-            | NodeCommand::Show { project, .. }
-            | NodeCommand::Save { project, .. }
-            | NodeCommand::ResetStatus { project, .. }
-            | NodeCommand::Flag { project, .. }
-            | NodeCommand::Unflag { project, .. }
-            | NodeCommand::Flagged { project, .. }
-            | NodeCommand::Quarantine { project, .. }
-            | NodeCommand::Unquarantine { project, .. }
-            | NodeCommand::Quarantined { project, .. }
-            | NodeCommand::Complete { project, .. }
-            | NodeCommand::Reopen { project, .. },
-        ) => Some(project.as_str()),
-        Command::Claim(
-            ClaimCommand::Set { project, .. }
-            | ClaimCommand::Release { project, .. }
-            | ClaimCommand::List { project },
-        )
-        | Command::ReviewQueue { project }
-        | Command::History(
-            HistoryCommand::Show { project, .. } | HistoryCommand::Append { project, .. },
-        ) => Some(project.as_str()),
-        Command::Deps(DepsCommand::Get { project, .. } | DepsCommand::Set { project, .. })
-        | Command::Journal { project, .. }
-        | Command::Status { project, .. } => Some(project.as_str()),
-        Command::Impl(command) => Some(command.project()),
-        _ => None,
-    };
+    let selected = project_of(&args.command);
     let read_only = matches!(
         &args.command,
         Command::Project(
@@ -1042,19 +1069,6 @@ fn run(args: Args) -> Result<Value, String> {
         args.command,
         Command::Init | Command::Project(ProjectCommand::Create { .. })
     );
-    // A command on a project that does not exist answers without opening it: a writable open
-    // would take the missing project's lock (that is how creation works) and leave its file.
-    if let Some(id) = selected
-        && !creating
-        && valid_id(id)
-        && !home
-            .join("projects")
-            .join(id)
-            .join("project.json")
-            .is_file()
-    {
-        return Err(format!("Unknown project: {id}"));
-    }
     let mut lib = if read_only {
         Library::read_project(home.join("projects"), selected.unwrap())?
     } else if creating {
