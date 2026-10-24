@@ -1442,7 +1442,6 @@ pub(super) struct Rename {
     new: String,
     va: Option<String>,
     citation: Option<regex::Regex>,
-    word: Option<regex::Regex>,
 }
 impl Rename {
     fn new(old: &str, new: &str, va: Option<String>) -> Self {
@@ -1453,21 +1452,11 @@ impl Rename {
             ))
             .ok()
         });
-        let word = (!old.is_empty())
-            .then(|| {
-                regex::Regex::new(&format!(
-                    r"(?:^|[^A-Za-z0-9_]){}(?:[^A-Za-z0-9_]|$)",
-                    regex::escape(old)
-                ))
-                .ok()
-            })
-            .flatten();
         Self {
             old: old.into(),
             new: new.into(),
             va,
             citation,
-            word,
         }
     }
 }
@@ -1501,11 +1490,29 @@ pub(super) fn rewrite_citations(text: &str, renames: &[Rename]) -> (String, usiz
     (out, count)
 }
 /// Mentions of a renamed function's old name as a whole word (after citations were rewritten).
+/// Word boundaries are checked without consuming the neighbouring characters, so adjacent
+/// mentions all count, and an old name inside an occurrence of the new one (`Foo` in `Foo Bar`)
+/// is not a mention.
 pub(super) fn bare_mentions(text: &str, rename: &Rename) -> usize {
-    rename
-        .word
-        .as_ref()
-        .map_or(0, |word| word.find_iter(text).count())
+    if rename.old.is_empty() {
+        return 0;
+    }
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let new_name: Vec<(usize, usize)> = if rename.new.contains(rename.old.as_str()) {
+        text.match_indices(rename.new.as_str())
+            .map(|(at, s)| (at, at + s.len()))
+            .collect()
+    } else {
+        vec![]
+    };
+    text.match_indices(rename.old.as_str())
+        .filter(|(at, s)| {
+            let end = at + s.len();
+            !text[..*at].chars().next_back().is_some_and(word)
+                && !text[end..].chars().next().is_some_and(word)
+                && !new_name.iter().any(|(from, to)| *from <= *at && end <= *to)
+        })
+        .count()
 }
 
 fn prepare_pending(root: &Path) -> Result<PathBuf> {
@@ -1590,23 +1597,6 @@ mod tests {
         }
     }
     #[test]
-    fn a_va_beyond_u64_gives_no_citation_instead_of_overflowing() {
-        let workspace = Workspace::new();
-        let mut lib = Library::open_project(workspace.0.clone(), Some("wide")).unwrap();
-        lib.create("wide", "Wide", "synthetic, image base 0xffffffffffffffff")
-            .unwrap();
-        let a = lib.add(0, 0, "Architecture", "").unwrap();
-        let c = lib.add(0, a, "Chunk", "").unwrap();
-        let f = lib.add(0, c, "Old", "1000").unwrap();
-        let revision = lib.projects[0].nodes[f as usize].revision;
-        let batch: Batch = serde_json::from_value(serde_json::json!({"schema":2,
-            "binary":lib.projects[0].binary,
-            "update":[{"id":f,"name":"New","expect_node_revision":revision}]}))
-        .unwrap();
-        lib.apply_batch(0, &batch).unwrap();
-        assert_eq!(lib.projects[0].nodes[f as usize].name, "New");
-    }
-    #[test]
     fn link_repair_keeps_completion_and_follows_ledger_pins() {
         let workspace = Workspace::new();
         let mut lib = workspace.populate("alpha");
@@ -1657,6 +1647,32 @@ mod tests {
             fs::read_to_string(&ledger).unwrap().contains(&new_hash),
             "the pin follows"
         );
+    }
+    #[test]
+    fn bare_mentions_count_adjacent_words_and_skip_the_new_name() {
+        let foo = Rename::new("Foo", "FooBar", None);
+        assert_eq!(bare_mentions("Foo Foo,Foo", &foo), 3);
+        assert_eq!(bare_mentions("Food and Foo_x", &foo), 0);
+        let grown = Rename::new("Foo", "Foo Bar", None);
+        assert_eq!(bare_mentions("Foo Bar calls Foo Bar", &grown), 0);
+        assert_eq!(bare_mentions("Foo Bar, then Foo", &grown), 1);
+    }
+    #[test]
+    fn a_va_beyond_u64_gives_no_citation_instead_of_overflowing() {
+        let workspace = Workspace::new();
+        let mut lib = Library::open_project(workspace.0.clone(), Some("wide")).unwrap();
+        lib.create("wide", "Wide", "synthetic, image base 0xffffffffffffffff")
+            .unwrap();
+        let a = lib.add(0, 0, "Architecture", "").unwrap();
+        let c = lib.add(0, a, "Chunk", "").unwrap();
+        let f = lib.add(0, c, "Old", "1000").unwrap();
+        let revision = lib.projects[0].nodes[f as usize].revision;
+        let batch: Batch = serde_json::from_value(serde_json::json!({"schema":2,
+            "binary":lib.projects[0].binary,
+            "update":[{"id":f,"name":"New","expect_node_revision":revision}]}))
+        .unwrap();
+        lib.apply_batch(0, &batch).unwrap();
+        assert_eq!(lib.projects[0].nodes[f as usize].name, "New");
     }
     #[test]
     fn project_locks_isolate_writes_and_preserve_gui_snapshots() {
