@@ -138,9 +138,9 @@ The user answered the questions that are theirs to decide and pointed out that s
 - **Reports (already settled):** reports stay Markdown files, as above.
 - **Migration (3):** carrying a project over is a manual step the user runs, not an automatic import. Which history comes along is decided at that step.
 - **Projects (7):** an implementation belongs to one project. The first version supports a single project; cross-project references wait until it works.
+- **Annotations (5):** the backend takes over the annotations at promotion, as part of the manual migration. Until then the tools' ledger stays authoritative.
 
 **Research questions, settled by measurement and tests before design:** log framing and encoding (1), checkpoint policy (2), data nesting (6), Ghidra rebuilding from stored inputs (8, a project-tools check), Windows file behaviour (9), and, from the architecture doc, the interface's cut, the side-by-side mechanism, an explicit sibling order key, the one remaining receipt-less writer (layout migration), lock-free readers and GUI change detection.
 
 **Still the user's to decide**
-- **When the backend owns the annotations (5):** from the start of side by side, ingesting the tools' ledger writes, or only at promotion.
 - **What acceptance covers** (architecture §12.3): keep hashing the whole rendered report, or hash only the research body and evidence. The second ends re-pinning after renames, moves and binary amendments, but changes what "accepted" means and converts every existing hash once.
