@@ -146,3 +146,22 @@ The user answered the questions that are theirs to decide and pointed out that s
 
 **Research questions, settled by measurement and tests before design:** log framing and encoding (1), checkpoint policy (2), data nesting (6), Ghidra rebuilding from stored inputs (8, a project-tools check), Windows file behaviour (9), and, from the architecture doc, the interface's cut, the side-by-side mechanism, an explicit sibling order key, the one remaining receipt-less writer (layout migration), lock-free readers and GUI change detection.
 
+
+## 11. What the agents' practice adds (2026-10-25)
+
+A read-only look at how the research agents actually work in `3-3-5a` (their tools in `wow-335a-rust/tools`, the project's tool data, the tooling history, claims, complaints and their recent transcripts), to check the design overlooks nothing.
+
+**For the backend's model and transactions**
+- **A publish is one unit of work, committed as several.** `function_research.py` saves the reports (`save-batch`), then sets each record's prerequisites (`deps set`, one transaction each), then re-pins and adds ledger rows. It holds the `ledger` and `ghidra` leases throughout, so every publish in the project is serialised on the ledger. The backend should commit a publish (report, prerequisite edges, annotations and their pins) as one transaction, so a publish no longer needs the whole-ledger lease around catalog commits.
+- **Proofs are evidence, but live only as text.** Each function is recreated in Rust and proven by register-level differential tests with full instruction coverage and mutation testing; the report's evidence names the commit (on `proof-harness` of `wow-335a-rust`) and the test. The backend should store proof links as fields: repository, commit, test, coverage and mutation outcome, including the reasons survivors are equivalent. `behaviour-artifact-review` is the most common tooling history entry (453 of 678), so the tooling log must carry that volume.
+- **Provenance depends on those commits staying reachable.** On 2026-10-25 `proof-harness` was 27 commits ahead of its remote and not merged into `main`; a squash or rebase on merge would orphan every cited hash. Push the branch, and merge without rewriting it.
+- **Reports carry their own history.** Each publish and audit repair keeps the replaced understanding, notes and generated evidence inside the report ("Prior …" sections), because earlier texts are not otherwise easy to reach. With the backend's text history these sections can go, which also shrinks what acceptance hashes.
+- **Quality gates are not recorded.** `depth_check`, `contract_check`, `hedge_sweep` and `draft_drift` run in the tools; completion does not record that they passed. Acceptance provenance could record the gate results with the hash.
+- **Disk.** The Ghidra workspace is 4.1 GB and several 57–355 MB foundation snapshots repeat the same inventory; the derived-Ghidra and content-addressed history decisions cover both.
+
+**For Scopework now (not waiting for the backend)**
+- **`deps set` conflicts across sessions.** Its structural token includes the project-wide structural epoch, so any structural change anywhere invalidates every outstanding token; the tools retry up to eight times. A record-level precondition, as batch schema 2 gives moves, would end this.
+- **A second lock system outside Scopework.** Rust verification and commits go through one shared verify worktree, guarded by a hand-written fair ticket lock (`verify.lock` and `verify.queue` in the GitHub folder) whose scripts live in each session's temporary folder. Scopework's leases are per project, while this resource is a repository shared by sessions. Either a declared `verify` resource used through `job run`, or the lock script committed to the repository, would make it durable and visible in `research queue`.
+- **The implementation tracker is unused.** The proof crate is the project's implementation; placements could be filled from the proof commits.
+- **Not only Claude agents.** Codex agents also file complaints and work on the project, so every interface must stay usable from a plain CLI.
+- **Two open complaints are about the project's own tools**, not Scopework: the contract gate's `SBB CL,CL` (already fixed in `wow-335a-rust`, with a test) and Ghidra's recovered C for `__cftog_l`. They belong in the tools' own records.
