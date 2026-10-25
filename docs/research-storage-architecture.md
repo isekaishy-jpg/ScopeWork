@@ -249,6 +249,8 @@ Either way:
 
 ## 12. Questions this adds for the design step
 
+Answered and sorted on 2026-10-25 in [the backend doc's §10](research-storage-backend.md#answers-and-triage-2026-10-25): item 3 is still the user's to decide; the others are research questions. Item 5 is mostly done: scope changes and import reservations now leave receipts, and only layout migration still does not.
+
 1. **The interface's cut:** a store trait under `Library` (snapshot, transaction, texts, history, tooling log), or a narrower one at `catalog_batch::commit` first.
 2. **Side by side:** in-process write, receipt follower, or both (section 9).
 3. **Acceptance hash scope:** keep hashing the whole rendered report, or hash only the research body and evidence. The second would end re-pinning after renames, moves and binary amendments, for the catalog and the ledger alike. It changes what "accepted" means, and every existing hash would need converting once.

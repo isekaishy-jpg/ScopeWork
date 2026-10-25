@@ -128,3 +128,19 @@ Conclusions the numbers support:
 7. Whether an implementation belongs to one project or spans several, and how cross-project references are stored (the home level or the projects).
 8. Verifying that Ghidra rebuilds identically from the stored inputs (a project-tools task the backend depends on).
 9. Windows specifics to test: append with readers holding the file, flush cost on other disks, antivirus scanning of growing log files.
+
+### Answers and triage (2026-10-25)
+
+The user answered the questions that are theirs to decide and pointed out that several of the others are technical questions for research, not decisions. Together with [the architecture doc's §12](research-storage-architecture.md#12-questions-this-adds-for-the-design-step):
+
+**Decided by the user**
+- **Conflicts (4):** name and other data conflicts must be resolved before the backend is adopted. The backend reports them; it needs no rule of its own for settling them. The agents are already working through them (signature conflicts).
+- **Reports (already settled):** reports stay Markdown files, as above.
+- **Migration (3):** carrying a project over is a manual step the user runs, not an automatic import. Which history comes along is decided at that step.
+- **Projects (7):** an implementation belongs to one project. The first version supports a single project; cross-project references wait until it works.
+
+**Research questions, settled by measurement and tests before design:** log framing and encoding (1), checkpoint policy (2), data nesting (6), Ghidra rebuilding from stored inputs (8, a project-tools check), Windows file behaviour (9), and, from the architecture doc, the interface's cut, the side-by-side mechanism, an explicit sibling order key, the one remaining receipt-less writer (layout migration), lock-free readers and GUI change detection.
+
+**Still the user's to decide**
+- **When the backend owns the annotations (5):** from the start of side by side, ingesting the tools' ledger writes, or only at promotion.
+- **What acceptance covers** (architecture §12.3): keep hashing the whole rendered report, or hash only the research body and evidence. The second ends re-pinning after renames, moves and binary amendments, but changes what "accepted" means and converts every existing hash once.
