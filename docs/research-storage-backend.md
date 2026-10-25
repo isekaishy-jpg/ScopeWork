@@ -139,8 +139,10 @@ The user answered the questions that are theirs to decide and pointed out that s
 - **Migration (3):** carrying a project over is a manual step the user runs, not an automatic import. Which history comes along is decided at that step.
 - **Projects (7):** an implementation belongs to one project. The first version supports a single project; cross-project references wait until it works.
 - **Annotations (5):** the backend takes over the annotations at promotion, as part of the manual migration. Until then the tools' ledger stays authoritative.
+- **Acceptance (architecture §12.3):** acceptance covers the research body and evidence, not the generated header. After a rename, a binary identity amendment or a move, a record's own report needs no new review; the chunks a move leaves and joins (and their ancestors) still reopen by the membership rule, and a moved function itself stays complete. Citation rewrites in other reports' bodies keep the mechanical-edit handling. The condition is that research provenance stays intact:
+  - acceptance still binds to the project's exact binary identity (amendments keep every SHA-256 and `0x` value);
+  - every rename, move and amendment stays in the receipts, so the name, place and identity a report was accepted under can always be reconstructed;
+  - the one-time conversion converts only acceptances whose current full-report hash still verifies (anything stale stays stale), records every old and new hash, and converts the ledger's report pins with the same mapping, in one journaled transaction.
 
 **Research questions, settled by measurement and tests before design:** log framing and encoding (1), checkpoint policy (2), data nesting (6), Ghidra rebuilding from stored inputs (8, a project-tools check), Windows file behaviour (9), and, from the architecture doc, the interface's cut, the side-by-side mechanism, an explicit sibling order key, the one remaining receipt-less writer (layout migration), lock-free readers and GUI change detection.
 
-**Still the user's to decide**
-- **What acceptance covers** (architecture §12.3): keep hashing the whole rendered report, or hash only the research body and evidence. The second ends re-pinning after renames, moves and binary amendments, but changes what "accepted" means and converts every existing hash once.
