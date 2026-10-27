@@ -71,10 +71,19 @@ pub struct PoolFile {
 impl PoolFile {
     /// The pooled record covering `id` and the node that carries it (itself or its chunk).
     pub fn covering(&self, project: &Project, id: u64) -> Option<(u64, &Pooled)> {
+        let parent = || project.nodes.iter().find(|n| n.id == id)?.parent;
+        self.covering_with(id, parent)
+    }
+    /// `covering`, with the parent looked up by `parent` only when `id` itself is not pooled.
+    fn covering_with(
+        &self,
+        id: u64,
+        parent: impl FnOnce() -> Option<u64>,
+    ) -> Option<(u64, &Pooled)> {
         if let Some(record) = self.records.get(&id) {
             return Some((id, record));
         }
-        let parent = project.nodes.iter().find(|n| n.id == id)?.parent?;
+        let parent = parent()?;
         self.records.get(&parent).map(|r| (parent, r))
     }
     /// Every pooled node with its pool: recorded ones and the functions of pooled chunks.
@@ -246,18 +255,22 @@ impl Library {
         }
         self.pools_checked(p).map_err(|e| unreadable(&e))
     }
-    /// The pooled record covering `id`, if any, and the node that carries it.
-    pub fn pool_of(&self, p: usize, id: u64) -> Option<(u64, Pooled)> {
-        let file = self.pools(p);
-        file.covering(&self.projects[p], id)
-            .map(|(carrier, r)| (carrier, r.clone()))
-    }
-    /// Whether the caller may change `id` (always, when it is not pooled).
-    pub fn may_write(&self, p: usize, id: u64) -> bool {
+    /// The pooled record covering `id` (with the node that carries it and its pool's members),
+    /// and whether the caller may change `id`: always, when it is not pooled. One read of the
+    /// pools file answers both.
+    pub fn pool_access(&self, p: usize, id: u64) -> (Option<(u64, Pooled, Vec<String>)>, bool) {
         let file = self.pools(p);
         match file.covering(&self.projects[p], id) {
-            Some((_, record)) => human() || file.is_member(&record.pool, &caller()),
-            None => true,
+            Some((carrier, record)) => {
+                let may_write = human() || file.is_member(&record.pool, &caller());
+                let members = file
+                    .pools
+                    .get(&record.pool)
+                    .map(|pool| pool.members.clone())
+                    .unwrap_or_default();
+                (Some((carrier, record.clone(), members)), may_write)
+            }
+            None => (None, true),
         }
     }
     /// Pooled nodes the caller may not change.
@@ -281,8 +294,14 @@ impl Library {
             return Ok(());
         }
         let agent = caller();
+        // One map for every record checked: a batch may touch the whole project.
+        let parents: HashMap<u64, u64> = self.projects[p]
+            .nodes
+            .iter()
+            .filter_map(|n| Some((n.id, n.parent?)))
+            .collect();
         for id in touched {
-            if let Some((carrier, record)) = file.covering(&self.projects[p], id)
+            if let Some((carrier, record)) = file.covering_with(id, || parents.get(&id).copied())
                 && !file.is_member(&record.pool, &agent)
             {
                 let through = if carrier == id {

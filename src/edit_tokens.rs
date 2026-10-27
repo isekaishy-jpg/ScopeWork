@@ -228,6 +228,7 @@ impl Library {
         let effective_status =
             index.states_with(&self.dir(p), [id], &|| self.hash_overrides())[&id];
         let proofs = self.proofs(p)?;
+        let (pool, may_write) = self.pool_access(p, id);
         let unproven = proofs.required && self.unproven(p, id, &proofs);
         let proof = proofs.proofs.get(&id).cloned();
         let requires = index.requires.get(&id).cloned().unwrap_or_default();
@@ -262,18 +263,12 @@ impl Library {
             revision: project.revision,
             dependency_rvas,
             review_flag: self.review_flags(p)?.remove(&id),
-            pool: self.pool_of(p, id).map(|(carrier, r)| {
-                let members = self
-                    .pools(p)
-                    .pools
-                    .get(&r.pool)
-                    .map(|pool| pool.members.clone())
-                    .unwrap_or_default();
+            pool: pool.map(|(carrier, r, members)| {
                 serde_json::json!({"pool": r.pool, "node": carrier, "origin": r.origin,
                     "reason": r.reason, "at_revision": r.at_revision, "by": r.by,
                     "members": members})
             }),
-            may_write: self.may_write(p, id),
+            may_write,
             proof,
             unproven,
         })
