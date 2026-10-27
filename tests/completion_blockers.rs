@@ -35,12 +35,12 @@ fn blockers_name_flags_open_children_and_prerequisites() {
         lib.completion_blockers(0, chunk).unwrap(),
         vec![
             "Flagged for review: clear the flag first.".to_string(),
-            "2 of 2 required function records not complete.".to_string()
+            "2 of 2 required function or data records not complete.".to_string()
         ]
     );
     assert_eq!(
         lib.completion_blockers(0, second).unwrap(),
-        vec!["1 prerequisite function(s) not complete.".to_string()]
+        vec!["1 prerequisite(s) not complete.".to_string()]
     );
     assert!(lib.completion_blockers(0, first).unwrap().is_empty());
 }

@@ -47,9 +47,19 @@ impl<'a> Resolver<'a> {
                     };
                     (self.index.nodes.get(&id)?.kind == expected).then_some(id)?
                 }
-                3 if part.len() == 8 && part.bytes().all(|b| b.is_ascii_hexdigit()) => {
-                    *self.rvas.get(&u32::from_str_radix(part, 16).ok()?)?
+                // A function's folder is its RVA, a data item's `D` and its RVA.
+                3 if part.len() == 8 || (part.len() == 9 && part.starts_with('D')) => {
+                    let (kind, digits) = match part.strip_prefix('D') {
+                        Some(digits) => (Kind::Data, digits),
+                        None => (Kind::Function, *part),
+                    };
+                    if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        break;
+                    }
+                    let id = *self.rvas.get(&u32::from_str_radix(digits, 16).ok()?)?;
+                    (self.index.nodes.get(&id)?.kind == kind).then_some(id)?
                 }
+
                 _ => break,
             };
             deepest = Some((depth, id));
@@ -249,6 +259,7 @@ mod tests {
             name: format!("N{id}"),
             status: Status::NotStarted,
             rva,
+            length: None,
             revision: 0,
             accepted_hash: None,
             accepted_prerequisites: Default::default(),

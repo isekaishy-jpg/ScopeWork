@@ -144,18 +144,18 @@ fn addition(project: &Project, batch: &Batch, first: u64) -> Result<Vec<Node>> {
         if kinds.contains_key(&id) {
             return Err("Reserved node ID is already visible".into());
         }
-        let kind = kinds
+        let parent = kinds
             .get(&c.parent)
-            .and_then(|k| k.child())
             .ok_or("Unknown/invalid parent; create parents before their children")?;
-        if (kind == Kind::Function) != c.rva.is_some() {
+        let kind = Kind::created_under(*parent, c.length)?;
+        if kind.is_leaf() != c.rva.is_some() {
             return Err("Invalid node name or RVA scope".into());
         }
         let name = record_name(&c.name)?;
         if let Some(rva) = c.rva
             && (project.binary.trim().is_empty() || !rvas.insert(rva))
         {
-            return Err("Duplicate function RVA or empty binary identity".into());
+            return Err("Duplicate function or data RVA, or empty binary identity".into());
         }
         kinds.insert(id, kind);
         nodes.push(Node {
@@ -164,6 +164,7 @@ fn addition(project: &Project, batch: &Batch, first: u64) -> Result<Vec<Node>> {
             kind,
             name,
             rva: c.rva,
+            length: c.length,
             context_only: c.context_only,
             status: Status::NotStarted,
             revision: 0,
@@ -185,13 +186,15 @@ pub fn plan(root: &Path, project: &str, batch: &Batch) -> Result<serde_json::Val
     lib.ensure_structural(0)?;
     let nodes = addition(p, batch, p.next_id)?;
     let functions = nodes.iter().filter(|n| n.kind == Kind::Function).count();
+    let data = nodes.iter().filter(|n| n.kind == Kind::Data).count();
+
     let parents: HashSet<_> = nodes
         .iter()
         .filter_map(|n| n.parent)
         .filter(|id| *id < p.next_id)
         .collect();
     Ok(
-        serde_json::json!({"project":project,"eligible":true,"nodes":nodes.len(),"functions":functions,"output_files":nodes.len()+functions*2,
+        serde_json::json!({"project":project,"eligible":true,"nodes":nodes.len(),"functions":functions,"data":data,"output_files":nodes.len()+functions*2,
         "affected_existing_parents":parents.len(),"first_id":p.next_id,"cpu_workers":WORKERS,"file_workers":WORKERS,"segment_records":SEGMENT,
         "estimated_metadata_bytes":serde_json::to_vec(batch).map_err(|e|e.to_string())?.len()*4}),
     )
@@ -384,7 +387,7 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
                 Kind::App => 0,
                 Kind::Architecture => 1,
                 Kind::Chunk => 2,
-                Kind::Function => 3,
+                Kind::Function | Kind::Data => 3,
             },
             u.node.id,
         )
@@ -691,6 +694,7 @@ fn publish(
         ));
         after.revision += 1;
         after.structural_epoch += 1;
+        raise_format(&mut after);
         after.active_import = None;
         after.last_import = Some(job.id.clone());
         let bytes = catalog_bytes(&after)?;

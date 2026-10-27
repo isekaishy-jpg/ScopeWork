@@ -265,6 +265,9 @@ impl ResearchUi {
             if let Some(rva) = n.rva {
                 facts.push(format!("RVA 0x{rva:08X}"));
             }
+            if let Some(length) = n.length {
+                facts.push(format!("{length} bytes"));
+            }
             facts.push(if self.browser.required(n.id) {
                 "Required research".into()
             } else {
@@ -390,8 +393,9 @@ impl ResearchUi {
         if self.body.trim().is_empty() {
             problems.push("Write the understanding report first.".into());
         }
-        if n.kind == Kind::Function && self.evidence.trim().is_empty() {
-            problems.push("A function needs evidence and claim classification.".into());
+        if n.kind.is_leaf() && self.evidence.trim().is_empty() {
+            problems
+                .push("A function or data item needs evidence and claim classification.".into());
         }
         problems
     }
@@ -437,11 +441,36 @@ impl ResearchUi {
                 });
             });
         }
-        if n.kind == Kind::Function {
+        if n.kind == Kind::Chunk {
+            classic::group(ui, "Add data item", |ui| {
+                ui.horizontal(|ui| {
+                    classic::label(ui, "Name", None);
+                    classic::field(ui, &mut self.data_name, 180.0, "");
+                    classic::label(ui, "RVA (hex)", None);
+                    classic::field(ui, &mut self.data_rva, 90.0, "00401000");
+                    classic::label(ui, "Bytes", None);
+                    classic::field(ui, &mut self.data_length, 60.0, "4");
+                    let length = self.data_length.trim().parse::<u32>().ok();
+                    let ready = enabled
+                        && !self.data_name.trim().is_empty()
+                        && !self.data_rva.trim().is_empty()
+                        && length.is_some_and(|l| l > 0);
+                    if classic::button(ui, ready, "Create").clicked()
+                        && let Some(length) = length
+                    {
+                        let name = std::mem::take(&mut self.data_name);
+                        let rva = std::mem::take(&mut self.data_rva);
+                        self.data_length.clear();
+                        self.mutate(move |lib, p, id| lib.add_data(p, id, &name, &rva, length));
+                    }
+                });
+            });
+        }
+        if n.kind.is_leaf() {
             classic::group(ui, "Prerequisites", |ui| {
                 classic::label(
                     ui,
-                    "Functions whose research this one needs (RVAs, comma separated). Tag only what is necessary to establish this function's behavior.",
+                    "Functions and data items whose research this one needs (RVAs, comma separated). Tag only what is necessary to establish this record's behavior or meaning.",
                     None,
                 );
                 ui.horizontal(|ui| {
@@ -502,6 +531,8 @@ impl ResearchUi {
                             parent: None,
                             name: None,
                             context_only: Some(context_only),
+                            length: None,
+
                             expect_node_revision: Some(n.revision),
                         }],
                         reorder: vec![],
@@ -539,7 +570,7 @@ impl ResearchUi {
                 classic::label(ui, "A flag blocks completion until it is cleared.", None);
             }
         });
-        if matches!(n.kind, Kind::Chunk | Kind::Function) {
+        if matches!(n.kind, Kind::Chunk | Kind::Function | Kind::Data) {
             classic::group(ui, "Research pool", |ui| {
                 let inherited = data.pooled_through.get(&n.id).copied();
                 if let Some(chunk) = inherited {
@@ -566,7 +597,11 @@ impl ResearchUi {
                         }
                     });
                     if n.kind == Kind::Chunk {
-                        classic::label(ui, "Its functions leave the pool with it.", None);
+                        classic::label(
+                            ui,
+                            "Its functions and data items leave the pool with it.",
+                            None,
+                        );
                     }
                 } else {
                     ui.horizontal(|ui| {
@@ -607,7 +642,7 @@ impl ResearchUi {
                         classic::label(ui, self.proof.clone(), None);
                     }
                 }
-                if n.kind == Kind::Function
+                if n.kind.is_leaf()
                     && classic::button(ui, true, "Open data folder").clicked()
                     && let Err(e) = open_data_folder(&report.parent().unwrap().join("data"))
                 {
@@ -651,13 +686,13 @@ impl ResearchUi {
             });
         });
         classic::group(ui, "Binary identity", |ui| {
-            let locked = project.nodes.iter().any(|n| n.kind == Kind::Function);
+            let locked = project.nodes.iter().any(|n| n.kind.is_leaf());
             classic::label(
                 ui,
                 if locked {
-                    "Locked: functions exist. Use another project for a different binary."
+                    "Locked: functions or data items exist. Use another project for a different binary."
                 } else {
-                    "Build, SHA-256 and image base. Set it before adding functions."
+                    "Build, SHA-256 and image base. Set it before adding functions or data items."
                 },
                 None,
             );

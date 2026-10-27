@@ -38,8 +38,9 @@ impl<'a> Index<'a> {
             let n = nodes[&id];
             let value = match n.kind {
                 Kind::App | Kind::Architecture => report_path(n, None),
-                Kind::Chunk | Kind::Function => {
+                Kind::Chunk | Kind::Function | Kind::Data => {
                     let parent = path(n.parent.unwrap(), nodes, paths);
+
                     report_path(n, Some(&parent))
                 }
             };
@@ -84,6 +85,9 @@ impl<'a> Index<'a> {
         );
         if let Some(rva) = n.rva {
             md += &format!("\nRVA: `0x{rva:08X}`\n");
+        }
+        if let Some(length) = n.length {
+            md += &format!("\nLength: {length} bytes\n");
         }
         md += "\n## Source reports\n";
         if let Some(kids) = self.children.get(&id) {
@@ -203,7 +207,7 @@ impl<'a> Index<'a> {
                 || deps
                     .iter()
                     .any(|id| self.state(hashes, *id, cache, active) != Status::Complete)
-                || (n.kind != Kind::Function
+                || (!n.kind.is_leaf()
                     && (kids.is_empty()
                         || kids
                             .iter()
@@ -265,6 +269,7 @@ mod tests {
             name: format!("n{id}"),
             status: Status::NotStarted,
             rva,
+            length: None,
             revision: 0,
             accepted_hash: None,
             accepted_prerequisites: Default::default(),

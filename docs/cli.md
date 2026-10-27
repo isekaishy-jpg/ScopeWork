@@ -21,9 +21,11 @@ research project set-binary example --binary "Build ...; SHA-256 ...; image base
 research node create example --parent 0 --name "Asset loading"
 research node create example --parent 1 --name "Archive lookup"
 research node create example --parent 2 --name "Lookup entry" --rva 00123456
+research node create example --parent 2 --name "Archive table" --rva 00140000 --length 96
 research node list example
 research node show example 3
 research criteria function
+research criteria data
 research criteria chunk
 research criteria architecture
 research criteria app
@@ -217,6 +219,16 @@ research node resolve PROJECT architectures/000015/000184/003F4930/research.md
 Maps report or data paths, old or current, project-relative or absolute, to their record and current location (`node`, `kind`, `name`, `current`, `absolute`, `moved`). Tools that keep report paths can repair them after other sessions' moves.
 
 Current operations use catalog format 4. Upgrade the GUI and all CLI workers together to 0.5.0. First open migrates under exclusive compatibility access, retaining metadata under `tools/workspaces/layout-migration-v4`. Earlier versions refuse the new format; do not manually lower its version to downgrade.
+
+## Data items
+
+A chunk holds data items (globals, tables, strings, vtables) beside its functions. A data item has a start RVA and a length in bytes, and is researched like a function: its own report in `<chunk folder>/D<RVA>/research.md`, a stored status, evidence required for completion, a `data/` folder, review flags, claims and pools. Proofs are for functions only.
+
+- Create one with `node create --rva HEX --length BYTES` under a chunk, or in a batch with `"length"` beside `"rva"` (`{"parent": 2, "name": "Archive table", "rva": 1310720, "length": 96}`). A batch `update` may change a data item's `length`.
+- An RVA names at most one record, function or data item. Data items may contain one another; they stay flat in their chunk, and the extents tell which contains which.
+- Prerequisites connect functions and data items in any direction (`deps set` takes either kind's RVA).
+- `status` counts them in `data_items` (`total`, `required`, `complete`), apart from the function inventory; `node list --kind data` and `status --kind data` list them.
+- A catalog takes format 6 when its first data item is created. Earlier Scopework versions cannot open a format 6 catalog; projects without data stay at format 5.
 
 ## Required research versus context inventory
 

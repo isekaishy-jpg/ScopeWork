@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Data items** ([proposal](docs/proposal-storage-backend.md)). A chunk holds data items (globals, tables, strings, vtables) beside its functions, each with an RVA, a length in bytes and its own report in `D<RVA>/`. They are researched like functions: evidence to complete, prerequisites to and from functions, flags, claims and pools. An RVA names one record of either kind. `node create --length`, `"length"` in batches and imports, `node list --kind data`, and `data_items` counts in `status`; the record panel adds **Add data item**. The first data item raises the catalog to format 6, which earlier versions cannot open; projects without data keep format 5.
+
 Fixes from the review of this batch ([proposal](docs/proposal-review-fixes-4.md)):
 
 - Only a pool's members (or `--directed-by`, or the dashboard) take a record out of a pool or move it to another; a move logs `remove` and `add`, and a new reason updates the entry (`update`).

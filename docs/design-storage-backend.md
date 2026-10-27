@@ -28,11 +28,11 @@ Promotion, the interface the commit path will use afterwards, annotations, artif
 
 - **CLI:**
   - `node create --kind data --rva --length` under a chunk;
-  - `--length` on `node update` for data items;
+  - `length` in a batch `update` for data items;
   - `node list --kind data`;
   - batch creation and import creation accept `"kind":"data"` with `length`;
   - `status` counts data items beside functions (`data: {total, complete}`), never inside the function totals.
-- **GUI:** the record form shows Address and Length for data; the tree marks data rows; the dashboard's meters keep counting functions, and the project summary adds a data line when a project has data.
+- **GUI:** the record panel shows a data item's RVA and length and offers **Add data item** on a chunk; the tree labels data rows with their address and length. The dashboard's meters and totals keep counting functions only, so the approved dashboard layout is unchanged; data counts are in `status`.
 - **Coordinator:** the read class is `data`.
 
 ## Part B: the store (side by side)

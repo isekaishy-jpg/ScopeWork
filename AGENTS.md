@@ -5,7 +5,7 @@ Build Scopework, a Rust GUI and agent CLI for managing isolated binary research 
 Before starting a maintenance session, read `TODO.md` for the user's deferred work. Do not treat deferred items as already implemented or verified.
 
 - Keep the approved dashboard design. Do not redesign it while implementing research storage or workflows.
-- Canonical hierarchy: App -> Architecture category -> Chunk -> Function. Research composes upward. Every node has exactly one canonical Markdown report in its project directory.
+- Canonical hierarchy: App -> Architecture category -> Chunk -> Function and Data item. Research composes upward. Every node has exactly one canonical Markdown report in its project directory.
 - Update canonical files in place; do not create overlapping follow-up reports. Keep each function's supporting data in architectures/<category>/<chunk>/<RVA>/data/ beside its research.md (created when first used), and link it from that report.
 - Each parent report must synthesize its children. All required children and the parent's own report must be complete before the parent can be complete.
 - Research assignments have fixed scopes. A function report establishes that function's behavior, inputs, outputs, side effects, boundaries and connections with evidence. A chunk synthesizes completed function reports into control flow, data flow and external interactions. An architecture synthesizes completed chunks into subsystem behavior and interfaces. The app synthesizes completed architectures to fulfill the project's declared research scope and relevant subsystem interactions.

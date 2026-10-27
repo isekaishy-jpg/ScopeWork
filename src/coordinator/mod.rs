@@ -227,6 +227,8 @@ fn read_class(project: &Project, nodes: Option<&[u64]>) -> &'static str {
         Some(research::Kind::Architecture) => "architecture",
         Some(research::Kind::Chunk) => "chunk",
         Some(research::Kind::Function) => "function",
+        Some(research::Kind::Data) => "data",
+
         None => "project",
     }
 }

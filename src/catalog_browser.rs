@@ -190,7 +190,7 @@ impl Browser {
                         if response.clicked() {
                             navigate = Some(id);
                         }
-                        if row.kind != Kind::Function && self.query.trim().is_empty() {
+                        if !row.kind.is_leaf() && self.query.trim().is_empty() {
                             let at = egui::pos2(
                                 response.rect.left() + indent - 9.0,
                                 response.rect.center().y,
@@ -256,7 +256,11 @@ impl BrowserData {
             .nodes
             .iter()
             .map(|n| {
-                let address = n.rva.map(|r| format!(" 0x{r:08X}")).unwrap_or_default();
+                let address = match (n.rva, n.length) {
+                    (Some(r), Some(length)) => format!(" 0x{r:08X} ({length} bytes)"),
+                    (Some(r), None) => format!(" 0x{r:08X}"),
+                    _ => String::new(),
+                };
                 let required = index.required.contains(&n.id);
                 let label = format!(
                     "{}{}{}{}: {}{}{}",
@@ -364,6 +368,7 @@ mod tests {
             name: format!("N{id}"),
             status,
             rva: (kind == Kind::Function).then_some(0x1000 + id as u32),
+            length: None,
             revision: 1,
             accepted_hash: None,
             accepted_prerequisites: Default::default(),

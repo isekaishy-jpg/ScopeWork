@@ -107,6 +107,7 @@ mod tests {
             name: format!("N{id}"),
             status,
             rva: (kind == Kind::Function).then_some(0x1000 + id as u32),
+            length: None,
             revision: 1,
             accepted_hash: (status == Status::Complete).then(|| "accepted".into()),
             accepted_prerequisites: Default::default(),

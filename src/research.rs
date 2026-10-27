@@ -12,12 +12,16 @@ pub enum Kind {
     Architecture,
     Chunk,
     Function,
+    Data,
 }
 impl Kind {
     pub fn completion_criteria(self) -> &'static str {
         match self {
             Self::Function => {
                 "Explain this function's behavior, inputs, outputs, side effects, boundaries and connections, supported by evidence. Complete only the prerequisites necessary to establish this function's behavior."
+            }
+            Self::Data => {
+                "Explain this data item's layout, values, meaning and users, supported by evidence. Complete only the prerequisites necessary to establish its meaning."
             }
             Self::Chunk => {
                 "Synthesize the completed function reports into an explanation of this chunk's behavior, control flow, data flow and external interactions. Every required function must be complete."
@@ -30,12 +34,39 @@ impl Kind {
             }
         }
     }
+    /// The kind a record of this kind holds by default; a chunk also holds data items.
     fn child(self) -> Option<Self> {
         match self {
             Self::App => Some(Self::Architecture),
             Self::Architecture => Some(Self::Chunk),
             Self::Chunk => Some(Self::Function),
-            Self::Function => None,
+            Self::Function | Self::Data => None,
+        }
+    }
+    /// The kind of record a record of this kind belongs to.
+    pub(crate) fn parent_kind(self) -> Option<Self> {
+        match self {
+            Self::App => None,
+            Self::Architecture => Some(Self::App),
+            Self::Chunk => Some(Self::Architecture),
+            Self::Function | Self::Data => Some(Self::Chunk),
+        }
+    }
+    /// Functions and data items: records with an address and a stored status, researched
+    /// directly rather than synthesized from children.
+    pub(crate) fn is_leaf(self) -> bool {
+        matches!(self, Self::Function | Self::Data)
+    }
+    /// The kind of a record created under a `parent` record: a data item when a length is
+    /// given (under a chunk only), else the parent's usual child.
+    pub(crate) fn created_under(parent: Self, length: Option<u32>) -> Result<Self> {
+        match length {
+            Some(0) => Err("A data item's length is at least one byte.".into()),
+            Some(_) if parent == Self::Chunk => Ok(Self::Data),
+            Some(_) => Err("A length creates a data item, which belongs to a chunk.".into()),
+            None => parent
+                .child()
+                .ok_or_else(|| "Functions and data items cannot have children.".into()),
         }
     }
     fn label(self) -> &'static str {
@@ -44,6 +75,7 @@ impl Kind {
             Self::Architecture => "Architecture",
             Self::Chunk => "Chunk",
             Self::Function => "Function",
+            Self::Data => "Data",
         }
     }
 }
@@ -63,6 +95,10 @@ pub struct Node {
     pub name: String,
     pub status: Status,
     pub rva: Option<u32>,
+    /// A data item's size in bytes. Absent for every other kind, and then not written, so
+    /// catalogs without data keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u32>,
     pub revision: u64,
     pub accepted_hash: Option<String>,
     #[serde(default)]
@@ -91,6 +127,15 @@ pub struct Project {
 }
 fn legacy_layout() -> u32 {
     1
+}
+/// The catalog format a catalog with a data item has. Older builds cannot read data items,
+/// so a catalog takes this format only once it holds one; without data it stays at 5.
+pub(crate) const DATA_FORMAT: u32 = 6;
+/// Raises `project` to [`DATA_FORMAT`] when it holds a data item.
+pub(crate) fn raise_format(project: &mut Project) {
+    if project.nodes.iter().any(|n| n.kind == Kind::Data) {
+        project.layout_version = project.layout_version.max(DATA_FORMAT);
+    }
 }
 #[path = "background.rs"]
 mod background;
@@ -308,15 +353,17 @@ pub(crate) fn record_name(name: &str) -> Result<String> {
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 /// A record's report path relative to its project folder, given its parent's report path (none
 /// for the App and architectures). The one rule for report locations: `app.md`,
-/// `architectures/<id>/research.md`, then a folder per chunk (`<id>`) and per function (`<RVA>`)
-/// inside the parent's folder.
+/// `architectures/<id>/research.md`, then a folder per chunk (`<id>`), per function (`<RVA>`)
+/// and per data item (`D<RVA>`) inside the parent's folder.
 pub(crate) fn report_path(n: &Node, parent: Option<&str>) -> String {
     match n.kind {
         Kind::App => "app.md".into(),
         Kind::Architecture => format!("architectures/{:06}/research.md", n.id),
-        Kind::Chunk | Kind::Function => {
+        Kind::Chunk | Kind::Function | Kind::Data => {
             let folder = match n.kind {
                 Kind::Function => format!("{:08X}", n.rva.unwrap()),
+                Kind::Data => format!("D{:08X}", n.rva.unwrap()),
+
                 _ => format!("{:06}", n.id),
             };
             format!(
@@ -940,10 +987,7 @@ impl Library {
         if self.projects[p].binary == binary {
             return Ok(());
         }
-        let amendment = self.projects[p]
-            .nodes
-            .iter()
-            .any(|n| n.kind == Kind::Function);
+        let amendment = self.projects[p].nodes.iter().any(|n| n.kind.is_leaf());
         if amendment {
             if expected_revision.is_none() {
                 return Err("Binary identity is locked after adding functions. To amend its description, pass --expect-revision from project show; every SHA-256 and 0x value must stay.".into());
@@ -1178,7 +1222,7 @@ impl Library {
         }
         let mut recovery_blocked = None;
         if let Some(p) = &mut project {
-            if p.layout_version != 5 {
+            if !matches!(p.layout_version, 5 | DATA_FORMAT) {
                 return Err("Unsupported catalog format; upgrade Scopework.".into());
             }
             let pending = dir
@@ -1241,20 +1285,26 @@ impl Library {
             if !ids.insert(n.id) {
                 return Err("Duplicate node identity".into());
             }
-            if n.kind == Kind::Function && (n.rva.is_none() || !rvas.insert(n.rva)) {
-                return Err("Invalid or duplicate function RVA".into());
+            if n.kind.is_leaf() && (n.rva.is_none() || !rvas.insert(n.rva)) {
+                return Err("Invalid or duplicate function or data RVA".into());
+            }
+            if (n.kind == Kind::Data) != n.length.is_some_and(|length| length > 0) {
+                return Err("A data item needs a length; other records have none".into());
             }
             if n.kind != Kind::App {
                 let parent = n
                     .parent
                     .and_then(|id| lookup.get(&id))
                     .ok_or("Missing report parent")?;
-                if parent.kind.child() != Some(n.kind) {
+                if n.kind.parent_kind() != Some(parent.kind) {
                     return Err("Invalid research hierarchy".into());
                 }
             } else if n.parent.is_some() {
                 return Err("App cannot have a parent".into());
             }
+        }
+        if p.layout_version < DATA_FORMAT && p.nodes.iter().any(|n| n.kind == Kind::Data) {
+            return Err("Invalid catalog: data items need catalog format 6".into());
         }
         if p.nodes.iter().filter(|n| n.kind == Kind::App).count() != 1
             || !p.nodes.iter().any(|n| n.id == 0 && n.kind == Kind::App)
@@ -1326,6 +1376,7 @@ impl Library {
                 name: format!("{name} research"),
                 status: Status::NotStarted,
                 rva: None,
+                length: None,
                 revision: 0,
                 accepted_hash: None,
                 accepted_prerequisites: Default::default(),
@@ -1392,7 +1443,7 @@ impl Library {
         let Some(n) = self.projects[p].nodes.iter().find(|n| n.id == id) else {
             return Status::NotStarted;
         };
-        if n.kind == Kind::Function && n.status != Status::Complete {
+        if n.kind.is_leaf() && n.status != Status::Complete {
             return n.status;
         }
         catalog_index::Index::new(&self.projects[p])
@@ -1422,7 +1473,7 @@ impl Library {
                     .to_string(),
             );
         }
-        if let Some(kind) = node.kind.child() {
+        if !node.kind.is_leaf() {
             let kids: Vec<_> = project
                 .nodes
                 .iter()
@@ -1432,7 +1483,11 @@ impl Library {
                 .iter()
                 .filter(|k| states.get(&k.id) != Some(&Status::Complete))
                 .count();
-            let noun = kind.label().to_lowercase();
+            let noun = match node.kind {
+                Kind::App => "architecture",
+                Kind::Architecture => "chunk",
+                _ => "function or data",
+            };
             if kids.is_empty() {
                 blockers.push(format!("No required {noun} records yet."));
             } else if open > 0 {
@@ -1449,9 +1504,7 @@ impl Library {
             .filter(|e| states.get(&e.prerequisite) != Some(&Status::Complete))
             .count();
         if prerequisites > 0 {
-            blockers.push(format!(
-                "{prerequisites} prerequisite function(s) not complete."
-            ));
+            blockers.push(format!("{prerequisites} prerequisite(s) not complete."));
         }
         Ok(blockers)
     }
@@ -1476,38 +1529,55 @@ impl Library {
             .states_with(&self.dir(p), inputs, &|| self.hash_overrides())
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
-        self.add_directed(p, parent, name, rva, None)
+        self.add_directed(p, parent, name, rva, None, None)
     }
-    /// `add`, accepting a pooled parent the caller is not a member for when the human directed
-    /// it.
+    /// Adds a data item of `length` bytes at `rva` to the chunk `parent`.
+    pub fn add_data(
+        &mut self,
+        p: usize,
+        parent: u64,
+        name: &str,
+        rva: &str,
+        length: u32,
+    ) -> Result<u64> {
+        self.add_directed(p, parent, name, rva, Some(length), None)
+    }
+    /// `add` (or with `length`, `add_data`), accepting a pooled parent the caller is not a
+    /// member for when the human directed it.
     pub fn add_directed(
         &mut self,
         p: usize,
         parent: u64,
         name: &str,
         rva: &str,
+        length: Option<u32>,
         directed_by: Option<&str>,
     ) -> Result<u64> {
         if !self.writable(p) {
-            return self.write_project(p, |l, p| l.add_directed(p, parent, name, rva, directed_by));
+            return self.write_project(p, |l, p| {
+                l.add_directed(p, parent, name, rva, length, directed_by)
+            });
         }
         self.ensure_structural(p)?;
         let name = record_name(name)?;
-        let kind = self.projects[p]
+        let parent_kind = self.projects[p]
             .nodes
             .iter()
             .find(|n| n.id == parent)
             .ok_or("Unknown parent")?
-            .kind
-            .child()
-            .ok_or("Functions cannot have children")?;
-        let address = if kind == Kind::Function {
+            .kind;
+        let kind = Kind::created_under(parent_kind, length)?;
+        let address = if kind.is_leaf() {
             if self.projects[p].binary.trim().is_empty() {
-                return Err("Set the project's binary build/hash before adding functions.".into());
+                return Err(
+                    "Set the project's binary build/hash before adding functions or data.".into(),
+                );
             }
             let x = parse_rva(rva).map_err(|_| "Enter an RVA in hexadecimal, not a VA.")?;
             if self.projects[p].nodes.iter().any(|n| n.rva == Some(x)) {
-                return Err("That function already has a canonical file in this project.".into());
+                return Err(
+                    "That address already has a function or data item in this project.".into(),
+                );
             }
             Some(x)
         } else {
@@ -1521,6 +1591,7 @@ impl Library {
                 parent,
                 name,
                 rva: address,
+                length,
                 context_only: false,
             }],
             update: vec![],
@@ -1579,9 +1650,9 @@ impl Library {
         if body.trim().is_empty() {
             return Err("Write the compiled understanding report before marking complete.".into());
         }
-        if n.kind == Kind::Function && evidence.trim().is_empty() {
+        if n.kind.is_leaf() && evidence.trim().is_empty() {
             return Err(
-                "A function needs evidence references and claim classification before completion."
+                "A function or data item needs evidence references and claim classification before completion."
                     .into(),
             );
         }
@@ -1590,7 +1661,7 @@ impl Library {
             .iter()
             .filter(|k| k.parent == Some(id) && !k.context_only)
             .collect();
-        if n.kind != Kind::Function
+        if !n.kind.is_leaf()
             && (kids.is_empty() || kids.iter().any(|k| states[&k.id] != Status::Complete))
         {
             return Err("Every required child must be complete, and the parent needs its own compiled report.".into());
@@ -1602,7 +1673,7 @@ impl Library {
             .any(|e| states[&e.prerequisite] != Status::Complete)
         {
             return Err(
-                "Every tagged prerequisite must be complete before this function can be complete."
+                "Every tagged prerequisite must be complete before this record can be complete."
                     .into(),
             );
         }
@@ -1728,6 +1799,9 @@ pub struct ResearchUi {
     message: String,
     new_name: String,
     rva: String,
+    data_name: String,
+    data_rva: String,
+    data_length: String,
     dependency_rvas: String,
     new_project_name: String,
     new_project_id: String,
@@ -1804,6 +1878,9 @@ impl ResearchUi {
             message: String::new(),
             new_name: String::new(),
             rva: String::new(),
+            data_name: String::new(),
+            data_rva: String::new(),
+            data_length: String::new(),
             dependency_rvas: String::new(),
             new_project_name: String::new(),
             new_project_id: String::new(),
@@ -2176,10 +2253,11 @@ pub struct Dependency {
 }
 impl Library {
     fn validate_dependencies(&self, p: usize, edges: &[Dependency]) -> Result<()> {
+        // Functions and data items: prerequisites connect them in any direction.
         let functions: std::collections::HashSet<_> = self.projects[p]
             .nodes
             .iter()
-            .filter(|n| n.kind == Kind::Function)
+            .filter(|n| n.kind.is_leaf())
             .map(|n| n.id)
             .collect();
         let mut pairs = std::collections::HashSet::new();
@@ -2190,7 +2268,7 @@ impl Library {
                 || !pairs.insert((e.dependent, e.prerequisite))
             {
                 return Err(
-                    "Prerequisites must be unique, different functions in this same project."
+                    "Prerequisites must be unique, different functions or data items in this same project."
                         .into(),
                 );
             }
@@ -2278,9 +2356,9 @@ impl Library {
         if !self.projects[p]
             .nodes
             .iter()
-            .any(|n| n.id == id && n.kind == Kind::Function)
+            .any(|n| n.id == id && n.kind.is_leaf())
         {
-            return Err("Select a function report.".into());
+            return Err("Select a function or data item.".into());
         }
         let mut edges: Vec<_> = self.projects[p]
             .dependencies
@@ -2294,7 +2372,7 @@ impl Library {
                 .iter()
                 .find(|n| n.rva == Some(address))
                 .ok_or_else(|| {
-                    format!("RVA 0x{address:08X} has no function report in this project.")
+                    format!("RVA 0x{address:08X} has no function or data item in this project.")
                 })?;
             edges.push(Dependency {
                 dependent: id,
@@ -2506,6 +2584,7 @@ mod background_ui_tests {
                 name: "App".into(),
                 status: Status::NotStarted,
                 rva: None,
+                length: None,
                 revision: 0,
                 accepted_hash: None,
                 accepted_prerequisites: Default::default(),
@@ -2747,6 +2826,7 @@ mod dependency_tests {
             name: format!("n{id}"),
             status: Status::NotStarted,
             rva: (kind == Kind::Function).then_some(0x1000 + id as u32),
+            length: None,
             revision: 0,
             accepted_hash: None,
             accepted_prerequisites: Default::default(),

@@ -388,9 +388,9 @@ impl Library {
                 .iter()
                 .find(|n| n.id == *id)
                 .ok_or_else(|| format!("Unknown node {id}"))?;
-            if !matches!(node.kind, Kind::Chunk | Kind::Function) {
+            if !matches!(node.kind, Kind::Chunk | Kind::Function | Kind::Data) {
                 return Err(format!(
-                    "Node {id}: only chunks and functions can be pooled."
+                    "Node {id}: only chunks, functions and data items can be pooled."
                 ));
             }
             match &pool {
@@ -637,6 +637,7 @@ mod tests {
             name: format!("N{id}"),
             status: Status::NotStarted,
             rva: None,
+            length: None,
             revision: 0,
             accepted_hash: None,
             accepted_prerequisites: Default::default(),

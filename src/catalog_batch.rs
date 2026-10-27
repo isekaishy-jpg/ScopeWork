@@ -36,6 +36,9 @@ pub struct Create {
     pub parent: u64,
     pub name: String,
     pub rva: Option<u32>,
+    /// A data item's size in bytes: given, the record created under a chunk is a data item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u32>,
     #[serde(default)]
     pub context_only: bool,
 }
@@ -46,6 +49,9 @@ pub struct Update {
     pub parent: Option<u64>,
     pub name: Option<String>,
     pub context_only: Option<bool>,
+    /// A data item's new size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u32>,
     /// The record's revision as last read; required by schema 2.
     #[serde(default)]
     pub expect_node_revision: Option<u64>,
@@ -986,18 +992,21 @@ impl Library {
             let parent = *positions
                 .get(&c.parent)
                 .ok_or("Unknown batch parent; create parents before children")?;
-            let kind = after.nodes[parent]
-                .kind
-                .child()
-                .ok_or("Functions cannot own children")?;
-            if (kind == Kind::Function) != c.rva.is_some() {
-                return Err("Batch node requires a name and an RVA only for functions".into());
+            let kind = Kind::created_under(after.nodes[parent].kind, c.length)?;
+            if kind.is_leaf() != c.rva.is_some() {
+                return Err(
+                    "Batch node requires a name, and an RVA only for functions and data items"
+                        .into(),
+                );
             }
+
             let name = record_name(&c.name)?;
             if let Some(rva) = c.rva
                 && (before.binary.trim().is_empty() || !rvas.insert(rva))
             {
-                return Err("Empty binary identity or duplicate function RVA in batch".into());
+                return Err(
+                    "Empty binary identity or duplicate function or data RVA in batch".into(),
+                );
             }
             let id = after.next_id;
             after.next_id = id.checked_add(1).ok_or("Node ID exhausted")?;
@@ -1008,6 +1017,7 @@ impl Library {
                 kind,
                 name,
                 rva: c.rva,
+                length: c.length,
                 context_only: c.context_only,
                 status: Status::NotStarted,
                 revision: 0,
@@ -1032,9 +1042,10 @@ impl Library {
             let mut touched = false;
             if let Some(parent) = u.parent {
                 let p = *positions.get(&parent).ok_or("Unknown new parent")?;
-                if after.nodes[p].kind.child() != Some(after.nodes[i].kind) {
+                if after.nodes[i].kind.parent_kind() != Some(after.nodes[p].kind) {
                     return Err(
-                        "Move must preserve App / Architecture / Chunk / Function hierarchy".into(),
+                        "Move must preserve App / Architecture / Chunk / Function and Data hierarchy"
+                            .into(),
                     );
                 }
                 if after.nodes[i].parent != Some(parent) {
@@ -1053,6 +1064,15 @@ impl Library {
             {
                 after.nodes[i].name = record_name(name)?;
                 touched = true;
+            }
+            if let Some(length) = u.length {
+                if after.nodes[i].kind != Kind::Data || length == 0 {
+                    return Err("Only a data item has a length, of at least one byte".into());
+                }
+                if after.nodes[i].length != Some(length) {
+                    after.nodes[i].length = Some(length);
+                    touched = true;
+                }
             }
             if let Some(context) = u.context_only {
                 if u.id == 0 && context {
@@ -1155,6 +1175,7 @@ impl Library {
                 let from = match n.kind {
                     Kind::Chunk => Some(format!("chunks/{:06}", n.id)),
                     Kind::Function => Some(format!("functions/{:08X}", n.rva.unwrap())),
+                    // Format 1 had no data items: no legacy location to repair.
                     _ => None,
                 };
                 if let Some(from) = from {
@@ -1299,10 +1320,10 @@ impl Library {
         let mut dependencies: HashSet<u64> = created
             .iter()
             .copied()
-            .filter(|id| new.nodes[id].kind == Kind::Function)
+            .filter(|id| new.nodes[id].kind.is_leaf())
             .collect();
         for m in &moves {
-            if new.nodes[&m.id].kind == Kind::Function {
+            if new.nodes[&m.id].kind.is_leaf() {
                 dependencies.insert(m.id);
             }
         }
@@ -1418,6 +1439,7 @@ impl Library {
         let reached = reopen::reopen_affected(&mut after, &existing, &old_parents, &consumers);
         after.revision += 1;
         after.layout_version = before.layout_version.max(3);
+        raise_format(&mut after);
         after.structural_epoch += 1;
         let mut sidecars = vec![];
         // Completed records reopened by this change need their owner's review: queue them.

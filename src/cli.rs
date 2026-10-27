@@ -226,6 +226,7 @@ pub(crate) enum Scope {
     Architecture,
     Chunk,
     Function,
+    Data,
 }
 impl Scope {
     fn kind(self) -> Kind {
@@ -234,6 +235,7 @@ impl Scope {
             Self::Architecture => Kind::Architecture,
             Self::Chunk => Kind::Chunk,
             Self::Function => Kind::Function,
+            Self::Data => Kind::Data,
         }
     }
 }
@@ -582,7 +584,8 @@ pub(crate) enum NodeCommand {
         #[command(flatten)]
         filter: RecordFilter,
     },
-    /// Kind is inferred from the parent: app 0 -> architecture -> chunk -> function.
+    /// Kind is inferred from the parent: app 0 -> architecture -> chunk -> function, or a data
+    /// item under a chunk when --length is given.
     Create {
         project: String,
         #[arg(long)]
@@ -591,6 +594,9 @@ pub(crate) enum NodeCommand {
         name: String,
         #[arg(long)]
         rva: Option<String>,
+        /// A data item's size in bytes; creates a data item instead of a function.
+        #[arg(long)]
+        length: Option<u32>,
         /// The human's instruction, required to create a record in a pooled chunk without being a member.
         #[arg(long)]
         directed_by: Option<String>,
@@ -1416,54 +1422,55 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 )
             }
         },
-        Command::Node(command) => match command {
-            NodeCommand::Delete {
-                project: id,
-                file,
-                expect,
-                directed_by,
-            } => remove(lib, &id, &file, expect.as_deref(), directed_by, false),
-            NodeCommand::Prune {
-                project: id,
-                file,
-                expect,
-                directed_by,
-            } => remove(lib, &id, &file, expect.as_deref(), directed_by, true),
-            NodeCommand::ReadBatch { project: id, nodes } => {
-                lib.read_reports(project(lib, &id)?, &nodes)
-            }
-            NodeCommand::SaveBatch { project: id, file } => {
-                let p = project(lib, &id)?;
-                let batch = crate::research::read_json(&file)?;
-                let saved = lib.save_reports(p, &batch)?;
-                Ok(json!({"project":id,"revision":lib.projects[p].revision,"saved":saved}))
-            }
-            NodeCommand::RepairLinks {
-                project: id,
-                expect_revision,
-            } => {
-                let p = project(lib, &id)?;
-                let batch = serde_json::from_value(json!({"schema":1,"binary":lib.projects[p].binary,"expect_revision":expect_revision,"repair_legacy_links":true})).map_err(|e|e.to_string())?;
-                lib.batch(p, &batch)?;
-                Ok(json!({"project":id,"revision":lib.projects[p].revision}))
-            }
-            NodeCommand::Batch {
-                project: id,
-                file,
-                directed_by,
-            } => {
-                let p = project(lib, &id)?;
-                let mut batch: Batch = crate::research::read_json(&file)?;
-                if directed_by.is_some() {
-                    batch.directed_by = directed_by;
+        Command::Node(command) => {
+            match command {
+                NodeCommand::Delete {
+                    project: id,
+                    file,
+                    expect,
+                    directed_by,
+                } => remove(lib, &id, &file, expect.as_deref(), directed_by, false),
+                NodeCommand::Prune {
+                    project: id,
+                    file,
+                    expect,
+                    directed_by,
+                } => remove(lib, &id, &file, expect.as_deref(), directed_by, true),
+                NodeCommand::ReadBatch { project: id, nodes } => {
+                    lib.read_reports(project(lib, &id)?, &nodes)
                 }
-                let outcome = lib.apply_batch(p, &batch)?;
-                let revision = lib.projects[p].revision;
-                // Report what this batch reopened and whose claimed work that touches.
-                let states = lib.effective_all(p);
-                let claims = lib.claims(p)?;
-                let covered = lib.claim_index(p, &claims);
-                let reopened: Vec<_> = lib
+                NodeCommand::SaveBatch { project: id, file } => {
+                    let p = project(lib, &id)?;
+                    let batch = crate::research::read_json(&file)?;
+                    let saved = lib.save_reports(p, &batch)?;
+                    Ok(json!({"project":id,"revision":lib.projects[p].revision,"saved":saved}))
+                }
+                NodeCommand::RepairLinks {
+                    project: id,
+                    expect_revision,
+                } => {
+                    let p = project(lib, &id)?;
+                    let batch = serde_json::from_value(json!({"schema":1,"binary":lib.projects[p].binary,"expect_revision":expect_revision,"repair_legacy_links":true})).map_err(|e|e.to_string())?;
+                    lib.batch(p, &batch)?;
+                    Ok(json!({"project":id,"revision":lib.projects[p].revision}))
+                }
+                NodeCommand::Batch {
+                    project: id,
+                    file,
+                    directed_by,
+                } => {
+                    let p = project(lib, &id)?;
+                    let mut batch: Batch = crate::research::read_json(&file)?;
+                    if directed_by.is_some() {
+                        batch.directed_by = directed_by;
+                    }
+                    let outcome = lib.apply_batch(p, &batch)?;
+                    let revision = lib.projects[p].revision;
+                    // Report what this batch reopened and whose claimed work that touches.
+                    let states = lib.effective_all(p);
+                    let claims = lib.claims(p)?;
+                    let covered = lib.claim_index(p, &claims);
+                    let reopened: Vec<_> = lib
                     .review_queue(p, &states)?
                     .into_iter()
                     .filter(|(_, entries)| entries.iter().any(|e| e.revision == revision))
@@ -1471,186 +1478,190 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                         |(node, _)| json!({"node": node, "claimed_by": claimed_by(&covered, node)}),
                     )
                     .collect();
-                let moved: Vec<_> = outcome
-                    .moved
-                    .iter()
-                    .map(|(node, from, to)| json!({"node": node, "from": from, "to": to}))
-                    .collect();
-                let mut answer = json!({"project": id, "revision":revision, "created":outcome.created, "reopened": reopened, "moved": moved, "ledger_rows_repathed": outcome.ledger_rows_repathed});
-                // Renames: the citations that followed, the mentions left for review, and the
-                // records that stayed complete because only names changed in their reports.
-                if !outcome.citations.is_empty() {
-                    answer["citations"] = json!(outcome.citations);
+                    let moved: Vec<_> = outcome
+                        .moved
+                        .iter()
+                        .map(|(node, from, to)| json!({"node": node, "from": from, "to": to}))
+                        .collect();
+                    let mut answer = json!({"project": id, "revision":revision, "created":outcome.created, "reopened": reopened, "moved": moved, "ledger_rows_repathed": outcome.ledger_rows_repathed});
+                    // Renames: the citations that followed, the mentions left for review, and the
+                    // records that stayed complete because only names changed in their reports.
+                    if !outcome.citations.is_empty() {
+                        answer["citations"] = json!(outcome.citations);
+                    }
+                    if !outcome.unrewritten.is_empty() {
+                        answer["unrewritten"] = json!(outcome.unrewritten);
+                    }
+                    if !outcome.kept_complete.is_empty() {
+                        answer["kept_complete"] = json!(outcome.kept_complete);
+                    }
+                    Ok(answer)
                 }
-                if !outcome.unrewritten.is_empty() {
-                    answer["unrewritten"] = json!(outcome.unrewritten);
+                NodeCommand::Resolve { project: id, paths } => {
+                    let p = project(lib, &id)?;
+                    Ok(lib.resolve_paths(p, &paths))
                 }
-                if !outcome.kept_complete.is_empty() {
-                    answer["kept_complete"] = json!(outcome.kept_complete);
+                NodeCommand::List {
+                    project: id,
+                    filter,
+                } => {
+                    let p = project(lib, &id)?;
+                    let states = lib.effective_all(p);
+                    let paths = lib.report_paths(p);
+                    let required = lib.required_nodes(p);
+                    Ok(json!(lib.projects[p].nodes.iter().filter(|n| filter.keeps(n, states[&n.id])).map(|n| json!({"node":n,"effective_status":states[&n.id],"required_research":required.contains(&n.id),"report":paths[&n.id]})).collect::<Vec<_>>()))
                 }
-                Ok(answer)
-            }
-            NodeCommand::Resolve { project: id, paths } => {
-                let p = project(lib, &id)?;
-                Ok(lib.resolve_paths(p, &paths))
-            }
-            NodeCommand::List {
-                project: id,
-                filter,
-            } => {
-                let p = project(lib, &id)?;
-                let states = lib.effective_all(p);
-                let paths = lib.report_paths(p);
-                let required = lib.required_nodes(p);
-                Ok(json!(lib.projects[p].nodes.iter().filter(|n| filter.keeps(n, states[&n.id])).map(|n| json!({"node":n,"effective_status":states[&n.id],"required_research":required.contains(&n.id),"report":paths[&n.id]})).collect::<Vec<_>>()))
-            }
-            NodeCommand::Create {
-                project: id,
-                parent,
-                name,
-                rva,
-                directed_by,
-            } => {
-                let p = project(lib, &id)?;
-                let parent_kind = lib.projects[p]
-                    .nodes
-                    .iter()
-                    .find(|n| n.id == parent)
-                    .ok_or("Unknown parent")?
-                    .kind;
-                if (parent_kind == Kind::Chunk) != rva.is_some() {
-                    return Err("Supply --rva only when creating a function under a chunk.".into());
-                }
-                let node = lib.add_directed(
-                    p,
+                NodeCommand::Create {
+                    project: id,
                     parent,
-                    &name,
-                    rva.as_deref().unwrap_or(""),
-                    directed_by.as_deref(),
-                )?;
-                node_view(lib, p, node)
-            }
-            NodeCommand::Show { project: id, node } => {
-                let p = project(lib, &id)?;
-                node_view(lib, p, node)
-            }
-            NodeCommand::Save {
-                project: id,
-                node,
-                body_file,
-                evidence_file,
-                expect: token,
-                evidence_only,
-            } => {
-                let p = project(lib, &id)?;
-                let body = fs::read_to_string(body_file).map_err(|e| e.to_string())?;
-                let evidence = fs::read_to_string(evidence_file).map_err(|e| e.to_string())?;
-                if evidence_only {
-                    lib.save_evidence(p, node, &body, &evidence, &token)?;
-                } else {
-                    lib.save_report(p, node, &body, &evidence, false, &token)?;
+                    name,
+                    rva,
+                    length,
+                    directed_by,
+                } => {
+                    let p = project(lib, &id)?;
+                    let parent_kind = lib.projects[p]
+                        .nodes
+                        .iter()
+                        .find(|n| n.id == parent)
+                        .ok_or("Unknown parent")?
+                        .kind;
+                    if (parent_kind == Kind::Chunk) != rva.is_some() {
+                        return Err("Supply --rva only when creating a function or data item under a chunk.".into());
+                    }
+                    let node = lib.add_directed(
+                        p,
+                        parent,
+                        &name,
+                        rva.as_deref().unwrap_or(""),
+                        length,
+                        directed_by.as_deref(),
+                    )?;
+
+                    node_view(lib, p, node)
                 }
-                node_view(lib, p, node)
-            }
-            NodeCommand::Flag {
-                project: id,
-                node,
-                reason,
-            } => {
-                let p = project(lib, &id)?;
-                lib.set_review_flag(p, node, Some(&reason))?;
-                node_view(lib, p, node)
-            }
-            NodeCommand::Unflag { project: id, node } => {
-                let p = project(lib, &id)?;
-                lib.set_review_flag(p, node, None)?;
-                node_view(lib, p, node)
-            }
-            NodeCommand::Proof {
-                project: id,
-                node,
-                recreation,
-                tests,
-                clear,
-            } => {
-                let p = project(lib, &id)?;
-                let input = (!clear).then(|| crate::research::proofs::ProofInput {
-                    id: node,
-                    recreation: recreation.unwrap_or_default(),
+                NodeCommand::Show { project: id, node } => {
+                    let p = project(lib, &id)?;
+                    node_view(lib, p, node)
+                }
+                NodeCommand::Save {
+                    project: id,
+                    node,
+                    body_file,
+                    evidence_file,
+                    expect: token,
+                    evidence_only,
+                } => {
+                    let p = project(lib, &id)?;
+                    let body = fs::read_to_string(body_file).map_err(|e| e.to_string())?;
+                    let evidence = fs::read_to_string(evidence_file).map_err(|e| e.to_string())?;
+                    if evidence_only {
+                        lib.save_evidence(p, node, &body, &evidence, &token)?;
+                    } else {
+                        lib.save_report(p, node, &body, &evidence, false, &token)?;
+                    }
+                    node_view(lib, p, node)
+                }
+                NodeCommand::Flag {
+                    project: id,
+                    node,
+                    reason,
+                } => {
+                    let p = project(lib, &id)?;
+                    lib.set_review_flag(p, node, Some(&reason))?;
+                    node_view(lib, p, node)
+                }
+                NodeCommand::Unflag { project: id, node } => {
+                    let p = project(lib, &id)?;
+                    lib.set_review_flag(p, node, None)?;
+                    node_view(lib, p, node)
+                }
+                NodeCommand::Proof {
+                    project: id,
+                    node,
+                    recreation,
                     tests,
-                });
-                lib.set_proofs(p, &[(node, input)])?;
-                node_view(lib, p, node)
-            }
-            NodeCommand::ProofBatch { project: id, file } => {
-                let p = project(lib, &id)?;
-                #[derive(serde::Deserialize)]
-                struct Request {
-                    proofs: Vec<crate::research::proofs::ProofInput>,
+                    clear,
+                } => {
+                    let p = project(lib, &id)?;
+                    let input = (!clear).then(|| crate::research::proofs::ProofInput {
+                        id: node,
+                        recreation: recreation.unwrap_or_default(),
+                        tests,
+                    });
+                    lib.set_proofs(p, &[(node, input)])?;
+                    node_view(lib, p, node)
                 }
-                let request: Request = crate::research::read_json(&file)?;
-                let entries: Vec<_> = request
-                    .proofs
-                    .into_iter()
-                    .map(|input| (input.id, Some(input)))
-                    .collect();
-                lib.set_proofs(p, &entries)?;
-                Ok(
-                    json!({"project":id,"recorded":entries.len(),"revision":lib.projects[p].revision}),
-                )
-            }
-            NodeCommand::Unproven {
-                project: id,
-                complete,
-            } => {
-                let p = project(lib, &id)?;
-                let proofs = lib.proofs(p);
-                let states = lib.effective_all(p);
-                let rows: Vec<_> = lib.projects[p]
+                NodeCommand::ProofBatch { project: id, file } => {
+                    let p = project(lib, &id)?;
+                    #[derive(serde::Deserialize)]
+                    struct Request {
+                        proofs: Vec<crate::research::proofs::ProofInput>,
+                    }
+                    let request: Request = crate::research::read_json(&file)?;
+                    let entries: Vec<_> = request
+                        .proofs
+                        .into_iter()
+                        .map(|input| (input.id, Some(input)))
+                        .collect();
+                    lib.set_proofs(p, &entries)?;
+                    Ok(
+                        json!({"project":id,"recorded":entries.len(),"revision":lib.projects[p].revision}),
+                    )
+                }
+                NodeCommand::Unproven {
+                    project: id,
+                    complete,
+                } => {
+                    let p = project(lib, &id)?;
+                    let proofs = lib.proofs(p);
+                    let states = lib.effective_all(p);
+                    let rows: Vec<_> = lib.projects[p]
                     .nodes
                     .iter()
                     .filter(|n| n.kind == Kind::Function && !proofs.proofs.contains_key(&n.id))
                     .filter(|n| !complete || states[&n.id] == Status::Complete)
                     .map(|n| json!({"id":n.id,"name":n.name,"rva":n.rva.map(|r| format!("0x{r:08X}")),"effective_status":states[&n.id],"context_only":n.context_only}))
                     .collect();
-                Ok(json!({"project":id,"required":proofs.required,"unproven":rows}))
-            }
-            NodeCommand::Flagged { project: id } => {
-                let p = project(lib, &id)?;
-                let flags = lib.review_flags(p)?;
-                let rows: Vec<_> = flags.iter().map(|(n, f)| {
+                    Ok(json!({"project":id,"required":proofs.required,"unproven":rows}))
+                }
+                NodeCommand::Flagged { project: id } => {
+                    let p = project(lib, &id)?;
+                    let flags = lib.review_flags(p)?;
+                    let rows: Vec<_> = flags.iter().map(|(n, f)| {
                     let node = lib.projects[p].nodes.iter().find(|x| x.id == *n);
                     json!({"id":n,"name":node.map(|x| x.name.as_str()),"kind":node.map(|x| x.kind),"reason":f.reason,"flagged_at_revision":f.flagged_at_revision})
                 }).collect();
-                Ok(json!({"project":id,"flagged":rows}))
+                    Ok(json!({"project":id,"flagged":rows}))
+                }
+                NodeCommand::ResetStatus { project: id, file } => {
+                    let p = project(lib, &id)?;
+                    let request = crate::research::read_json(&file)?;
+                    let reset = lib.reset_status(p, &request)?;
+                    Ok(json!({"project":id,"revision":lib.projects[p].revision,"reset":reset}))
+                }
+                NodeCommand::Complete {
+                    project: id,
+                    node,
+                    expect: token,
+                    reviewed: _,
+                } => {
+                    let p = project(lib, &id)?;
+                    let (body, evidence) = lib.read(p, node)?;
+                    lib.save_report(p, node, &body, &evidence, true, &token)?;
+                    node_view(lib, p, node)
+                }
+                NodeCommand::Reopen {
+                    project: id,
+                    node,
+                    expect: token,
+                } => {
+                    let p = project(lib, &id)?;
+                    lib.reopen(p, node, &token)?;
+                    node_view(lib, p, node)
+                }
             }
-            NodeCommand::ResetStatus { project: id, file } => {
-                let p = project(lib, &id)?;
-                let request = crate::research::read_json(&file)?;
-                let reset = lib.reset_status(p, &request)?;
-                Ok(json!({"project":id,"revision":lib.projects[p].revision,"reset":reset}))
-            }
-            NodeCommand::Complete {
-                project: id,
-                node,
-                expect: token,
-                reviewed: _,
-            } => {
-                let p = project(lib, &id)?;
-                let (body, evidence) = lib.read(p, node)?;
-                lib.save_report(p, node, &body, &evidence, true, &token)?;
-                node_view(lib, p, node)
-            }
-            NodeCommand::Reopen {
-                project: id,
-                node,
-                expect: token,
-            } => {
-                let p = project(lib, &id)?;
-                lib.reopen(p, node, &token)?;
-                node_view(lib, p, node)
-            }
-        },
+        }
         Command::Deps(command) => match command {
             DepsCommand::Get { project: id, node } => {
                 let p = project(lib, &id)?;
@@ -1712,9 +1723,9 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 // children are all complete but whose own report is empty is ready for synthesis instead.
                 let unproven = proofs.required&&n.kind==Kind::Function&&!proofs.proofs.contains_key(&n.id);
                 // A pooled record is open work only for its pool's members.
-                let unblocked = states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&!unproven&&!closed.contains(&n.id)&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty());
+                let unblocked = states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&!unproven&&!closed.contains(&n.id)&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind.is_leaf()||!children.is_empty());
                 let ready_for_review = unblocked&&n.status!=Status::NotStarted;
-                let ready_for_synthesis = unblocked&&n.status==Status::NotStarted&&n.kind!=Kind::Function;
+                let ready_for_synthesis = unblocked&&n.status==Status::NotStarted&&!n.kind.is_leaf();
                 if ready && !ready_for_review { return None; }
                 if synthesis_only && !ready_for_synthesis { return None; }
                 ready_count += usize::from(ready_for_review);
@@ -1735,7 +1746,19 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 .iter()
                 .filter(|n| n.kind == Kind::Function && required.contains(&n.id))
                 .count();
-            let mut out = json!({"project":id,"app_status":states[&0],"review_flags":flags.len(),"claims":claims.len(),"review_queue":queue.len(),"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions});
+            // Data items are counted apart from the function inventory, never inside it.
+            let data_items: Vec<_> = lib.projects[p]
+                .nodes
+                .iter()
+                .filter(|n| n.kind == Kind::Data)
+                .collect();
+            let data = json!({
+                "total": data_items.len(),
+                "required": data_items.iter().filter(|n| required.contains(&n.id)).count(),
+                "complete": data_items.iter().filter(|n| states[&n.id] == Status::Complete).count(),
+            });
+            let mut out = json!({"project":id,"app_status":states[&0],"review_flags":flags.len(),"claims":claims.len(),"review_queue":queue.len(),"research_scope":lib.projects[p].research_scope,"inventory_functions":inventory,"required_functions":required_functions,"context_functions":inventory-required_functions,"data_items":data});
+
             if summary {
                 out["counts"] = json!(counts);
                 out["ready_for_review"] = json!(ready_count);

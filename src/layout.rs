@@ -51,12 +51,14 @@ fn resolve(from: &str, path: &str) -> Option<String> {
     }
     Some(parts.join("/"))
 }
+/// A record's report path in format 1. That format predates data items (`migrate` refuses a
+/// format 1 catalog holding one), so only the four original kinds have a location there.
 fn legacy(n: &Node) -> String {
     match n.kind {
         Kind::App => "app.md".into(),
         Kind::Architecture => format!("architectures/{:06}/research.md", n.id),
         Kind::Chunk => format!("chunks/{:06}/research.md", n.id),
-        Kind::Function => format!("functions/{:08X}/research.md", n.rva.unwrap()),
+        Kind::Function | Kind::Data => format!("functions/{:08X}/research.md", n.rva.unwrap()),
     }
 }
 /// Indexed path rewriting: cost follows the number of path components, not catalog size.
@@ -200,12 +202,16 @@ pub(super) fn inside(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
-    if matches!(project.layout_version, 2..=5) {
+    if matches!(project.layout_version, 2..=DATA_FORMAT) {
         return Ok(());
     }
     if project.layout_version != 1 {
         return Err("This project needs a newer Scopework version.".into());
     }
+    if project.nodes.iter().any(|n| n.kind == Kind::Data) {
+        return Err("Invalid research hierarchy: format 1 has no data items.".into());
+    }
+
     let backup = root.join("tools/workspaces/layout-migration-v2");
     inside(root, &backup)?;
     fs::create_dir_all(&backup).map_err(|e| e.to_string())?;

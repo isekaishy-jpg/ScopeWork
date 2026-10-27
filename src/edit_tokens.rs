@@ -246,7 +246,10 @@ impl Library {
             project: project.id.clone(),
             node: (**node).clone(),
             effective_status,
-            data: (node.kind == Kind::Function).then(|| report.parent().unwrap().join("data")),
+            data: node
+                .kind
+                .is_leaf()
+                .then(|| report.parent().unwrap().join("data")),
             report,
             body: body.into(),
             evidence: evidence.into(),
