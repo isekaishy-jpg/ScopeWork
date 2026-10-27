@@ -31,6 +31,8 @@ pub const PROTOCOL: u32 = 2;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How long a coordinator with no clients and no queued work stays up.
 const IDLE: Duration = Duration::from_secs(600);
+/// How long a coordinator whose research home is gone waits for stuck work before exiting.
+const HOME_GONE_GRACE: Duration = Duration::from_secs(30);
 /// Waiting this long raises an operation one priority class.
 const AGEING: Duration = Duration::from_secs(5);
 /// The most operations, and report bytes, one merged commit takes.
@@ -304,6 +306,9 @@ struct Server {
     next_operation: AtomicU64,
     /// Leases on the research home's shared resources (`job run --shared`).
     shared: Mutex<leases::Leases>,
+    /// Set once the research home is gone: exiting then writes nothing into it, since that would
+    /// recreate the deleted folders.
+    home_gone: AtomicBool,
 }
 static SERVER: std::sync::OnceLock<Arc<Server>> = std::sync::OnceLock::new();
 
@@ -669,6 +674,9 @@ impl Server {
     /// Appends the read counts and commit measurements gathered so far to the project's
     /// tooling log (`coordinator-reads`, `coordinator-commits`), then starts afresh.
     fn flush_logs(&self, state: &ProjectState) {
+        if self.home_gone.load(Ordering::Acquire) {
+            return;
+        }
         let Some((day, classes, (reads, with_pending))) = state.reads.lock().ok().map(|mut log| {
             let taken = std::mem::take(&mut log.classes);
             let day = std::mem::replace(&mut log.day, today());
@@ -1096,6 +1104,7 @@ pub fn serve(home: &Path) -> Result<Value, String> {
         last_activity: Mutex::new(Instant::now()),
         next_operation: AtomicU64::new(1),
         shared: Mutex::new(leases::Leases::default()),
+        home_gone: AtomicBool::new(false),
     });
     let _ = SERVER.set(server.clone());
     let accepting = server.clone();
@@ -1124,7 +1133,10 @@ pub fn serve(home: &Path) -> Result<Value, String> {
         }
     });
     // Idle watch: exit when nothing has happened for a while and nobody is connected, or once
-    // the research home is gone (its lock file with it): there is nothing left to serve.
+    // the research home is gone (its lock file with it): there is nothing left to serve. Work
+    // stuck on a deleted home can never commit, so after a grace period it does not hold the
+    // exit either.
+    let mut gone_since: Option<Instant> = None;
     loop {
         std::thread::sleep(Duration::from_secs(5));
         let idle = server
@@ -1133,6 +1145,13 @@ pub fn serve(home: &Path) -> Result<Value, String> {
             .map(|last| last.elapsed() >= IDLE)
             .unwrap_or(false);
         let gone = !lock_path.exists();
+        if gone {
+            server.home_gone.store(true, Ordering::Release);
+        }
+        let gone_for = gone.then(|| *gone_since.get_or_insert_with(Instant::now));
+        if gone_for.is_some_and(|since| since.elapsed() >= HOME_GONE_GRACE) {
+            std::process::exit(0);
+        }
         if (idle || gone)
             && server.connections.load(Ordering::Acquire) == 0
             && server.queues_empty()

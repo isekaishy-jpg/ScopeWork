@@ -296,6 +296,11 @@ fn reads_never_mix_revisions_while_the_same_report_is_rewritten() {
                         .args(["node", "show", "fixture", "3"])
                         .output()
                         .unwrap();
+                    assert!(
+                        o.status.success(),
+                        "a reader failed: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    );
                     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
                     seen.push((
                         v["revision"].as_u64().unwrap(),
@@ -1118,11 +1123,12 @@ fn operations_record_their_own_submitter_not_the_coordinators() {
 fn a_coordinator_exits_once_its_research_home_is_gone() {
     let f = Fixture::new(1);
     f.coordinated(&["project", "show", "fixture"]);
+    // One status call: a coordinator that is exiting may close the handshake, which is an error
+    // answer, not a running coordinator.
     let running = |f: &Fixture| {
-        f.output("auto", &["coordinator", "status"])
-            .status
-            .success()
-            && f.ok("auto", &["coordinator", "status"])["running"] != false
+        let o = f.output("auto", &["coordinator", "status"]);
+        o.status.success()
+            && serde_json::from_slice::<Value>(&o.stdout).is_ok_and(|v| v["running"] != false)
     };
     assert!(running(&f), "the coordinator serves the home");
     // The home goes away with its lock file (Windows lets a held lock file be deleted).
