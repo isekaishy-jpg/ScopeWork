@@ -317,6 +317,16 @@ impl Library {
         }
         Ok(())
     }
+    /// Refuses a journal whose intended changes touch pooled records the caller may not change
+    /// (see `check_pool`). Every commit runs it, so no write path can skip it.
+    pub(super) fn check_journal(&self, p: usize, j: &Journal) -> Result<()> {
+        self.check_pool(
+            p,
+            j.changes.iter().copied(),
+            j.directed_by.as_deref(),
+            "Changing",
+        )
+    }
     /// Adds records to `pool` (created when new), or takes them out (`pool` None). Returns the
     /// records that changed. Pooling a record that is in no pool is open to everyone, so an
     /// agent that hits a safety stop can always pool it; taking a record out of its pool,
@@ -348,15 +358,13 @@ impl Library {
             return Err("A pooled record's origin is safety-stop or human.".into());
         }
         let mut file = self.pools_for_write(p)?;
-        // Records already in a pool change only through its members (or the human).
-        self.check_pool(
-            p,
-            ids.iter()
-                .copied()
-                .filter(|id| file.records.contains_key(id)),
-            directed_by,
-            "Changing the pool of",
-        )?;
+        // Records already in a pool change only through its members (or the human); pooling
+        // one that is in no pool is open to everyone. The journal guard checks them.
+        let guarded: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|id| file.records.contains_key(id))
+            .collect();
         let revision = self.projects[p].revision + 1;
         let by = caller();
         let mut changed = vec![];
@@ -444,7 +452,7 @@ impl Library {
         if changed.is_empty() {
             return Ok(changed);
         }
-        self.write_pools(p, &file)?;
+        self.write_pools(p, &file, guarded, directed_by)?;
         Ok(changed)
     }
     /// Adds `agent` to `pool`'s members (`join`) or removes it. Only registered agents join.
@@ -494,7 +502,7 @@ impl Library {
             by: caller(),
             at_revision: self.projects[p].revision + 1,
         });
-        self.write_pools(p, &file)?;
+        self.write_pools(p, &file, vec![], None)?;
         Ok(true)
     }
     /// Moves every quarantine record into the pool `quarantine` and removes `quarantine.json`,
@@ -553,6 +561,7 @@ impl Library {
         let mut after = before.clone();
         after.revision += 1;
         let journal = Journal {
+            changes: vec![],
             before,
             after,
             edits: vec![],
@@ -591,12 +600,19 @@ impl Library {
             }
         })
     }
-    fn write_pools(&mut self, p: usize, file: &PoolFile) -> Result<()> {
+    fn write_pools(
+        &mut self,
+        p: usize,
+        file: &PoolFile,
+        changes: Vec<u64>,
+        directed_by: Option<&str>,
+    ) -> Result<()> {
         let before_text = self.pools_before_text(p)?;
         let before = self.projects[p].clone();
         let mut after = before.clone();
         after.revision += 1;
         let journal = Journal {
+            changes,
             before,
             after,
             edits: vec![],
@@ -609,7 +625,7 @@ impl Library {
             }],
             ledger: false,
             repin_ledger: false,
-            directed_by: None,
+            directed_by: directed_by.map(str::to_string),
             repin_ids: vec![],
         };
         self.commit_or_stage(p, journal).map(|_| ())

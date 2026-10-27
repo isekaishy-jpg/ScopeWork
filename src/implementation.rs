@@ -194,6 +194,7 @@ impl Library {
         let mut after = before.clone();
         after.revision += 1;
         let journal = catalog_batch::Journal {
+            changes: vec![],
             before,
             after,
             edits: vec![],

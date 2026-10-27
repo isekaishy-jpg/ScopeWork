@@ -948,7 +948,16 @@ impl Library {
                     }
                 }
             }
-            return self.commit_metadata_with(p, before, after, reports, vec![], true, None);
+            return self.commit_metadata_with(
+                p,
+                before,
+                after,
+                reports,
+                vec![],
+                true,
+                None,
+                vec![],
+            );
         }
         for node in &mut after.nodes {
             node.accepted_hash = None;
@@ -958,7 +967,7 @@ impl Library {
             }
             node.revision += 1;
         }
-        self.commit_metadata(p, before, after, reports, vec![])
+        self.commit_metadata(p, before, after, reports, vec![], vec![])
     }
 
     fn writable(&self, p: usize) -> bool {
@@ -1235,7 +1244,7 @@ impl Library {
     /// `before` is the catalog before the change.
     fn commit_catalog(&mut self, p: usize, before: Project) -> Result<()> {
         let after = std::mem::replace(&mut self.projects[p], before.clone());
-        self.commit_metadata_with(p, before, after, vec![], vec![], false, None)
+        self.commit_metadata_with(p, before, after, vec![], vec![], false, None, vec![])
     }
     pub fn create(&mut self, id: &str, name: &str, binary: &str) -> Result<()> {
         if self
@@ -1457,7 +1466,6 @@ impl Library {
             return self.write_project(p, |l, p| l.add_directed(p, parent, name, rva, directed_by));
         }
         self.ensure_structural(p)?;
-        self.check_pool(p, [parent], directed_by, "Creating a record in")?;
         let name = record_name(name)?;
         let kind = self.projects[p]
             .nodes
@@ -1517,7 +1525,6 @@ impl Library {
                 l.save_report(p, id, body, evidence, complete, expected)
             });
         }
-        self.check_pool(p, [id], None, "Saving")?;
         self.check_edit_token(
             p,
             id,
@@ -1665,7 +1672,6 @@ impl Library {
         if !self.writable(p) {
             return self.write_project(p, |l, p| l.reopen(p, id, expected));
         }
-        self.check_pool(p, [id], None, "Reopening")?;
         self.check_edit_token(p, id, expected, "draft")?;
         let (body, evidence) = self.read(p, id)?;
         let batch = catalog_batch::ReportBatch {
@@ -2269,9 +2275,6 @@ impl Library {
             });
         }
         self.ensure_structural(p)?;
-        // The pool covers the record whose prerequisites change; a pooled record may itself be
-        // named as a prerequisite, since later work builds on pooled research.
-        self.check_pool(p, [id], directed_by, "Changing prerequisites of")?;
         if !self.projects[p]
             .nodes
             .iter()
@@ -2342,6 +2345,9 @@ impl Library {
             affected.into_iter().collect(),
             false,
             directed_by,
+            // The pool covers the record whose prerequisites change; a pooled record may itself
+            // be named as a prerequisite, since later work builds on pooled research.
+            vec![id],
         )
     }
     pub fn set_dependencies_by_rva(

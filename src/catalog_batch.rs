@@ -130,6 +130,12 @@ pub(super) struct Sidecar {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Journal {
+    /// The records this operation changes on purpose, checked against research pools before
+    /// it commits (`Library::check_journal`). Mechanical effects (the reopen walk, citation
+    /// rewrites, link repairs, identity amendments) are not in it. Never stored: recovery
+    /// replays a journal that was already checked.
+    #[serde(skip)]
+    pub(super) changes: Vec<u64>,
     pub(super) before: Project,
     pub(super) after: Project,
     pub(super) edits: Vec<Edit>,
@@ -531,9 +537,6 @@ impl Library {
         if !self.projects[p].nodes.iter().any(|n| n.id == id) {
             return Err("Unknown node".into());
         }
-        if reason.is_some() {
-            self.check_pool(p, [id], None, "Flagging")?;
-        }
         let before_text = match self.text_opt(p, REVIEW_FLAGS)? {
             Some(text) => text,
             None => {
@@ -565,6 +568,7 @@ impl Library {
         let mut after = before.clone();
         after.revision += 1;
         let journal = Journal {
+            changes: if reason.is_some() { vec![id] } else { vec![] },
             before,
             after,
             edits: vec![],
@@ -586,7 +590,13 @@ impl Library {
 impl Library {
     /// Replaces a journaled sidecar beside the catalog (claims, review queue) in one catalog
     /// transaction, so it is recoverable and appears in history like a catalog change.
-    pub(super) fn write_sidecar(&mut self, p: usize, name: &str, after_text: String) -> Result<()> {
+    pub(super) fn write_sidecar(
+        &mut self,
+        p: usize,
+        name: &str,
+        after_text: String,
+        changes: Vec<u64>,
+    ) -> Result<()> {
         let root = self.dir(p);
         let field = if name == coordination::CLAIMS {
             "claims"
@@ -604,6 +614,7 @@ impl Library {
         let mut after = before.clone();
         after.revision += 1;
         let journal = Journal {
+            changes,
             before,
             after,
             edits: vec![],
@@ -655,9 +666,8 @@ impl Library {
         {
             return Err("Unknown node in status reset".into());
         }
-        // Named records must be open to the caller; a reset of every record passes over the
-        // pooled ones the caller may not change.
-        self.check_pool(p, request.ids.iter().copied(), None, "Resetting")?;
+        // A reset of every record passes over the pooled ones the caller may not change; named
+        // ones are checked with the journal.
         let sealed = self.closed_to_caller(p);
         let mut after = before.clone();
         let mut reset = vec![];
@@ -675,7 +685,9 @@ impl Library {
             return Ok(reset);
         }
         after.revision += 1;
-        self.commit_metadata(p, before, after, vec![], vec![])?;
+        let mut changes = request.ids.clone();
+        changes.extend(&reset);
+        self.commit_metadata(p, before, after, vec![], vec![], changes)?;
         Ok(reset)
     }
 }
@@ -689,7 +701,14 @@ impl Library {
         original: String,
         output: String,
     ) -> Result<()> {
-        self.commit_metadata(p, before, after, vec![(id, original, output)], vec![])
+        self.commit_metadata(
+            p,
+            before,
+            after,
+            vec![(id, original, output)],
+            vec![],
+            vec![id],
+        )
     }
     pub(super) fn commit_metadata(
         &mut self,
@@ -698,8 +717,18 @@ impl Library {
         after: Project,
         reports: Vec<(u64, String, String)>,
         dependencies: Vec<u64>,
+        changes: Vec<u64>,
     ) -> Result<()> {
-        self.commit_metadata_with(p, before, after, reports, dependencies, false, None)
+        self.commit_metadata_with(
+            p,
+            before,
+            after,
+            reports,
+            dependencies,
+            false,
+            None,
+            changes,
+        )
     }
     /// `commit_metadata`, optionally re-pinning annotation-ledger rows of the rewritten reports
     /// (for mechanical rewrites that keep completion), and recording the human's direction for
@@ -714,6 +743,7 @@ impl Library {
         dependencies: Vec<u64>,
         repin_ledger: bool,
         directed_by: Option<String>,
+        changes: Vec<u64>,
     ) -> Result<()> {
         let index = catalog_index::Index::new(&before);
         let edits = reports
@@ -730,6 +760,7 @@ impl Library {
             })
             .collect();
         let journal = Journal {
+            changes,
             before,
             after,
             edits,
@@ -783,7 +814,6 @@ impl Library {
         if batch.reports.is_empty() {
             return Err("Report batch is empty".into());
         }
-        self.check_pool(p, batch.reports.iter().map(|r| r.id), None, "Saving")?;
         let root = self.dir(p);
         let index = catalog_index::Index::new(&before);
         let mut seen = HashSet::new();
@@ -851,6 +881,7 @@ impl Library {
         reopen::reopen_affected(&mut after, &edited, &HashMap::new(), &consumers);
         after.revision += 1;
         let journal = Journal {
+            changes: batch.reports.iter().map(|r| r.id).collect(),
             before,
             after,
             edits,
@@ -928,7 +959,7 @@ impl Library {
                 .map(|n| n.id);
             !children.eq(o.children.iter().copied())
         };
-        let touched = batch
+        let changes: Vec<u64> = batch
             .create
             .iter()
             .map(|c| c.parent)
@@ -939,8 +970,15 @@ impl Library {
                     .filter(changes)
                     .flat_map(|u| std::iter::once(u.id).chain(u.parent)),
             )
-            .chain(batch.reorder.iter().filter(reorders).map(|o| o.parent));
-        self.check_pool(p, touched, batch.directed_by.as_deref(), "Changing")?;
+            .chain(batch.reorder.iter().filter(reorders).map(|o| o.parent))
+            .collect();
+        // Checked now, before the work, and again by the journal guard when it commits.
+        self.check_pool(
+            p,
+            changes.iter().copied(),
+            batch.directed_by.as_deref(),
+            "Changing",
+        )?;
         let mut after = before.clone();
         let mut positions: HashMap<_, _> = after
             .nodes
@@ -1417,6 +1455,7 @@ impl Library {
             .filter(|(_, old, new)| old != new)
             .collect();
         let j = Journal {
+            changes,
             before,
             after,
             edits,
@@ -1432,6 +1471,7 @@ impl Library {
             dependencies: dependencies.into_iter().collect(),
             sidecars,
         };
+        self.check_journal(p, &j)?;
         let ledger_rows_repathed = commit(&root, &mut self.projects[p], &j)?;
         Ok(BatchOutcome {
             created,
@@ -1917,6 +1957,7 @@ mod tests {
             serde_json::from_slice(&fs::read(receipt.join("journal.json")).unwrap()).unwrap();
         assert_eq!(delta["kind"], "completed-catalog-delta");
         let journal = Journal {
+            changes: vec![],
             before,
             after: lib.projects[0].clone(),
             edits: serde_json::from_value(delta["edits"].clone()).unwrap(),
@@ -1975,6 +2016,7 @@ mod tests {
         after.nodes[3].name = "Changed".into();
         after.revision += 1;
         let j = Journal {
+            changes: vec![],
             before,
             after,
             edits: vec![],
@@ -2002,6 +2044,7 @@ mod tests {
         let mut deleted = j.after.clone();
         deleted.nodes.remove(3);
         let deletion = Journal {
+            changes: vec![],
             before: j.after.clone(),
             after: deleted,
             edits: vec![],
@@ -2031,6 +2074,7 @@ mod tests {
             prerequisite: 3,
         });
         let rearranged = Journal {
+            changes: vec![],
             before: j.after,
             after: reordered,
             edits: vec![],
@@ -2059,6 +2103,7 @@ mod tests {
         after.nodes[3].name = "Renamed".into();
         after.revision += 1;
         let j = Journal {
+            changes: vec![],
             before: before.clone(),
             after: after.clone(),
             edits: vec![],
@@ -2097,6 +2142,7 @@ mod tests {
         third.nodes[3].name = "Renamed again".into();
         third.revision += 1;
         let journal = |before: &Project, after: &Project| Journal {
+            changes: vec![],
             before: before.clone(),
             after: after.clone(),
             edits: vec![],
@@ -2126,6 +2172,7 @@ mod tests {
         let mut before = lib.projects[0].clone();
         before.revision -= 1;
         let j = Journal {
+            changes: vec![],
             before,
             after: lib.projects[0].clone(),
             edits: vec![],

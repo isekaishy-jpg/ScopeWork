@@ -172,7 +172,6 @@ impl Library {
         if !matches!(node.kind, Kind::Architecture | Kind::Chunk) {
             return Err("Claims apply to architectures and chunks.".into());
         }
-        self.check_pool(p, [id], None, "Claiming")?;
         let owner = owner.trim();
         if owner.is_empty() {
             return Err("A claim needs an owner.".into());
@@ -209,7 +208,7 @@ impl Library {
             expires_unix,
         };
         all.insert(id, claim.clone());
-        self.write_sidecar(p, CLAIMS, write_map("claims", &all)?)?;
+        self.write_sidecar(p, CLAIMS, write_map("claims", &all)?, vec![id])?;
         Ok(claim)
     }
     /// Release `owner`'s claim on a node (any owner with `force`).
@@ -228,8 +227,9 @@ impl Library {
             }
             _ => {}
         }
+        // Releasing is cleanup, open to every owner even of a pooled record.
         all.remove(&id);
-        self.write_sidecar(p, CLAIMS, write_map("claims", &all)?)?;
+        self.write_sidecar(p, CLAIMS, write_map("claims", &all)?, vec![])?;
         Ok(true)
     }
     /// The claims sidecar as this view sees it (including claims staged earlier in a merged

@@ -141,7 +141,7 @@ impl Library {
         if j.sidecars.iter().any(|s| s.path == pools::QUARANTINE) {
             self.pools_checked_for_migration(p)?;
         } else {
-            self.pools_for_write(p)?;
+            self.check_journal(p, &j)?;
         }
         let Some(staged) = self.staging.as_mut() else {
             let root = self.dir(p);
@@ -194,6 +194,7 @@ impl Library {
         }
         let root = self.dir(p);
         let j = catalog_batch::Journal {
+            changes: vec![],
             before: staged.before,
             after: self.projects[p].clone(),
             edits: staged

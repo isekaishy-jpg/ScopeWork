@@ -217,9 +217,6 @@ impl Library {
                     queue.extend(kids);
                 }
             }
-            let mut ordered: Vec<u64> = removed.iter().copied().collect();
-            ordered.sort_unstable();
-            self.check_pool(p, ordered, directed_by, "Removing")?;
         }
         // A surviving record that loses a prerequisite has its own prerequisites changed, which
         // the seal covers like any other change to them.
@@ -229,7 +226,8 @@ impl Library {
             .filter(|e| removed.contains(&e.prerequisite) && !removed.contains(&e.dependent))
             .map(|e| e.dependent)
             .collect();
-        self.check_pool(p, losing, directed_by, "Removing a prerequisite of")?;
+        let mut changes: Vec<u64> = removed.iter().copied().chain(losing).collect();
+        changes.sort_unstable();
         let archive = format!(
             "tools/workspaces/deleted-nodes/revision-{}",
             before.revision + 1
@@ -440,6 +438,7 @@ impl Library {
             }
         }
         let j = Journal {
+            changes,
             before,
             after,
             edits,
@@ -451,6 +450,8 @@ impl Library {
             dependencies,
             sidecars,
         };
+        // Previews are refused too, so nobody plans a removal they may not apply.
+        self.check_journal(p, &j)?;
         let bytes = journal_history::pending_bytes(&j)?;
         let token = hash(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?);
         let reopened: Vec<_> = j

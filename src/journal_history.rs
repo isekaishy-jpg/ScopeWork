@@ -218,6 +218,7 @@ pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {
         (other, current.clone())
     };
     Ok(Journal {
+        changes: vec![],
         before,
         after,
         edits: serde_json::from_value(value["edits"].clone()).map_err(|e| e.to_string())?,

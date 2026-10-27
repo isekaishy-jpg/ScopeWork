@@ -132,7 +132,7 @@ impl Library {
             }
             file.repository = repository.into();
         }
-        self.write_proofs(p, file)
+        self.write_proofs(p, file, vec![])
     }
     /// Records (`Some`) or clears (`None`) proofs in one transaction; any invalid entry refuses
     /// the whole request.
@@ -144,12 +144,6 @@ impl Library {
         if entries.is_empty() {
             return Err("The proof request is empty.".into());
         }
-        self.check_pool(
-            p,
-            entries.iter().map(|(id, _)| *id),
-            None,
-            "Recording a proof of",
-        )?;
         let mut file = self.proofs(p)?;
         let mut seen = HashSet::new();
         let at_revision = self.projects[p].revision + 1;
@@ -196,9 +190,10 @@ impl Library {
                 file.proofs.insert(*id, proof);
             }
         }
-        self.write_proofs(p, file)
+        let changes = entries.iter().map(|(id, _)| *id).collect();
+        self.write_proofs(p, file, changes)
     }
-    fn write_proofs(&mut self, p: usize, file: ProofFile) -> Result<()> {
+    fn write_proofs(&mut self, p: usize, file: ProofFile, changes: Vec<u64>) -> Result<()> {
         let before_text = match self.text_opt(p, PROOFS)? {
             Some(text) => text,
             None => {
@@ -215,6 +210,7 @@ impl Library {
         let mut after = before.clone();
         after.revision += 1;
         let journal = Journal {
+            changes,
             before,
             after,
             edits: vec![],

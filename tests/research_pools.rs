@@ -310,10 +310,10 @@ fn joining_needs_a_registered_agent() {
     assert_eq!(joined["members"], json!(["astra", "kestrel"]));
     f.save("kestrel", "3");
     f.ok("kestrel", &["pool", "leave", "fixture", "voice"]);
-    let args = f.save_args("kestrel", "3");
+    // A real change is refused; re-saving the same text changes nothing, so it commits nothing.
     f.refused(
         "kestrel",
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        &["node", "flag", "fixture", "3", "--reason", "check"],
         "pooled",
     );
 }
