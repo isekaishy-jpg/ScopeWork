@@ -304,3 +304,37 @@ fn proof_batches_are_all_or_nothing_and_removal_drops_proofs() {
     assert!(stored["proofs"].get("3").is_none());
     assert!(stored["proofs"].get("4").is_some());
 }
+
+#[test]
+fn a_damaged_proofs_file_keeps_reads_and_refuses_proof_writes_and_function_completion() {
+    let f = Fixture::new();
+    f.save(3);
+    f.complete(3);
+    fs::write(f.home.join("projects/fixture/proofs.json"), "{not json").unwrap();
+    // Reads answer as if there were no proofs.
+    assert_eq!(f.show(3)["effective_status"], "Complete");
+    assert!(f.show(3)["proof"].is_null());
+    f.ok(&["status", "fixture", "--summary"]);
+    f.ok(&["node", "unproven", "fixture"]);
+    f.ok(&["project", "show", "fixture"]);
+    // Proof writes and function completion fail closed; parents are unaffected.
+    f.fails(
+        &[
+            "node",
+            "proof",
+            "fixture",
+            "4",
+            "--recreation",
+            "a.rs",
+            "--test",
+            "t.rs",
+        ],
+        "proofs_unreadable",
+    );
+    f.save(4);
+    let args = f.complete_args(4);
+    f.fails(
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        "proofs_unreadable",
+    );
+}

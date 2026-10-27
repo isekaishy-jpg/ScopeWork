@@ -1370,7 +1370,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             }
             ProjectCommand::Show { project: id } => {
                 let p = project(lib, &id)?;
-                let proofs = lib.proofs(p)?;
+                let proofs = lib.proofs(p);
                 let mut out = json!(&lib.projects[p]);
                 out["proof"] = json!({"required":proofs.required,"repository":proofs.repository,"recorded":proofs.proofs.len()});
                 Ok(out)
@@ -1382,7 +1382,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             } => {
                 let p = project(lib, &id)?;
                 lib.set_proof_policy(p, required, repository.as_deref())?;
-                let proofs = lib.proofs(p)?;
+                let proofs = lib.proofs(p);
                 Ok(
                     json!({"project":id,"required":proofs.required,"repository":proofs.repository,"revision":lib.projects[p].revision}),
                 )
@@ -1607,7 +1607,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 complete,
             } => {
                 let p = project(lib, &id)?;
-                let proofs = lib.proofs(p)?;
+                let proofs = lib.proofs(p);
                 let states = lib.effective_all(p);
                 let rows: Vec<_> = lib.projects[p]
                     .nodes
@@ -1701,7 +1701,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             let queue = lib.review_queue(p, &states)?;
             let pooled = lib.pools(p).effective(&lib.projects[p]);
             let closed = lib.closed_to_caller(p);
-            let proofs = lib.proofs(p)?;
+            let proofs = lib.proofs(p);
             let mut counts: std::collections::BTreeMap<
                 String,
                 std::collections::BTreeMap<String, usize>,

@@ -227,7 +227,7 @@ impl Library {
         let structural_token = prerequisites(project, &index, id)?;
         let effective_status =
             index.states_with(&self.dir(p), [id], &|| self.hash_overrides())[&id];
-        let proofs = self.proofs(p)?;
+        let proofs = self.proofs(p);
         let (pool, may_write) = self.pool_access(p, id);
         let unproven = proofs.required && self.unproven(p, id, &proofs);
         let proof = proofs.proofs.get(&id).cloned();

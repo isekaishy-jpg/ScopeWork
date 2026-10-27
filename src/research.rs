@@ -1390,7 +1390,7 @@ impl Library {
         if self.review_flags(p)?.contains_key(&id) {
             blockers.push("Flagged for review: clear the flag first.".to_string());
         }
-        let proofs = self.proofs(p)?;
+        let proofs = self.proofs(p);
         if proofs.required && self.unproven(p, id, &proofs) {
             blockers.push(
                 "No proof: this project requires the recreation and its tests (research node proof)."

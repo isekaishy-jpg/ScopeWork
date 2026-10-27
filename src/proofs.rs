@@ -84,11 +84,20 @@ fn check_path(repository: &str, label: &str, path: &str) -> Result<String> {
 
 impl Library {
     /// The project's proof requirement and recorded proofs (none when the file is missing).
-    pub fn proofs(&self, p: usize) -> Result<ProofFile> {
-        match self.text_opt(p, PROOFS)? {
-            Some(text) => parse(&text),
-            None => parse(""),
-        }
+    /// Reads treat a file that cannot be read as holding no proofs and no requirement, so the
+    /// project stays readable; proof writes and completion read it with `proofs_for_write`.
+    pub fn proofs(&self, p: usize) -> ProofFile {
+        self.proofs_for_write(p).unwrap_or_default()
+    }
+    /// The proofs for a write or a completion: a file that cannot be read refuses it, since the
+    /// requirement it holds is unknown.
+    pub(super) fn proofs_for_write(&self, p: usize) -> Result<ProofFile> {
+        let text = self.text_opt(p, PROOFS)?;
+        parse(text.as_deref().unwrap_or("")).map_err(|e| {
+            format!(
+                "proofs_unreadable: {PROOFS} cannot be read ({e}). Proof writes and function completion are refused until it is repaired; reads treat it as holding no proofs."
+            )
+        })
     }
     /// Whether `id` is a function without a proof (whatever the requirement).
     pub fn unproven(&self, p: usize, id: u64, file: &ProofFile) -> bool {
@@ -100,7 +109,15 @@ impl Library {
     }
     /// Refuses completing `id` when the project requires a proof and it has none.
     pub(super) fn check_proof(&self, p: usize, id: u64) -> Result<()> {
-        let file = self.proofs(p)?;
+        // Parents take no proof, so a damaged proofs file never blocks them.
+        if !self.projects[p]
+            .nodes
+            .iter()
+            .any(|n| n.id == id && n.kind == Kind::Function)
+        {
+            return Ok(());
+        }
+        let file = self.proofs_for_write(p)?;
         if file.required && self.unproven(p, id, &file) {
             return Err(format!(
                 "proof_required: this project requires a proof before a function is completed. Record its recreation and tests with research node proof {} {id} --recreation PATH --test PATH.",
@@ -120,7 +137,7 @@ impl Library {
         if !self.writable(p) {
             return self.write_project(p, |l, p| l.set_proof_policy(p, required, repository));
         }
-        let mut file = self.proofs(p)?;
+        let mut file = self.proofs_for_write(p)?;
         file.required = required;
         if let Some(repository) = repository.map(str::trim) {
             // The coordinator runs in another folder, so a relative path would mean something else.
@@ -144,7 +161,7 @@ impl Library {
         if entries.is_empty() {
             return Err("The proof request is empty.".into());
         }
-        let mut file = self.proofs(p)?;
+        let mut file = self.proofs_for_write(p)?;
         let mut seen = HashSet::new();
         let at_revision = self.projects[p].revision + 1;
         let by = caller();
