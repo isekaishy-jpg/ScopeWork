@@ -635,6 +635,22 @@ fn publish(
         {
             return Err("structural_conflict: import reservation no longer matches".into());
         }
+        // Pooling a chunk changes no structure, so a pool added since the reservation is
+        // checked here, with the direction the request carried.
+        let request: Batch = serde_json::from_slice(
+            &fs::read(folder.join("request.json")).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let created: HashSet<u64> = new_nodes.iter().map(|n| n.id).collect();
+        lib.check_pool(
+            0,
+            new_nodes
+                .iter()
+                .filter_map(|n| n.parent)
+                .filter(|parent| !created.contains(parent)),
+            request.directed_by.as_deref(),
+            "Creating a record in",
+        )?;
         let before_hash =
             digest(&fs::read(project_root.join("project.json")).map_err(|e| e.to_string())?);
         let mut after = before.clone();

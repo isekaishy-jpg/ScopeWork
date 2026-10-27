@@ -577,3 +577,67 @@ fn a_function_covered_by_its_chunk_cannot_be_moved_to_another_pool_by_a_non_memb
     );
     assert_eq!(f.show("sol", "3")["pool"]["pool"], "narrow");
 }
+
+#[test]
+fn an_import_into_a_chunk_pooled_after_its_reservation_needs_a_member_or_direction() {
+    let f = Fixture::new();
+    let start = |directed: Option<&str>, rva: u64| -> String {
+        let p = f.ok("sol", &["project", "show", "fixture"]);
+        let mut batch = json!({"schema":1,"binary":p["binary"],"expect_revision":p["revision"],
+            "create":[{"parent":4,"name":format!("Imported {rva:x}"),"rva":rva}]});
+        if let Some(d) = directed {
+            batch["directed_by"] = json!(d);
+        }
+        let file = f.home.join(format!("import-{rva:x}.json"));
+        fs::write(&file, batch.to_string()).unwrap();
+        let job = f.ok(
+            "sol",
+            &[
+                "import",
+                "start",
+                "fixture",
+                "--file",
+                file.to_str().unwrap(),
+                "--paused",
+            ],
+        );
+        job["id"].as_str().unwrap().to_string()
+    };
+    let job = start(None, 0x9000);
+    // The chunk is pooled after the reservation; pooling changes no structure.
+    f.ok(
+        "lead",
+        &[
+            "pool",
+            "add",
+            "fixture",
+            "late",
+            "4",
+            "--origin",
+            "human",
+            "--reason",
+            "Pooled late",
+        ],
+    );
+    let o = f.run_as("off", "sol", &["import", "resume", "fixture", &job]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(text.contains("pooled"), "{text}");
+    let created = |rva: &str| {
+        f.ok("lead", &["project", "show", "fixture"])["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["rva"] == u64::from_str_radix(rva, 16).unwrap())
+    };
+    assert!(!created("9000"), "nothing was published");
+    f.ok("sol", &["import", "cancel", "fixture", &job]);
+    // With the human's direction the same import publishes.
+    let job = start(Some("The user asked for these records"), 0xA000);
+    let done = f.ok("sol", &["import", "resume", "fixture", &job]);
+    assert_eq!(done["state"], "Committed", "{done}");
+    assert!(created("a000"));
+}
