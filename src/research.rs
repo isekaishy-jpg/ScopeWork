@@ -600,27 +600,48 @@ pub fn lock_status_probing(projects: &Path, id: &str, readers: bool) -> Result<s
     }
     let mut status = lock_entry(projects, id, readers);
     // Tool resource locks taken by `job run` without a coordinator.
-    let prefix = format!("{id}.res-");
-    let mut resources = serde_json::Map::new();
+    let [resources] = resource_lock_status(projects, [id], readers);
+    status["resources"] = resources.into();
+    Ok(status)
+}
+/// Who holds and who waits for a project's own lock, without its resource locks (callers that
+/// also want those scan them with `resource_lock_status`).
+pub fn project_lock_entry(projects: &Path, id: &str, readers: bool) -> Result<serde_json::Value> {
+    if !valid_id(id) && id != SHARED {
+        return Err("Invalid project ID".into());
+    }
+    Ok(lock_entry(projects, id, readers))
+}
+/// Resource locks taken by `job run` without a coordinator, for each of `scopes` (project IDs
+/// or `SHARED`), from one scan of the lock folder.
+pub fn resource_lock_status<const N: usize>(
+    projects: &Path,
+    scopes: [&str; N],
+    readers: bool,
+) -> [serde_json::Map<String, serde_json::Value>; N] {
+    let prefixes = scopes.map(|scope| format!("{scope}.res-"));
+    let mut out = std::array::from_fn(|_| serde_json::Map::new());
     for entry in fs::read_dir(projects.join(".project-locks"))
         .into_iter()
         .flatten()
         .flatten()
     {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(resource) = name
-            .strip_prefix(&prefix)
-            .and_then(|rest| rest.strip_suffix(".lock"))
-        {
-            let mut entry = lock_entry(projects, &resource_lock_id(id, resource), readers);
-            if let Some(object) = entry.as_object_mut() {
-                object.remove("project");
+        for (i, prefix) in prefixes.iter().enumerate() {
+            if let Some(resource) = name
+                .strip_prefix(prefix.as_str())
+                .and_then(|rest| rest.strip_suffix(".lock"))
+            {
+                let mut entry =
+                    lock_entry(projects, &resource_lock_id(scopes[i], resource), readers);
+                if let Some(object) = entry.as_object_mut() {
+                    object.remove("project");
+                }
+                out[i].insert(resource.to_string(), entry);
             }
-            resources.insert(resource.to_string(), entry);
         }
     }
-    status["resources"] = resources.into();
-    Ok(status)
+    out
 }
 /// The lock name of a project's tool resource.
 /// The lock scope of home-wide shared resources (`job run --shared`). Project IDs never begin

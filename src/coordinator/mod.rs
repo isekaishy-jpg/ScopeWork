@@ -569,7 +569,9 @@ impl Server {
             .lock()
             .map(|l| l.view())
             .unwrap_or_else(|_| json!({"held": [], "waiting": []}));
-        json!({"project": state.id, "source": "coordinator", "running": running, "waiting": waiting, "leases": leases, "shared_leases": self.shared_view()})
+        // Lock files held by jobs run with SCOPEWORK_COORDINATOR=off also exclude leased work.
+        let (resources, shared_resources) = resource_views(&self.root, &state.id);
+        json!({"project": state.id, "source": "coordinator", "running": running, "waiting": waiting, "leases": leases, "shared_leases": self.shared_view(), "resources": resources, "shared_resources": shared_resources})
     }
     /// Held and waiting leases on the home's shared resources.
     fn shared_view(&self) -> Value {
@@ -992,7 +994,7 @@ fn select(waiting: &mut Vec<Operation>, now: Instant) -> Vec<Operation> {
 
 /// The direct-mode queue view: who holds the project lock and who waits for it.
 pub fn lock_queue(root: &Path, project: &str) -> Result<Value, String> {
-    let locks = research::lock_status_probing(root, project, false)?;
+    let mut locks = research::project_lock_entry(root, project, false)?;
     // The holder file is advisory: a held lock without one is still a running writer.
     let running = match (locks["writer_active"].as_bool(), &locks["writer"]) {
         (Some(true), Value::Object(_)) => vec![locks["writer"].clone()],
@@ -1000,15 +1002,22 @@ pub fn lock_queue(root: &Path, project: &str) -> Result<Value, String> {
         _ => vec![],
     };
     // Resources held by `job run` without a coordinator: the project's own, and the research
-    // home's shared ones, which concern every project.
-    let shared = if project == research::SHARED {
-        Value::Null
-    } else {
-        research::lock_status_probing(root, research::SHARED, false)?["resources"].take()
-    };
+    // home's shared ones, which concern every project, from one scan.
+    let (own, shared) = resource_views(root, project);
+    locks["resources"] = own;
     Ok(
         json!({"project": project, "source": "locks", "running": running, "waiting": locks["waiting"], "resources": locks["resources"], "shared_resources": shared}),
     )
+}
+/// A project's resource lock holders and the shared ones (null for the shared scope itself).
+fn resource_views(root: &Path, project: &str) -> (Value, Value) {
+    let [own, shared] = research::resource_lock_status(root, [project, research::SHARED], false);
+    let shared = if project == research::SHARED {
+        Value::Null
+    } else {
+        shared.into()
+    };
+    (own.into(), shared)
 }
 
 /// Handshake, as exchanged at the start of every connection.

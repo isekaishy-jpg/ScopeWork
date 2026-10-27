@@ -779,3 +779,33 @@ fn shared_commands_run_in_the_callers_folder_and_need_a_resource() {
         .unwrap();
     assert!(!both.status.success());
 }
+
+#[test]
+fn the_coordinators_queue_shows_locks_held_by_direct_mode_jobs() {
+    let f = Fixture::new();
+    // Start the coordinator, then hold a shared resource from a direct-mode job.
+    let o = f
+        .command("required", &["queue", "fixture"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let mut direct = spawn(f.shared_job("off", "verify-worktree", 8_000, &f.home, None));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let o = f
+            .command("required", &["queue", "fixture"])
+            .output()
+            .unwrap();
+        let queue: Value = serde_json::from_slice(&o.stdout).unwrap_or(Value::Null);
+        if queue["shared_resources"]["verify-worktree"]["writer_active"] == true {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the held lock never showed: {queue}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    direct.kill().unwrap();
+    let _ = direct.wait();
+}
