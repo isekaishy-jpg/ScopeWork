@@ -531,6 +531,10 @@ impl Library {
         let legacy = legacy_records(&legacy_text).map_err(|e| {
             format!("{QUARANTINE} cannot be read ({e}); repair it before migrating.")
         })?;
+        // Nothing left to migrate (as after an earlier migration): no transaction at all.
+        if legacy.is_empty() {
+            return Ok(vec![]);
+        }
         let mut file = self.pools_checked(p).map_err(|e| unreadable(&e))?;
         let revision = self.projects[p].revision + 1;
         let mut moved = vec![];

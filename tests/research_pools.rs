@@ -394,6 +394,14 @@ fn quarantine_migrates_into_a_pool_and_blocks_writes_until_then() {
     );
     let migrated = f.ok("lead", &["pool", "migrate-quarantine", "fixture"]);
     assert_eq!(migrated["migrated"], json!([4]));
+    // A second migration finds nothing to move and commits nothing.
+    let revision = f.ok("lead", &["project", "revision", "fixture"])["revision"].clone();
+    let again = f.ok("lead", &["pool", "migrate-quarantine", "fixture"]);
+    assert_eq!(again["migrated"], json!([]));
+    assert_eq!(
+        f.ok("lead", &["project", "revision", "fixture"])["revision"],
+        revision
+    );
     assert_eq!(fs::read_to_string(dir.join("quarantine.json")).unwrap(), "");
     let shown = f.show("sol", "5");
     assert_eq!(shown["pool"]["pool"], "quarantine");
