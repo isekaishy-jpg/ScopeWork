@@ -405,14 +405,20 @@ pub(crate) enum PoolCommand {
         origin: String,
         #[arg(long)]
         reason: String,
+        /// The human's instruction, required to move or change a record of a pool the caller
+        /// is not a member of.
+        #[arg(long)]
+        directed_by: Option<String>,
     },
-    /// Take records out of their pool.
+    /// Take records out of their pool (for its members, or with --directed-by).
     Remove {
         project: String,
         #[arg(required = true)]
         nodes: Vec<u64>,
         #[arg(long)]
         reason: String,
+        #[arg(long)]
+        directed_by: Option<String>,
     },
     /// Add a registered agent (default: the caller) to a pool's members.
     Join {
@@ -1763,15 +1769,29 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                     nodes,
                     origin,
                     reason,
+                    directed_by,
                     ..
                 } => {
-                    let changed = lib.pool_records(p, Some(&pool), &nodes, &origin, &reason)?;
+                    let changed = lib.pool_records(
+                        p,
+                        Some(&pool),
+                        &nodes,
+                        &origin,
+                        &reason,
+                        directed_by.as_deref(),
+                    )?;
                     Ok(
                         json!({"project":id,"pool":pool,"added":changed,"revision":lib.projects[p].revision}),
                     )
                 }
-                PoolCommand::Remove { nodes, reason, .. } => {
-                    let changed = lib.pool_records(p, None, &nodes, "", &reason)?;
+                PoolCommand::Remove {
+                    nodes,
+                    reason,
+                    directed_by,
+                    ..
+                } => {
+                    let changed =
+                        lib.pool_records(p, None, &nodes, "", &reason, directed_by.as_deref())?;
                     Ok(json!({"project":id,"removed":changed,"revision":lib.projects[p].revision}))
                 }
                 PoolCommand::Join { pool, agent, .. } | PoolCommand::Leave { pool, agent, .. } => {

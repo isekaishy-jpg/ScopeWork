@@ -148,11 +148,11 @@ research pool add example voice 152 --origin safety-stop --reason "Voice chat st
 research pool join example voice --agent astra   # the human directs who joins
 research pool leave example voice --agent astra
 research pool list example
-research pool remove example 152 --reason "The human reopened it to everyone"
+research pool remove example 152 --reason "The human reopened it to everyone"   # members, or --directed-by
 research pool migrate-quarantine example
 ```
 
-A research pool holds chunks and functions that only its members may change. An agent that hits a safety stop on a record puts it in a pool (`--origin safety-stop`) and leaves it; the human can pool records too (`--origin human`, or **Research pool** in the record panel). A pooled chunk covers its functions.
+A research pool holds chunks and functions that only its members may change. An agent that hits a safety stop on a record puts it in a pool (`--origin safety-stop`) and leaves it; the human can pool records too (`--origin human`, or **Research pool** in the record panel). A pooled chunk covers its functions. Pooling a record that is in no pool is open to everyone; taking a record out of its pool, moving it to another pool or changing its entry (`pool add` again with a new reason or origin) is a change to a pooled record, for members or `--directed-by`. The log records a move as `remove` and `add`, and a changed entry as `update`.
 
 - **Members work it.** Report saves (including batches and evidence-only saves), completion, reopening, status resets, review flags, claims, proofs and changes to its own prerequisites need the caller to be a member of the record's pool. So do creating records in it, moving records into or out of it, renaming, reordering or changing its membership, and removing or pruning it. Anyone else gets `pooled`, naming the pool. `--directed-by` with the human's instruction overrides, and history records it. The dashboard acts for the human and is never refused.
 - **Everyone reads and builds on it.** Reading a pooled record and naming it as a prerequisite of other work are free. Mechanical rewrites (a rename's citations, link repairs) still apply.

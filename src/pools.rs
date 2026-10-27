@@ -299,7 +299,9 @@ impl Library {
         Ok(())
     }
     /// Adds records to `pool` (created when new), or takes them out (`pool` None). Returns the
-    /// records that changed.
+    /// records that changed. Pooling a record that is in no pool is open to everyone, so an
+    /// agent that hits a safety stop can always pool it; taking a record out of its pool,
+    /// moving it to another or changing its entry is a change to a pooled record.
     pub fn pool_records(
         &mut self,
         p: usize,
@@ -307,11 +309,13 @@ impl Library {
         ids: &[u64],
         origin: &str,
         reason: &str,
+        directed_by: Option<&str>,
     ) -> Result<Vec<u64>> {
         if !self.writable(p) {
             let ids = ids.to_vec();
-            return self
-                .write_project(p, move |l, p| l.pool_records(p, pool, &ids, origin, reason));
+            return self.write_project(p, move |l, p| {
+                l.pool_records(p, pool, &ids, origin, reason, directed_by)
+            });
         }
         let reason = reason.trim();
         if reason.is_empty() {
@@ -325,6 +329,15 @@ impl Library {
             return Err("A pooled record's origin is safety-stop or human.".into());
         }
         let mut file = self.pools_for_write(p)?;
+        // Records already in a pool change only through its members (or the human).
+        self.check_pool(
+            p,
+            ids.iter()
+                .copied()
+                .filter(|id| file.records.contains_key(id)),
+            directed_by,
+            "Changing the pool of",
+        )?;
         let revision = self.projects[p].revision + 1;
         let by = caller();
         let mut changed = vec![];
@@ -341,12 +354,35 @@ impl Library {
             }
             match &pool {
                 Some(pool) => {
-                    if file
-                        .records
-                        .get(id)
-                        .is_some_and(|r| &r.pool == pool && r.origin == origin)
-                    {
-                        continue;
+                    let log = |event: &str, pool: &str| LogEntry {
+                        event: event.into(),
+                        pool: pool.into(),
+                        node: Some(*id),
+                        agent: String::new(),
+                        reason: reason.into(),
+                        by: by.clone(),
+                        at_revision: revision,
+                    };
+                    match file.records.get_mut(id) {
+                        Some(r) if &r.pool == pool => {
+                            if r.origin == origin && r.reason == reason {
+                                continue;
+                            }
+                            // Same pool, new origin or reason: the entry is updated in place.
+                            r.origin = origin.into();
+                            r.reason = reason.into();
+                            r.by = by.clone();
+                            r.at_revision = revision;
+                            file.log.push(log("update", pool));
+                            changed.push(*id);
+                            continue;
+                        }
+                        // Another pool: the move leaves it first, so history shows both.
+                        Some(r) => {
+                            let old = r.pool.clone();
+                            file.log.push(log("remove", &old));
+                        }
+                        None => {}
                     }
                     file.pools.entry(pool.clone()).or_insert_with(|| Pool {
                         reason: reason.into(),
@@ -362,15 +398,7 @@ impl Library {
                             at_revision: revision,
                         },
                     );
-                    file.log.push(LogEntry {
-                        event: "add".into(),
-                        pool: pool.clone(),
-                        node: Some(*id),
-                        agent: String::new(),
-                        reason: reason.into(),
-                        by: by.clone(),
-                        at_revision: revision,
-                    });
+                    file.log.push(log("add", pool));
                 }
                 None => {
                     let Some(record) = file.records.remove(id) else {

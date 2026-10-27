@@ -447,3 +447,104 @@ fn pools_check_each_callers_name_through_the_coordinator() {
     );
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 }
+
+#[test]
+fn only_members_take_records_out_of_or_move_them_between_pools() {
+    let f = Fixture::new();
+    f.refused(
+        "sol",
+        &["pool", "remove", "fixture", "2", "--reason", "mine now"],
+        "pooled",
+    );
+    f.refused(
+        "sol",
+        &[
+            "pool", "add", "fixture", "mine", "2", "--origin", "human", "--reason", "mine",
+        ],
+        "pooled",
+    );
+    // Pooling a record that is in no pool stays open to everyone.
+    f.ok(
+        "sol",
+        &[
+            "pool",
+            "add",
+            "fixture",
+            "network",
+            "4",
+            "--origin",
+            "safety-stop",
+            "--reason",
+            "stop",
+        ],
+    );
+    // A member updates the reason in place, then moves the chunk to another pool.
+    f.ok(
+        "astra",
+        &[
+            "pool",
+            "add",
+            "fixture",
+            "voice",
+            "2",
+            "--origin",
+            "safety-stop",
+            "--reason",
+            "Codec code",
+        ],
+    );
+    f.ok(
+        "astra",
+        &[
+            "pool",
+            "add",
+            "fixture",
+            "codec",
+            "2",
+            "--origin",
+            "human",
+            "--reason",
+            "Split out",
+        ],
+    );
+    let events: Vec<(String, String)> = serde_json::from_slice::<Value>(
+        &fs::read(f.home.join("projects/fixture/pools.json")).unwrap(),
+    )
+    .unwrap()["log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["node"] == 2)
+        .map(|e| {
+            (
+                e["event"].as_str().unwrap().to_string(),
+                e["pool"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, String)> = [
+        ("add", "voice"),
+        ("update", "voice"),
+        ("remove", "voice"),
+        ("add", "codec"),
+    ]
+    .iter()
+    .map(|(a, b)| (a.to_string(), b.to_string()))
+    .collect();
+    assert_eq!(events, expected);
+    // The human's direction overrides.
+    f.ok(
+        "sol",
+        &[
+            "pool",
+            "remove",
+            "fixture",
+            "2",
+            "--reason",
+            "Reopened",
+            "--directed-by",
+            "The user reopened voice research",
+        ],
+    );
+    assert!(f.show("sol", "3")["pool"].is_null());
+}

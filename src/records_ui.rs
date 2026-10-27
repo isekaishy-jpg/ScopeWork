@@ -548,7 +548,7 @@ impl ResearchUi {
                         if classic::button(ui, ready, "Take out of pool").clicked() {
                             let reason = std::mem::take(&mut self.pool_reason);
                             self.mutate(move |lib, p, id| {
-                                lib.pool_records(p, None, &[id], "", &reason)?;
+                                lib.pool_records(p, None, &[id], "", &reason, None)?;
                                 Ok(id)
                             });
                         }
@@ -569,7 +569,7 @@ impl ResearchUi {
                             let pool = self.pool_name.trim().to_string();
                             let reason = std::mem::take(&mut self.pool_reason);
                             self.mutate(move |lib, p, id| {
-                                lib.pool_records(p, Some(&pool), &[id], "human", &reason)?;
+                                lib.pool_records(p, Some(&pool), &[id], "human", &reason, None)?;
                                 Ok(id)
                             });
                         }
