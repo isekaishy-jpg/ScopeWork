@@ -14,7 +14,7 @@ pub(super) struct Browser {
     focus: bool,
     flagged_only: bool,
     queued_only: bool,
-    quarantined_only: bool,
+    pooled_only: bool,
     visible: Vec<(u64, usize)>,
     needs_layout: bool,
     selection: u64,
@@ -32,8 +32,8 @@ pub(super) struct BrowserData {
     pub flags: HashMap<u64, String>,
     /// Records reopened by structural changes and not complete again, with the latest reason.
     pub queued: HashMap<u64, String>,
-    /// Quarantined records (recorded or through their chunk) with a short description.
-    pub quarantined: HashMap<u64, String>,
+    /// Pooled records (recorded or through their chunk) with a short description.
+    pub pooled: HashMap<u64, String>,
 }
 struct Row {
     id: u64,
@@ -104,8 +104,8 @@ impl Browser {
                     format!("Review queue ({})", self.data.queued.len()),
                 ),
                 (
-                    &mut self.quarantined_only,
-                    format!("Quarantined ({})", self.data.quarantined.len()),
+                    &mut self.pooled_only,
+                    format!("In a pool ({})", self.data.pooled.len()),
                 ),
             ] {
                 if crate::classic::check(ui, true, value, &text).changed() {
@@ -140,10 +140,10 @@ impl Browser {
             let focus = self.focus;
             let flagged = self.flagged_only;
             let queued = self.queued_only;
-            let quarantined = self.quarantined_only;
+            let pooled = self.pooled_only;
             let query = self.query.trim().to_lowercase();
             match background::spawn(solworker::SWExecutionClass::High, move || {
-                data.visible(&expanded, focus, (flagged, queued, quarantined), &query)
+                data.visible(&expanded, focus, (flagged, queued, pooled), &query)
             }) {
                 Ok(task) => {
                     self.pending = Some((self.generation, task));
@@ -227,7 +227,7 @@ impl BrowserData {
         project: &Project,
         flags: &std::collections::BTreeMap<u64, ReviewFlag>,
         queued: &HashMap<u64, String>,
-        quarantined: &HashMap<u64, String>,
+        pooled: &HashMap<u64, String>,
     ) -> Self {
         let index = catalog_index::Index::new(project);
         let mut data = Self {
@@ -248,7 +248,7 @@ impl BrowserData {
             .map(|(id, f)| (*id, f.reason.clone()))
             .collect();
         data.queued = queued.clone();
-        data.quarantined = quarantined.clone();
+        data.pooled = pooled.clone();
         data.children = index.children;
         data.rows = project
             .nodes
@@ -258,7 +258,7 @@ impl BrowserData {
                 let required = index.required.contains(&n.id);
                 let label = format!(
                     "{}{}{}{}: {}{}{}",
-                    if quarantined.contains_key(&n.id) {
+                    if pooled.contains_key(&n.id) {
                         "⊘ "
                     } else {
                         ""
@@ -297,7 +297,7 @@ impl BrowserData {
 
         data
     }
-    /// `only` = (flagged, queued, quarantined) filters.
+    /// `only` = (flagged, queued, pooled) filters.
     fn visible(
         &self,
         expanded: &HashSet<u64>,
@@ -305,9 +305,9 @@ impl BrowserData {
         only: (bool, bool, bool),
         query: &str,
     ) -> Vec<(u64, usize)> {
-        let (flagged, queued, quarantined) = only;
+        let (flagged, queued, pooled) = only;
         let mut visible = vec![];
-        if flagged || queued || quarantined {
+        if flagged || queued || pooled {
             // Filtered records are listed flat so they can be found regardless of expansion.
             visible.extend(
                 self.rows
@@ -315,7 +315,7 @@ impl BrowserData {
                     .filter(|r| {
                         (!flagged || self.flags.contains_key(&r.id))
                             && (!queued || self.queued.contains_key(&r.id))
-                            && (!quarantined || self.quarantined.contains_key(&r.id))
+                            && (!pooled || self.pooled.contains_key(&r.id))
                             && (!focus || r.required)
                             && r.search.contains(query)
                     })
@@ -402,9 +402,9 @@ mod tests {
         )]
         .into_iter()
         .collect();
-        let quarantined: HashMap<u64, String> =
+        let pooled: HashMap<u64, String> =
             [(2, "human: voice code".to_string())].into_iter().collect();
-        let data = BrowserData::new(&project, &flags, &queued, &quarantined);
+        let data = BrowserData::new(&project, &flags, &queued, &pooled);
         let expanded = HashSet::new();
         let ids = |rows: Vec<(u64, usize)>| rows.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
         assert_eq!(

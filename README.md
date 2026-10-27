@@ -52,7 +52,7 @@ App               what the project set out to understand
 - **Research records window.** Search the whole binary by name or address; write reports and evidence; flag records for review; organise the hierarchy; mark work complete when its requirements are met.
 - **Whole-binary inventories.** Enrol tens of thousands of functions with resumable batch imports and keep context-only code in the inventory without making it required work.
 - **Implementation tracker.** Record a recreation alongside the research: a free-form tree of its crates, modules or files, the researched functions placed where they are implemented, implementation-only items and their completion. The dashboard switches between **Research** and **Implementation** for each project.
-- **Quarantine.** Take a chunk or function out of research, at the human's request or after a safety stop. It counts as complete, never shows up as open work, and is sealed against structural changes unless the human directs them.
+- **Research pools.** After a safety stop, or at the human's request, put a chunk or function in a pool. Only the pool's registered members may change it; every other agent may read it and build on it. It stays open work until a member researches it.
 - **Renames that follow through.** Renaming a record rewrites its citations in every report, without reopening the completed work they appear in.
 - **Built for several agents at once:**
   - A coordinator answers reads without waiting for writes, and merges queued saves into one commit.

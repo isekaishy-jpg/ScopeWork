@@ -254,7 +254,7 @@ pub fn entry_line(entry: &Value) -> String {
             (Some(job), None) => parts.push(format!("import {job} released")),
             (None, None) => {}
         }
-        // Sidecar-only changes (flags, claims, quarantine, the review queue) name their files.
+        // Sidecar-only changes (flags, claims, pools, proofs, the review queue) name their files.
         let sidecars: Vec<&str> = entry["sidecars"]
             .as_array()
             .into_iter()
@@ -510,7 +510,7 @@ fn summarize(revision: u64, receipt: &Value, filter: &HistoryFilter) -> Option<V
     if !project.is_empty() {
         entry["project"] = Value::Object(project);
     }
-    // A change to quarantined records carries the human's instruction that allowed it.
+    // A change to pooled records may carry the human's instruction that allowed it.
     if let Some(directed) = receipt["directed_by"].as_str() {
         entry["directed_by"] = directed.into();
     }

@@ -56,6 +56,13 @@ pub(crate) enum Command {
     /// Group related projects into one dashboard tab (presentation only; no project changes).
     #[command(subcommand)]
     Group(GroupCommand),
+    /// Register the names agents work under, so they can join research pools.
+    #[command(subcommand)]
+    Agent(AgentCommand),
+    /// Restricted research pools: records only their members may change; anyone may read
+    /// them and build on them.
+    #[command(subcommand)]
+    Pool(PoolCommand),
     /// Track the recreation: a free-form tree of its organisation, the research functions placed
     /// where they are implemented, implementation-only items and their completion.
     #[command(subcommand)]
@@ -362,6 +369,66 @@ impl ImplCommand {
     }
 }
 #[derive(Subcommand)]
+pub(crate) enum AgentCommand {
+    /// Register an agent name (default: the caller, from SCOPEWORK_SUBMITTER).
+    Register { name: Option<String> },
+    /// List registered agents.
+    List,
+}
+#[derive(Subcommand)]
+pub(crate) enum PoolCommand {
+    /// Put chunks or functions in a pool (created when new).
+    Add {
+        project: String,
+        pool: String,
+        #[arg(required = true)]
+        nodes: Vec<u64>,
+        /// Why: an agent hit a safety stop on it, or the human put it there.
+        #[arg(long, value_parser = ["safety-stop", "human"])]
+        origin: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Take records out of their pool.
+    Remove {
+        project: String,
+        #[arg(required = true)]
+        nodes: Vec<u64>,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Add a registered agent (default: the caller) to a pool's members.
+    Join {
+        project: String,
+        pool: String,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Remove an agent (default: the caller) from a pool's members.
+    Leave {
+        project: String,
+        pool: String,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// List a project's pools with their members and records.
+    List { project: String },
+    /// Move 0.14 quarantine records into the pool `quarantine` and empty quarantine.json.
+    MigrateQuarantine { project: String },
+}
+impl PoolCommand {
+    fn project(&self) -> &str {
+        match self {
+            Self::Add { project, .. }
+            | Self::Remove { project, .. }
+            | Self::Join { project, .. }
+            | Self::Leave { project, .. }
+            | Self::List { project }
+            | Self::MigrateQuarantine { project } => project,
+        }
+    }
+}
+#[derive(Subcommand)]
 pub(crate) enum GroupCommand {
     /// Groups with their projects, then the ungrouped projects.
     List,
@@ -436,7 +503,7 @@ pub(crate) enum NodeCommand {
         file: PathBuf,
         #[arg(long)]
         expect: Option<String>,
-        /// The human's instruction, required to remove quarantined records (overrides the
+        /// The human's instruction, required to remove pooled records (overrides the
         /// request's `directed_by`).
         #[arg(long)]
         directed_by: Option<String>,
@@ -448,7 +515,7 @@ pub(crate) enum NodeCommand {
         file: PathBuf,
         #[arg(long)]
         expect: Option<String>,
-        /// The human's instruction; without it, quarantined records are never pruned.
+        /// The human's instruction; without it, pooled records the caller may not change are never pruned.
         #[arg(long)]
         directed_by: Option<String>,
     },
@@ -481,7 +548,7 @@ pub(crate) enum NodeCommand {
         project: String,
         #[arg(long)]
         file: PathBuf,
-        /// The human's instruction, required when the batch touches quarantined records
+        /// The human's instruction, required when the batch touches pooled records the caller is not a member for
         /// (overrides the request's `directed_by`).
         #[arg(long)]
         directed_by: Option<String>,
@@ -501,7 +568,7 @@ pub(crate) enum NodeCommand {
         name: String,
         #[arg(long)]
         rva: Option<String>,
-        /// The human's instruction, required to create a record in a quarantined chunk.
+        /// The human's instruction, required to create a record in a pooled chunk without being a member.
         #[arg(long)]
         directed_by: Option<String>,
     },
@@ -532,31 +599,6 @@ pub(crate) enum NodeCommand {
     Unflag { project: String, node: u64 },
     /// List flagged records.
     Flagged { project: String },
-    /// Quarantine a chunk or function: it counts as complete, never appears as open work and
-    /// is sealed against structural changes (a chunk covers its functions).
-    Quarantine {
-        project: String,
-        node: u64,
-        /// Why: the human asked for it, or Claude issued a cyber (safety) stop.
-        #[arg(long, value_parser = ["human", "cyber-stop"])]
-        origin: String,
-        #[arg(long)]
-        reason: String,
-        /// Who records it (an agent name or the human).
-        #[arg(long, default_value = "")]
-        by: String,
-    },
-    /// Lift a quarantine; the record returns to its own status.
-    Unquarantine {
-        project: String,
-        node: u64,
-        #[arg(long)]
-        reason: String,
-        #[arg(long, default_value = "")]
-        by: String,
-    },
-    /// List quarantined records.
-    Quarantined { project: String },
     /// Return In Progress records to Not Started from a JSON request (ids or all_in_progress).
     ResetStatus {
         project: String,
@@ -707,7 +749,7 @@ pub(crate) enum DepsCommand {
         #[arg(long)]
         expect: String,
         rvas: Vec<String>,
-        /// The human's instruction, required when the node or a prerequisite is quarantined.
+        /// The human's instruction, required when the caller is not a member of the pool covering the node.
         #[arg(long)]
         directed_by: Option<String>,
     },
@@ -772,9 +814,6 @@ fn project_of(command: &Command) -> Option<&str> {
             | NodeCommand::Flag { project, .. }
             | NodeCommand::Unflag { project, .. }
             | NodeCommand::Flagged { project, .. }
-            | NodeCommand::Quarantine { project, .. }
-            | NodeCommand::Unquarantine { project, .. }
-            | NodeCommand::Quarantined { project, .. }
             | NodeCommand::Complete { project, .. }
             | NodeCommand::Reopen { project, .. }
             | NodeCommand::Proof { project, .. }
@@ -794,6 +833,7 @@ fn project_of(command: &Command) -> Option<&str> {
         | Command::Journal { project, .. }
         | Command::Status { project, .. } => Some(project.as_str()),
         Command::Impl(command) => Some(command.project()),
+        Command::Pool(command) => Some(command.project()),
         Command::Wait { project, .. }
         | Command::Locks { project }
         | Command::Queue { project }
@@ -855,6 +895,9 @@ fn run(args: Args) -> Result<Value, String> {
     }
     if let Command::Group(command) = &args.command {
         return groups(&home, command);
+    }
+    if let Command::Agent(command) = &args.command {
+        return agents(&home, command);
     }
     if let Command::Import(command) = &args.command {
         return match command {
@@ -1092,7 +1135,6 @@ fn run(args: Args) -> Result<Value, String> {
                 | NodeCommand::ReadBatch { .. }
                 | NodeCommand::Resolve { .. }
                 | NodeCommand::Flagged { .. }
-                | NodeCommand::Quarantined { .. }
                 | NodeCommand::Unproven { .. }
                 | NodeCommand::Delete { expect: None, .. }
                 | NodeCommand::Prune { expect: None, .. }
@@ -1103,6 +1145,7 @@ fn run(args: Args) -> Result<Value, String> {
             | Command::Status { .. }
             | Command::Journal { compact: false, .. }
             | Command::Impl(ImplCommand::Show { .. } | ImplCommand::Where { .. })
+            | Command::Pool(PoolCommand::List { .. })
     );
     let creating = matches!(
         args.command,
@@ -1128,6 +1171,17 @@ fn run(args: Args) -> Result<Value, String> {
     execute(args.command, &mut lib)
 }
 /// The project IDs in `root`, sorted: folders with a catalog.
+/// `research agent`: the research home's registered agents, never a project.
+fn agents(home: &std::path::Path, command: &AgentCommand) -> Result<Value, String> {
+    match command {
+        AgentCommand::Register { name } => {
+            let name = name.clone().unwrap_or_else(crate::research::caller);
+            let added = crate::agents::register(home, &name)?;
+            Ok(json!({"agent": name.trim(), "registered": true, "new": added}))
+        }
+        AgentCommand::List => Ok(json!({"agents": crate::agents::list(home)?})),
+    }
+}
 /// `research group`: reads and writes the research home's settings, never a project.
 fn groups(home: &std::path::Path, command: &GroupCommand) -> Result<Value, String> {
     let existing = crate::settings::existing_projects(home);
@@ -1462,38 +1516,6 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 lib.set_review_flag(p, node, None)?;
                 node_view(lib, p, node)
             }
-            NodeCommand::Quarantine {
-                project: id,
-                node,
-                origin,
-                reason,
-                by,
-            } => {
-                let p = project(lib, &id)?;
-                lib.set_quarantine(p, node, Some(&origin), &reason, &by)?;
-                node_view(lib, p, node)
-            }
-            NodeCommand::Unquarantine {
-                project: id,
-                node,
-                reason,
-                by,
-            } => {
-                let p = project(lib, &id)?;
-                lib.set_quarantine(p, node, None, &reason, &by)?;
-                node_view(lib, p, node)
-            }
-            NodeCommand::Quarantined { project: id } => {
-                let p = project(lib, &id)?;
-                let records = lib.quarantines(p)?;
-                let covered = lib.quarantined(p);
-                let rows: Vec<_> = records.iter().map(|(n, q)| {
-                    let node = lib.projects[p].nodes.iter().find(|x| x.id == *n);
-                    let functions = lib.projects[p].nodes.iter().filter(|x| x.parent == Some(*n)).count();
-                    json!({"id":n,"name":node.map(|x| x.name.as_str()),"kind":node.map(|x| x.kind),"origin":q.origin,"reason":q.reason,"at_revision":q.at_revision,"by":q.by,"covered_children":functions})
-                }).collect();
-                Ok(json!({"project":id,"quarantined":rows,"records_covered":covered.len()}))
-            }
             NodeCommand::Proof {
                 project: id,
                 node,
@@ -1626,7 +1648,8 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             let claims = lib.claims(p)?;
             let covered = lib.claim_index(p, &claims);
             let queue = lib.review_queue(p, &states)?;
-            let quarantined = lib.quarantined(p);
+            let pooled = lib.pools(p).effective(&lib.projects[p]);
+            let closed = lib.closed_to_caller(p);
             let proofs = lib.proofs(p)?;
             let mut counts: std::collections::BTreeMap<
                 String,
@@ -1641,7 +1664,8 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 // Review needs written research: the record's own report has been started. A parent whose
                 // children are all complete but whose own report is empty is ready for synthesis instead.
                 let unproven = proofs.required&&n.kind==Kind::Function&&!proofs.proofs.contains_key(&n.id);
-                let unblocked = states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&!unproven&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty());
+                // A pooled record is open work only for its pool's members.
+                let unblocked = states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&!unproven&&!closed.contains(&n.id)&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty());
                 let ready_for_review = unblocked&&n.status!=Status::NotStarted;
                 let ready_for_synthesis = unblocked&&n.status==Status::NotStarted&&n.kind!=Kind::Function;
                 if ready && !ready_for_review { return None; }
@@ -1650,7 +1674,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 synthesis_count += usize::from(ready_for_synthesis);
                 *counts.entry(format!("{:?}", n.kind)).or_default().entry(format!("{:?}", states[&n.id])).or_default() += 1;
                 (!summary).then(|| json!({"id":n.id,"name":n.name,"kind":n.kind,"status":states[&n.id],"required_research":required.contains(&n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
-                    "ready_for_review":ready_for_review,"ready_for_synthesis":ready_for_synthesis,"review_flag":flags.get(&n.id),"quarantined":quarantined.contains(&n.id),
+                    "ready_for_review":ready_for_review,"ready_for_synthesis":ready_for_synthesis,"review_flag":flags.get(&n.id),"pool":pooled.get(&n.id),
                     "claimed_by":covered.get(&n.id).map(|(at, owner)| json!({"node": at, "owner": owner})),
                     "review_queue":queue.get(&n.id)}))
             }).collect();
@@ -1669,7 +1693,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 out["counts"] = json!(counts);
                 out["ready_for_review"] = json!(ready_count);
                 out["ready_for_synthesis"] = json!(synthesis_count);
-                out["quarantined"] = json!(quarantined.len());
+                out["pooled"] = json!(pooled.len());
                 out["unproven_complete"] = json!(
                     lib.projects[p]
                         .nodes
@@ -1683,6 +1707,61 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 out["records"] = json!(records);
             }
             Ok(out)
+        }
+        Command::Pool(command) => {
+            let p = project(lib, command.project())?;
+            let id = lib.projects[p].id.clone();
+            let join = matches!(command, PoolCommand::Join { .. });
+            match command {
+                PoolCommand::Add {
+                    pool,
+                    nodes,
+                    origin,
+                    reason,
+                    ..
+                } => {
+                    let changed = lib.pool_records(p, Some(&pool), &nodes, &origin, &reason)?;
+                    Ok(
+                        json!({"project":id,"pool":pool,"added":changed,"revision":lib.projects[p].revision}),
+                    )
+                }
+                PoolCommand::Remove { nodes, reason, .. } => {
+                    let changed = lib.pool_records(p, None, &nodes, "", &reason)?;
+                    Ok(json!({"project":id,"removed":changed,"revision":lib.projects[p].revision}))
+                }
+                PoolCommand::Join { pool, agent, .. } | PoolCommand::Leave { pool, agent, .. } => {
+                    let agent = agent.unwrap_or_else(crate::research::caller);
+                    let changed = lib.pool_membership(p, &pool, &agent, join)?;
+                    let members = lib
+                        .pools(p)
+                        .pools
+                        .get(pool.as_str())
+                        .map(|x| x.members.clone())
+                        .unwrap_or_default();
+                    Ok(
+                        json!({"project":id,"pool":pool,"agent":agent,"changed":changed,"members":members}),
+                    )
+                }
+                PoolCommand::List { .. } => {
+                    let file = lib.pools(p);
+                    let effective = file.effective(&lib.projects[p]);
+                    let pools: Vec<_> = file.pools.iter().map(|(name, pool)| {
+                        let records: Vec<_> = file.records.iter().filter(|(_, r)| &r.pool == name).map(|(n, r)| {
+                            let node = lib.projects[p].nodes.iter().find(|x| x.id == *n);
+                            json!({"id":n,"name":node.map(|x| x.name.as_str()),"kind":node.map(|x| x.kind),"origin":r.origin,"reason":r.reason,"by":r.by,"at_revision":r.at_revision})
+                        }).collect();
+                        let covered = effective.values().filter(|p| *p == name).count();
+                        json!({"pool":name,"reason":pool.reason,"members":pool.members,"records":records,"records_covered":covered})
+                    }).collect();
+                    Ok(json!({"project":id,"caller":crate::research::caller(),"pools":pools}))
+                }
+                PoolCommand::MigrateQuarantine { .. } => {
+                    let moved = lib.migrate_quarantine(p)?;
+                    Ok(
+                        json!({"project":id,"pool":"quarantine","migrated":moved,"revision":lib.projects[p].revision}),
+                    )
+                }
+            }
         }
         Command::Claim(command) => match command {
             ClaimCommand::Set {
@@ -1803,6 +1882,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
         | Command::Init
         | Command::Gui
         | Command::Group(_)
+        | Command::Agent(_)
         | Command::Criteria { .. }
         | Command::Locks { .. }
         | Command::Wait { .. }
@@ -2101,7 +2181,6 @@ pub(crate) fn route(command: &Command) -> Route {
             NodeCommand::ReadBatch { project, nodes } => read_route(project, Some(nodes.clone())),
             NodeCommand::List { project, .. }
             | NodeCommand::Flagged { project }
-            | NodeCommand::Quarantined { project }
             | NodeCommand::Unproven { project, .. }
             | NodeCommand::Resolve { project, .. } => read_route(project, None),
             NodeCommand::Proof { project, node, .. } => {
@@ -2160,17 +2239,6 @@ pub(crate) fn route(command: &Command) -> Route {
             NodeCommand::Flag { project, node, .. } | NodeCommand::Unflag { project, node } => {
                 write_route(project, "flag", vec![*node], &["flag"], true, 0)
             }
-            // Quarantine changes the effective status of a whole chunk and clears flags and
-            // claims: it commits alone.
-            NodeCommand::Quarantine { project, node, .. }
-            | NodeCommand::Unquarantine { project, node, .. } => write_route(
-                project,
-                "quarantine",
-                vec![*node],
-                &["status", "flag", "claim"],
-                false,
-                0,
-            ),
             NodeCommand::ResetStatus { project, file } => write_route(
                 project,
                 "reset-status",
@@ -2215,6 +2283,18 @@ pub(crate) fn route(command: &Command) -> Route {
             0,
         ),
         Command::Claim(ClaimCommand::List { project }) => read_route(project, None),
+        Command::Pool(PoolCommand::List { project }) => read_route(project, None),
+        // The migration empties quarantine.json beside the pools: it commits alone.
+        Command::Pool(PoolCommand::MigrateQuarantine { project }) => {
+            write_route(project, "pool", vec![], &["pool"], false, 0)
+        }
+        // Pool changes touch only their sidecar: record operations that may share a commit.
+        Command::Pool(
+            PoolCommand::Add { project, nodes, .. } | PoolCommand::Remove { project, nodes, .. },
+        ) => write_route(project, "pool", nodes.clone(), &["pool"], true, 0),
+        Command::Pool(PoolCommand::Join { project, .. } | PoolCommand::Leave { project, .. }) => {
+            write_route(project, "pool", vec![], &["pool"], true, 0)
+        }
         Command::Impl(command @ (ImplCommand::Show { .. } | ImplCommand::Where { .. })) => {
             read_route(command.project(), None)
         }
@@ -2242,6 +2322,7 @@ pub(crate) fn route(command: &Command) -> Route {
         | Command::Init
         | Command::Gui
         | Command::Group(_)
+        | Command::Agent(_)
         | Command::Criteria { .. }
         | Command::Import(_)
         | Command::Locks { .. }

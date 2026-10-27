@@ -103,6 +103,6 @@ The browser supports collapsed branches, name/RVA search, virtualized rows and a
 
 For large catalogs, use the [batch CLI](cli.md#whole-binary-inventory-and-batch-catalog-changes) to create, move, rename and reorder nodes transactionally. New records start unresearched. Batch/membership changes use catalog format 3 and require app/CLI 0.4.3 or later. Report/data ownership is preserved, and interrupted operations resume from a retained journal.
 
-## Quarantined records
+## Research pools
 
-A chunk or function can be quarantined: taken out of research at the human's request, or after a Claude cyber (safety) stop. It counts as complete everywhere, never appears as open work, and is sealed against structural changes (moves, renames, removal, changes to its own prerequisites) unless the human directed the change. Other work may still build on it as a prerequisite. Its own status is kept underneath and returns when the quarantine is lifted. The GUI marks it ⊘. Details are in the [CLI guide](cli.md#quarantined-records).
+A chunk or function can be put in a research pool: after an agent hits a safety stop on it, or at the human's request. Only the pool's registered members may change it; every other agent may read it and build on it as a prerequisite, and never sees it as open work. Its status is its own, so it counts as open work until it is researched, and a completed record stays in its pool. The human directs which agents join which pool, and the dashboard is never refused. Pools replace 0.14's quarantine. The GUI marks pooled records ⊘. Details are in the [CLI guide](cli.md#research-pools).

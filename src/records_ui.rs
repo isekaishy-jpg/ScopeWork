@@ -278,11 +278,11 @@ impl ResearchUi {
                     Some(classic::alert(dark)),
                 );
             }
-            if let Some(reason) = data.quarantined.get(&n.id) {
+            if let Some(reason) = data.pooled.get(&n.id) {
                 classic::label(
                     ui,
                     format!(
-                        "⊘ Quarantined ({reason}). It counts as complete; moves, renames, removal and changes to its own prerequisites need the human's direction (--directed-by). Other records may name it as a prerequisite, and its report text stays editable."
+                        "⊘ In a research pool ({reason}). Only the pool's members may change it; other agents may read it and build on it. The dashboard acts for you, so it can change it."
                     ),
                     Some(classic::alert(dark)),
                 );
@@ -539,6 +539,49 @@ impl ResearchUi {
                 classic::label(ui, "A flag blocks completion until it is cleared.", None);
             }
         });
+        if matches!(n.kind, Kind::Chunk | Kind::Function) {
+            classic::group(ui, "Research pool", |ui| {
+                if data.pooled.contains_key(&n.id) {
+                    ui.horizontal(|ui| {
+                        classic::field(ui, &mut self.pool_reason, 300.0, "Reason to take it out");
+                        let ready = enabled && !self.pool_reason.trim().is_empty();
+                        if classic::button(ui, ready, "Take out of pool").clicked() {
+                            let reason = std::mem::take(&mut self.pool_reason);
+                            self.mutate(move |lib, p, id| {
+                                lib.pool_records(p, None, &[id], "", &reason)?;
+                                Ok(id)
+                            });
+                        }
+                    });
+                    classic::label(
+                        ui,
+                        "A function of a pooled chunk leaves with its chunk.",
+                        None,
+                    );
+                } else {
+                    ui.horizontal(|ui| {
+                        classic::field(ui, &mut self.pool_name, 140.0, "Pool");
+                        classic::field(ui, &mut self.pool_reason, 260.0, "Reason");
+                        let ready = enabled
+                            && !self.pool_name.trim().is_empty()
+                            && !self.pool_reason.trim().is_empty();
+                        if classic::button(ui, ready, "Put in pool").clicked() {
+                            let pool = self.pool_name.trim().to_string();
+                            let reason = std::mem::take(&mut self.pool_reason);
+                            self.mutate(move |lib, p, id| {
+                                lib.pool_records(p, Some(&pool), &[id], "human", &reason)?;
+                                Ok(id)
+                            });
+                        }
+                    });
+                    classic::label(
+                        ui,
+                        "Pooled records are changed only by the pool's members (research pool join).",
+                        None,
+                    );
+                }
+            });
+        }
         if let Some(root) = &self.root {
             let report = root.join(&project.id).join(&data.paths[&n.id]);
             classic::group(ui, "Files", |ui| {

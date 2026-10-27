@@ -139,27 +139,28 @@ A proof names the recreation of a function (a path, optionally `::item`) and one
 
 Functions completed before the requirement stay complete; they show as unproven. `node show` returns `proof` and `unproven`, `node unproven` lists functions without a proof (`--complete`: only completed ones), `status --summary` counts `unproven_complete`, `project show` gives the policy under `proof`, and the GUI's Files group shows the proof or **Unproven**. Proofs are stored in `proofs.json` beside `project.json`, change through the catalog journal and merge in the coordinator like review flags. Deleting a node removes its proof.
 
-## Quarantined records
+## Research pools
 
 ```powershell
-research node quarantine example 152 --origin human --reason "Voice code only; directed by the human" --by solo
-research node quarantined example
-research node unquarantine example 152 --reason "The human lifted it" --by solo
+research agent register                       # registers SCOPEWORK_SUBMITTER (or: register NAME)
+research agent list
+research pool add example voice 152 --origin safety-stop --reason "Voice chat stops agents"
+research pool join example voice --agent astra   # the human directs who joins
+research pool leave example voice --agent astra
+research pool list example
+research pool remove example 152 --reason "The human reopened it to everyone"
+research pool migrate-quarantine example
 ```
 
-A quarantine takes a chunk or function out of research. Its origin is either the human's request (`human`) or a Claude cyber (safety) stop while researching the record (`cyber-stop`). A quarantined chunk covers its functions, including any added later.
+A research pool holds chunks and functions that only its members may change. An agent that hits a safety stop on a record puts it in a pool (`--origin safety-stop`) and leaves it; the human can pool records too (`--origin human`, or **Research pool** in the record panel). A pooled chunk covers its functions.
 
-- **Complete everywhere.** A quarantined record's effective status is Complete for parent completion, meters, `status` counts and prerequisites; it is never ready for review or synthesis, and its report hash is not compared, so nothing reopens it.
-- **Sealed.** Creating records in it, moving records into or out of it, renaming or reordering inside it, changing its context membership, changing its own prerequisites (including deleting a function it depends on) and removing it (or a function of a quarantined chunk) are refused (`kind` `quarantined`) unless the request carries the human's instruction: `--directed-by "..."` on `node create`, `node batch`, `node delete` and `node prune` (or `"directed_by"` in their request files) and `deps set`. `node prune` without it passes over quarantined records with the reason `quarantined`. The instruction is stored with the transaction and shown by `research history show` as `directed_by`.
-- **Usable as a prerequisite.** Other records may add or drop a quarantined function as a prerequisite without direction; later work builds on sealed research.
-- **Not applicable.** Completing, reopening, resetting the status of, flagging or claiming a quarantined record is refused. Quarantining clears the record's review flag, claim and review-queue entries in the same transaction.
-- **Kept underneath.** Changes around a quarantined record never touch its own stored status: the reopen walk neither reopens it nor passes through it.
-- **Editable.** Report saves are accepted and the record stays Complete while quarantined. Changed text clears its earlier acceptance, so after a lift it needs review again; an unchanged save changes nothing.
-- **Fails closed.** If `quarantine.json` exists but cannot be read (damaged, or written by a newer version), every write to the project is refused with `quarantine_unreadable` until it is repaired; reads keep answering and treat it as holding no quarantine.
-- **Visible.** `node show` returns `quarantine` (with the carrying `node`), `status` and `read-batch` return `quarantined` per record, and `status --summary` counts them. The GUI marks them with ⊘, lists them with the **Quarantined** filter and shows the reason in the editor.
-- **Lifting** returns the record to its own status. The record moves to the `lifted` log in the journaled `quarantine.json` sidecar beside `project.json`; deleting a node drops its record.
-
-Parent reports' source lists are not annotated, so quarantining never changes report text.
+- **Members work it.** Report saves (including batches and evidence-only saves), completion, reopening, status resets, review flags, claims, proofs and changes to its own prerequisites need the caller to be a member of the record's pool. So do creating records in it, moving records into or out of it, renaming, reordering or changing its membership, and removing or pruning it. Anyone else gets `pooled`, naming the pool. `--directed-by` with the human's instruction overrides, and history records it. The dashboard acts for the human and is never refused.
+- **Everyone reads and builds on it.** Reading a pooled record and naming it as a prerequisite of other work are free. Mechanical rewrites (a rename's citations, link repairs) still apply.
+- **Its status is its own.** A pooled record is open work until it is researched: meters, parent completion and the reopen walk treat it like any record. A completed pooled record stays in its pool, so non-members still never write to it.
+- **Open work for members only.** `status` gives each record's `pool` and offers a pooled record as `ready_for_review` / `ready_for_synthesis` only to members of its pool; `status --summary` counts `pooled`. `node show` gives `pool` (with the carrying `node` and the `members`) and `may_write` for the caller. `read-batch` gives `pool` per record. The GUI marks pooled records with ⊘ and filters them with **In a pool**.
+- **Who is asking.** Agents identify themselves with `SCOPEWORK_SUBMITTER`, through the coordinator too. They register once in the research home (`agents.json`); only registered agents can join a pool. Registration needs no approval: the human directs which agents join which pool.
+- **Storage.** Pools, their members and pooled records live in the journaled `pools.json` sidecar beside `project.json`, with a log of every addition, removal, join and leave. Deleting a node drops its record. If `pools.json` exists but cannot be read, every write is refused with `pools_unreadable` until it is repaired; reads treat it as holding no pools.
+- **Quarantine is gone.** 0.14's `node quarantine`, `unquarantine` and `quarantined` are replaced by pools. `pool migrate-quarantine` moves every quarantine record into the pool `quarantine` (`cyber-stop` becomes `safety-stop`) and empties `quarantine.json` in one transaction. Until then, a project with quarantine records refuses writes with `quarantine_unmigrated`. Migrated records show their own status: one that was complete only through quarantine is open work again.
 
 ## Complaints
 

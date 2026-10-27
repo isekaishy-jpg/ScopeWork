@@ -12,12 +12,13 @@ use std::time::{Instant, SystemTime};
 pub(super) const RECEIPTS: &str = "tools/workspaces/catalog-transactions-v4";
 const PENDING: &str = "tools/workspaces/catalog-transactions-v4/pending";
 /// Sidecars that change only through catalog transactions.
-const SIDECARS: [&str; 5] = [
+const SIDECARS: [&str; 6] = [
     "review-flags.json",
     "claims.json",
     "review-queue.json",
     "quarantine.json",
     "proofs.json",
+    "pools.json",
 ];
 /// The annotation ledger, which catalog transactions repath in place when reports move.
 const LEDGER: &str = "tools/profiles/annotations.json";

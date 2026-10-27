@@ -135,9 +135,14 @@ impl Library {
     /// Commits a journal now, or, while staging, merges it into the pending commit. Staged
     /// operations may not move reports or change dependency views; those commit alone.
     pub(super) fn commit_or_stage(&mut self, p: usize, j: catalog_batch::Journal) -> Result<usize> {
-        // Every write was decided against the quarantine file; one that cannot be read may have
-        // let a sealed record through, so nothing commits until it is repaired.
-        self.quarantines_for_write(p)?;
+        // Every write was decided against the pools file; one that cannot be read may have let a
+        // pooled record through, so nothing commits until it is repaired. Unmigrated quarantine
+        // refuses too, except the migration itself.
+        if j.sidecars.iter().any(|s| s.path == pools::QUARANTINE) {
+            self.pools_checked_for_migration(p)?;
+        } else {
+            self.pools_for_write(p)?;
+        }
         let Some(staged) = self.staging.as_mut() else {
             let root = self.dir(p);
             return catalog_batch::commit(&root, &mut self.projects[p], &j);

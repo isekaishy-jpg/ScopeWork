@@ -67,8 +67,8 @@ impl Library {
                 return Err("Unknown node or App selected; App cannot be removed.".into());
             }
         }
-        // Quarantined records are sealed: removing one, or a function out of a quarantined chunk,
-        // needs the human's direction. Prune passes over them instead of failing.
+        // Pooled records are for their pool's members: removing one, or a function out of a
+        // pooled chunk, needs a member or the human's direction. Prune passes over them.
         let directed_by = request
             .directed_by
             .as_deref()
@@ -77,7 +77,7 @@ impl Library {
         let sealed = if directed_by.is_some() {
             HashSet::new()
         } else {
-            self.quarantined(p)
+            self.closed_to_caller(p)
         };
         let mut removed = HashSet::new();
         // Why each requested node (or, without `ids`, up to 50 scopes) was not selected, so an empty preview
@@ -117,7 +117,7 @@ impl Library {
                         report_exclusion(
                             &mut excluded,
                             n,
-                            json!({"reason":"quarantined","detail":"removing a quarantined record needs --directed-by"}),
+                            json!({"reason":"pooled","detail":"removing a pooled record needs a pool member or --directed-by"}),
                         );
                         continue;
                     }
@@ -219,7 +219,7 @@ impl Library {
             }
             let mut ordered: Vec<u64> = removed.iter().copied().collect();
             ordered.sort_unstable();
-            self.check_seal(p, ordered, directed_by, "Removing")?;
+            self.check_pool(p, ordered, directed_by, "Removing")?;
         }
         // A surviving record that loses a prerequisite has its own prerequisites changed, which
         // the seal covers like any other change to them.
@@ -229,7 +229,7 @@ impl Library {
             .filter(|e| removed.contains(&e.prerequisite) && !removed.contains(&e.dependent))
             .map(|e| e.dependent)
             .collect();
-        self.check_seal(p, losing, directed_by, "Removing a prerequisite of")?;
+        self.check_pool(p, losing, directed_by, "Removing a prerequisite of")?;
         let archive = format!(
             "tools/workspaces/deleted-nodes/revision-{}",
             before.revision + 1
@@ -346,10 +346,7 @@ impl Library {
             .filter_map(|id| Some((*id, old.nodes[id].parent?)))
             .collect();
         let consumers = reopen::consumers_of(&before.dependencies);
-        let quarantined =
-            crate::research::quarantine::effective(&after, &self.quarantines_for_write(p)?);
-        let reached =
-            reopen::reopen_affected(&mut after, &changed, &old_parents, &consumers, &quarantined);
+        let reached = reopen::reopen_affected(&mut after, &changed, &old_parents, &consumers);
         let invalid: HashSet<u64> = edited.iter().copied().chain(reached).collect();
         let mut dependencies: Vec<_> = removed_dependencies
             .iter()
@@ -385,14 +382,12 @@ impl Library {
                 });
             }
         }
-        let quarantine_path = root.join(crate::research::quarantine::QUARANTINE);
-        if !removed.is_empty() && quarantine_path.is_file() {
-            let original = fs::read_to_string(&quarantine_path).map_err(|e| e.to_string())?;
-            if let Some(updated) =
-                crate::research::quarantine::without_removed(&original, &removed)?
-            {
+        let pools_path = root.join(crate::research::pools::POOLS);
+        if !removed.is_empty() && pools_path.is_file() {
+            let original = fs::read_to_string(&pools_path).map_err(|e| e.to_string())?;
+            if let Some(updated) = crate::research::pools::without_removed(&original, &removed)? {
                 sidecars.push(Sidecar {
-                    path: crate::research::quarantine::QUARANTINE.into(),
+                    path: crate::research::pools::POOLS.into(),
                     before: original,
                     after: updated,
                 });

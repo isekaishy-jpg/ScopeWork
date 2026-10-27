@@ -62,14 +62,14 @@ use std::{collections::HashMap, sync::Arc};
 struct Sidecars {
     flags: std::collections::BTreeMap<u64, ReviewFlag>,
     queued: HashMap<u64, String>,
-    quarantine: std::collections::BTreeMap<u64, quarantine::Quarantine>,
+    pools: pools::PoolFile,
 }
 impl Sidecars {
     fn read(dir: &Path, project: &Project) -> Self {
         Self {
             flags: super::catalog_batch::read_flags(dir).unwrap_or_default(),
             queued: super::coordination::open_queue(dir, project),
-            quarantine: super::quarantine::read_records(dir),
+            pools: super::pools::read_file(dir),
         }
     }
 }
@@ -405,7 +405,7 @@ fn snapshot_observed(root: PathBuf, last: Refresh, after_read: &dyn Fn(&str)) ->
                         &p,
                         &read.flags,
                         &read.queued,
-                        &super::quarantine::descriptions(&p, &read.quarantine),
+                        &super::pools::descriptions(&p, &read.pools),
                     );
                     (i, Arc::new(data))
                 })

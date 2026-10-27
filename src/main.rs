@@ -1134,6 +1134,8 @@ fn main() -> eframe::Result {
     if let Ok(home) = research_dashboard::paths::home(None) {
         research_dashboard::crash_log::install(&home);
     }
+    // The dashboard is the human's: research pools never refuse it.
+    research_dashboard::research::pools::act_for_human();
     #[cfg(debug_assertions)]
     if std::env::var_os("SCOPEWORK_GUI_PANIC_TEST").is_some() {
         panic!("deliberate test panic (SCOPEWORK_GUI_PANIC_TEST)");

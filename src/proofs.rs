@@ -144,6 +144,12 @@ impl Library {
         if entries.is_empty() {
             return Err("The proof request is empty.".into());
         }
+        self.check_pool(
+            p,
+            entries.iter().map(|(id, _)| *id),
+            None,
+            "Recording a proof of",
+        )?;
         let mut file = self.proofs(p)?;
         let mut seen = HashSet::new();
         let at_revision = self.projects[p].revision + 1;

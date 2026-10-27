@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod build_info;
 pub mod classic;
 pub mod cli;

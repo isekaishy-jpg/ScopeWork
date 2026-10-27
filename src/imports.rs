@@ -208,7 +208,7 @@ pub fn reserve(root: &Path, project: &str, batch: &Batch) -> Result<Job> {
     let start = Instant::now();
     let mut lib = library_project(root, project, true)?;
     lib.ensure_structural(0)?;
-    lib.check_seal(
+    lib.check_pool(
         0,
         batch.create.iter().map(|c| c.parent),
         batch.directed_by.as_deref(),
@@ -663,17 +663,10 @@ fn publish(
         drop(lib);
         // Parents gain source links; complete records they reach need review again, and are
         // queued for it as any other change queues them.
-        // Quarantined records keep no queue entries (quarantining clears them).
-        let sealed = super::quarantine::effective(
-            &after,
-            &super::quarantine::read_records_for_write(&project_root)?,
-        );
         let mut reopened: Vec<u64> = after
             .nodes
             .iter()
-            .filter(|n| {
-                parents.contains(&n.id) && n.status == Status::Complete && !sealed.contains(&n.id)
-            })
+            .filter(|n| parents.contains(&n.id) && n.status == Status::Complete)
             .map(|n| n.id)
             .collect();
         for node in &mut after.nodes {
@@ -687,7 +680,6 @@ fn publish(
             &parents,
             &HashMap::new(),
             &consumers,
-            &sealed,
         ));
         after.revision += 1;
         after.structural_epoch += 1;

@@ -532,7 +532,7 @@ impl Library {
             return Err("Unknown node".into());
         }
         if reason.is_some() {
-            self.refuse_quarantined(p, id, "a review flag")?;
+            self.check_pool(p, [id], None, "Flagging")?;
         }
         let before_text = match self.text_opt(p, REVIEW_FLAGS)? {
             Some(text) => text,
@@ -655,11 +655,10 @@ impl Library {
         {
             return Err("Unknown node in status reset".into());
         }
-        // A quarantined record keeps its own status for when the quarantine is lifted.
-        for id in &request.ids {
-            self.refuse_quarantined(p, *id, "a status reset")?;
-        }
-        let sealed = self.quarantined(p);
+        // Named records must be open to the caller; a reset of every record passes over the
+        // pooled ones the caller may not change.
+        self.check_pool(p, request.ids.iter().copied(), None, "Resetting")?;
+        let sealed = self.closed_to_caller(p);
         let mut after = before.clone();
         let mut reset = vec![];
         for n in &mut after.nodes {
@@ -747,7 +746,7 @@ impl Library {
     pub fn read_reports(&self, p: usize, ids: &[u64]) -> Result<serde_json::Value> {
         let project = &self.projects[p];
         let index = catalog_index::Index::new(project);
-        let quarantined = self.quarantined(p);
+        let pooled = self.pools(p).effective(&self.projects[p]);
         let mut reports = Vec::with_capacity(ids.len());
         let mut seen = HashSet::new();
         for id in ids {
@@ -760,7 +759,7 @@ impl Library {
             let (body, evidence) = parts(&text)?;
             reports.push(serde_json::json!({"id":id,"report":path,"body":body,"evidence":evidence,
                 "token":edit_tokens::draft(project,&index,*id,&text)?,"criteria":node.kind.completion_criteria(),
-                "quarantined":quarantined.contains(id)}));
+                "pool":pooled.get(id)}));
         }
         Ok(
             serde_json::json!({"project":project.id,"binary":project.binary,"revision":project.revision,"reports":reports}),
@@ -784,6 +783,7 @@ impl Library {
         if batch.reports.is_empty() {
             return Err("Report batch is empty".into());
         }
+        self.check_pool(p, batch.reports.iter().map(|r| r.id), None, "Saving")?;
         let root = self.dir(p);
         let index = catalog_index::Index::new(&before);
         let mut seen = HashSet::new();
@@ -848,8 +848,7 @@ impl Library {
             }
         }
         let consumers = reopen::consumers_of(&before.dependencies);
-        let sealed = self.quarantined(p);
-        reopen::reopen_affected(&mut after, &edited, &HashMap::new(), &consumers, &sealed);
+        reopen::reopen_affected(&mut after, &edited, &HashMap::new(), &consumers);
         after.revision += 1;
         let journal = Journal {
             before,
@@ -910,9 +909,9 @@ impl Library {
                 }
             }
         }
-        // Quarantined records are sealed: creating in, moving into or out of, renaming,
-        // reordering or changing context needs the human's direction. Restated values change
-        // nothing, so they need none.
+        // Pooled records are for their pool's members: creating in, moving into or out of,
+        // renaming, reordering or changing context needs a member or the human's direction.
+        // Restated values change nothing, so they need neither.
         let current: HashMap<u64, &Node> = before.nodes.iter().map(|n| (n.id, n)).collect();
         let changes = |u: &&Update| {
             current.get(&u.id).is_none_or(|n| {
@@ -941,7 +940,7 @@ impl Library {
                     .flat_map(|u| std::iter::once(u.id).chain(u.parent)),
             )
             .chain(batch.reorder.iter().filter(reorders).map(|o| o.parent));
-        self.check_seal(p, touched, batch.directed_by.as_deref(), "Changing")?;
+        self.check_pool(p, touched, batch.directed_by.as_deref(), "Changing")?;
         let mut after = before.clone();
         let mut positions: HashMap<_, _> = after
             .nodes
@@ -1385,9 +1384,7 @@ impl Library {
             .collect();
         kept_complete.sort_unstable();
         let consumers = reopen::consumers_of(&after.dependencies);
-        let sealed = quarantine::effective(&after, &self.quarantines_for_write(p)?);
-        let reached =
-            reopen::reopen_affected(&mut after, &existing, &old_parents, &consumers, &sealed);
+        let reached = reopen::reopen_affected(&mut after, &existing, &old_parents, &consumers);
         after.revision += 1;
         after.layout_version = before.layout_version.max(3);
         after.structural_epoch += 1;

@@ -8,8 +8,6 @@ pub(super) struct Index<'a> {
     pub paths: HashMap<u64, String>,
     pub requires: HashMap<u64, Vec<u64>>,
     pub required: HashSet<u64>,
-    /// Quarantined nodes: Complete whatever their own status (see `quarantine.rs`).
-    pub quarantined: HashSet<u64>,
 }
 impl<'a> Index<'a> {
     pub fn new(project: &'a Project) -> Self {
@@ -65,13 +63,7 @@ impl<'a> Index<'a> {
             paths,
             requires,
             required,
-            quarantined: HashSet::new(),
         }
-    }
-    /// The same index with these nodes quarantined (Complete in every state computation).
-    pub fn with_quarantine(mut self, quarantined: HashSet<u64>) -> Self {
-        self.quarantined = quarantined;
-        self
     }
     pub fn render(&self, project: &Project, id: u64, body: &str, evidence: &str) -> String {
         let n = self.nodes[&id];
@@ -159,10 +151,6 @@ impl<'a> Index<'a> {
     ) -> Status {
         if let Some(state) = cache.get(&id) {
             return *state;
-        }
-        if self.quarantined.contains(&id) {
-            cache.insert(id, Status::Complete);
-            return Status::Complete;
         }
         if !active.insert(id) {
             return Status::InProgress;

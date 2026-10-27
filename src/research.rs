@@ -118,10 +118,10 @@ mod layout;
 mod ledger;
 #[path = "operations.rs"]
 pub(crate) mod operations;
+#[path = "pools.rs"]
+pub mod pools;
 #[path = "proofs.rs"]
 pub mod proofs;
-#[path = "quarantine.rs"]
-pub mod quarantine;
 #[path = "records_ui.rs"]
 mod records_ui;
 #[path = "reopen.rs"]
@@ -133,7 +133,7 @@ mod tidy;
 pub use catalog_batch::Batch;
 pub use catalog_batch::Removal;
 pub use catalog_batch::ReviewFlag;
-pub use quarantine::Quarantine;
+pub use pools::{Pool, Pooled};
 pub(crate) use report_hashes::retain_on_this_thread as retain_report_hashes_on_this_thread;
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 thread_local! {
@@ -1330,18 +1330,15 @@ impl Library {
     /// Reopens the complete records a change to `id` reaches (see `reopen.rs`).
     fn reopen_affected(&mut self, p: usize, id: u64) {
         let consumers = reopen::consumers_of(&self.projects[p].dependencies);
-        let sealed = self.quarantined(p);
         reopen::reopen_affected(
             &mut self.projects[p],
             &[id].into(),
             &Default::default(),
             &consumers,
-            &sealed,
         );
     }
     pub fn effective_all(&self, p: usize) -> std::collections::HashMap<u64, Status> {
         catalog_index::Index::new(&self.projects[p])
-            .with_quarantine(self.quarantined(p))
             .states_all_with(&self.dir(p), &|| self.hash_overrides())
     }
     pub fn required_nodes(&self, p: usize) -> std::collections::HashSet<u64> {
@@ -1358,15 +1355,10 @@ impl Library {
         let Some(n) = self.projects[p].nodes.iter().find(|n| n.id == id) else {
             return Status::NotStarted;
         };
-        let quarantined = self.quarantined(p);
-        if quarantined.contains(&id) {
-            return Status::Complete;
-        }
         if n.kind == Kind::Function && n.status != Status::Complete {
             return n.status;
         }
         catalog_index::Index::new(&self.projects[p])
-            .with_quarantine(quarantined)
             .states_with(&self.dir(p), [id], &|| self.hash_overrides())
             .get(&id)
             .copied()
@@ -1444,7 +1436,6 @@ impl Library {
             )
             .chain([id]);
         catalog_index::Index::new(project)
-            .with_quarantine(self.quarantined(p))
             .states_with(&self.dir(p), inputs, &|| self.hash_overrides())
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
@@ -1463,7 +1454,7 @@ impl Library {
             return self.write_project(p, |l, p| l.add_directed(p, parent, name, rva, directed_by));
         }
         self.ensure_structural(p)?;
-        self.check_seal(p, [parent], directed_by, "Creating a record in")?;
+        self.check_pool(p, [parent], directed_by, "Creating a record in")?;
         let name = record_name(name)?;
         let kind = self.projects[p]
             .nodes
@@ -1523,9 +1514,7 @@ impl Library {
                 l.save_report(p, id, body, evidence, complete, expected)
             });
         }
-        if complete {
-            self.refuse_quarantined(p, id, "completion")?;
-        }
+        self.check_pool(p, [id], None, "Saving")?;
         self.check_edit_token(
             p,
             id,
@@ -1673,7 +1662,7 @@ impl Library {
         if !self.writable(p) {
             return self.write_project(p, |l, p| l.reopen(p, id, expected));
         }
-        self.refuse_quarantined(p, id, "reopening")?;
+        self.check_pool(p, [id], None, "Reopening")?;
         self.check_edit_token(p, id, expected, "draft")?;
         let (body, evidence) = self.read(p, id)?;
         let batch = catalog_batch::ReportBatch {
@@ -1740,6 +1729,9 @@ pub struct ResearchUi {
     scope_revision: u64,
     complete: bool,
     flag_reason: String,
+    /// The pool and reason typed in the record panel's Research pool group.
+    pool_name: String,
+    pool_reason: String,
     /// The loaded record's effective status and what blocks its completion.
     status: Status,
     blockers: Vec<String>,
@@ -1813,6 +1805,8 @@ impl ResearchUi {
             scope_revision: 0,
             complete: false,
             flag_reason: String::new(),
+            pool_name: String::new(),
+            pool_reason: String::new(),
             status: Status::NotStarted,
             blockers: vec![],
             implemented_in: Ok(None),
@@ -2272,9 +2266,9 @@ impl Library {
             });
         }
         self.ensure_structural(p)?;
-        // The seal covers the record whose prerequisites change; a quarantined record may itself
-        // be named as a prerequisite, since later work builds on sealed research.
-        self.check_seal(p, [id], directed_by, "Changing prerequisites of")?;
+        // The pool covers the record whose prerequisites change; a pooled record may itself be
+        // named as a prerequisite, since later work builds on pooled research.
+        self.check_pool(p, [id], directed_by, "Changing prerequisites of")?;
         if !self.projects[p]
             .nodes
             .iter()
@@ -2380,7 +2374,7 @@ impl Library {
             .iter()
             .enumerate()
             .map(|(p, project)| {
-                let index = catalog_index::Index::new(project).with_quarantine(lib.quarantined(p));
+                let index = catalog_index::Index::new(project);
                 let states_all = index.states(&lib.dir(p));
                 let mut counts = std::collections::HashMap::<u64, (usize, usize, usize)>::new();
                 let mut inventory_functions = 0;
