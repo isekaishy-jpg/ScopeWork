@@ -131,19 +131,13 @@ pub fn update<T>(
     home: &Path,
     change: impl FnOnce(&mut Settings) -> Result<T, String>,
 ) -> Result<T, String> {
-    fs::create_dir_all(home).map_err(|e| e.to_string())?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(home.join(LOCK))
-        .map_err(|e| format!("{}: {e}", home.join(LOCK).display()))?;
-    lock.lock().map_err(|e| format!("Settings lock: {e}"))?;
-    let mut settings = load(home)?;
-    let result = change(&mut settings)?;
-    let bytes = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
-    crate::research::atomic(&file(home), &bytes)?;
-    Ok(result)
+    crate::paths::locked(home, LOCK, || {
+        let mut settings = load(home)?;
+        let result = change(&mut settings)?;
+        let bytes = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
+        crate::research::atomic(&file(home), &bytes)?;
+        Ok(result)
+    })
 }
 
 #[cfg(test)]

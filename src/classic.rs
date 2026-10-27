@@ -142,6 +142,10 @@ pub fn bevel(p: &egui::Painter, r: Rect, inset: bool) {
     } else {
         (highlight(dark_mode), shadow(dark_mode))
     };
+    edges(p, r, light, dark);
+}
+/// One pixel along `r`'s edges: `light` top and left, `dark` bottom and right.
+fn edges(p: &egui::Painter, r: Rect, light: Color32, dark: Color32) {
     p.line_segment([r.left_bottom(), r.left_top()], Stroke::new(1.0_f32, light));
     p.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0_f32, light));
     p.line_segment(
@@ -159,17 +163,7 @@ fn double_bevel(p: &egui::Painter, r: Rect, inset: bool) {
     bevel(p, r, inset);
     let (a, b) = soft(dark_mode);
     let (light, dark) = if inset { (b, a) } else { (a, b) };
-    let r = r.shrink(1.0);
-    p.line_segment([r.left_bottom(), r.left_top()], Stroke::new(1.0_f32, light));
-    p.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0_f32, light));
-    p.line_segment(
-        [r.right_top(), r.right_bottom()],
-        Stroke::new(1.0_f32, dark),
-    );
-    p.line_segment(
-        [r.right_bottom(), r.left_bottom()],
-        Stroke::new(1.0_f32, dark),
-    );
+    edges(p, r.shrink(1.0), light, dark);
 }
 fn font() -> egui::FontId {
     egui::FontId::proportional(TEXT)

@@ -41,6 +41,25 @@ fn installed_home() -> Option<PathBuf> {
     None
 }
 
+/// Runs `change` holding the research home's lock file `lock` (created if needed), for files of
+/// the home that several processes update: read, change and replace them inside `change`.
+pub fn locked<T>(
+    home: &std::path::Path,
+    lock: &str,
+    change: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    fs::create_dir_all(home).map_err(|e| e.to_string())?;
+    let path = home.join(lock);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    file.lock()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    change()
+}
 pub fn initialize(home: &std::path::Path) -> Result<(), String> {
     fs::create_dir_all(home.join("projects")).map_err(|e| e.to_string())?;
     fs::create_dir_all(home.join("complaints")).map_err(|e| e.to_string())?;

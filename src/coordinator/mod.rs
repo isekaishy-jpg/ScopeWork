@@ -52,6 +52,22 @@ impl Class {
     fn rank(self) -> u64 {
         self as u64
     }
+    /// The rank after waiting since `queued`: one class up for every `AGEING` waited, so work
+    /// waiting long enough goes first whatever its class.
+    fn aged(self, queued: Instant, now: Instant) -> u64 {
+        let aged = now.duration_since(queued).as_secs() / AGEING.as_secs();
+        self.rank().saturating_sub(aged)
+    }
+    /// A request's class: `normal` unless it names another; `interactive` only when `interactive`
+    /// is allowed (the GUI's own requests).
+    fn parse(text: Option<&str>, interactive: bool) -> Self {
+        match text {
+            Some("interactive") if interactive => Class::Interactive,
+            Some("bulk") => Class::Bulk,
+            Some("job") => Class::Job,
+            _ => Class::Normal,
+        }
+    }
     fn name(self) -> &'static str {
         match self {
             Class::Interactive => "interactive",
@@ -98,8 +114,7 @@ struct Operation {
 }
 impl Operation {
     fn effective_rank(&self, now: Instant) -> u64 {
-        let aged = now.duration_since(self.queued).as_secs() / AGEING.as_secs();
-        self.class.rank().saturating_sub(aged)
+        self.class.aged(self.queued, now)
     }
     fn view(&self, state: &str, position: usize, now: Instant) -> Value {
         json!({"operation": self.id, "kind": self.route.kind, "class": self.class, "state": state,
@@ -1237,11 +1252,7 @@ impl Server {
         if bytes > leases::PAYLOAD_BYTES {
             return refuse(send, leases::PAYLOAD_TOO_LARGE.into());
         }
-        let class = match lease["class"].as_str() {
-            Some("bulk") => Class::Bulk,
-            Some("job") => Class::Job,
-            _ => Class::Normal,
-        };
+        let class = Class::parse(lease["class"].as_str(), false);
         let kind = lease["kind"].as_str().unwrap_or("lease").to_string();
         let (reply, events) = std::sync::mpsc::channel();
         let request_id = self.next_operation.fetch_add(1, Ordering::Relaxed);
@@ -1398,12 +1409,7 @@ impl Server {
             if !(role == "gui" && arguments.first().is_some_and(|a| a == "queue")) {
                 self.touch();
             }
-            let class = match request["class"].as_str() {
-                Some("interactive") if role == "gui" => Class::Interactive,
-                Some("bulk") => Class::Bulk,
-                Some("job") => Class::Job,
-                _ => Class::Normal,
-            };
+            let class = Class::parse(request["class"].as_str(), role == "gui");
             let answer = self.handle(arguments, class, &submitter);
             let mut out = serde_json::to_value(&answer).unwrap_or(Value::Null);
             out["id"] = id;

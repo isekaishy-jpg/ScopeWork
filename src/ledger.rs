@@ -165,6 +165,12 @@ pub(super) fn apply(
     project: &Project,
     explicit: &[(String, String)],
 ) -> Result<usize> {
+    rewrite(root, |text| repath(text, project, explicit))
+}
+/// Rewrites the ledger with `change` (new text and how many values it replaced). When another
+/// writer replaces the file between reading and writing, the pass starts again on the new text;
+/// a ledger that keeps changing is left for the next commit. Returns the values replaced.
+fn rewrite(root: &Path, change: impl Fn(&str) -> (String, usize)) -> Result<usize> {
     let path = root.join(LEDGER);
     let stamp = |path: &Path| {
         fs::metadata(path)
@@ -180,7 +186,7 @@ pub(super) fn apply(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(format!("Cannot read {LEDGER}: {e}")),
         };
-        let (updated, replaced) = repath(&text, project, explicit);
+        let (updated, replaced) = change(&text);
         if replaced == 0 {
             return Ok(0);
         }
@@ -227,32 +233,7 @@ pub(super) fn repin_text(text: &str, pairs: &[(String, String)]) -> (String, usi
 /// Applies [`repin_text`] to the project's ledger, with the same reread-on-change rule as
 /// [`apply`], so a tool's concurrent write is never overwritten with an older copy.
 pub(super) fn repin(root: &Path, pairs: &[(String, String)]) -> Result<usize> {
-    let path = root.join(LEDGER);
-    let stamp = |path: &Path| {
-        fs::metadata(path)
-            .ok()
-            .map(|m| (m.len(), m.modified().ok()))
-    };
-    for _ in 0..5 {
-        let Some(before) = stamp(&path) else {
-            return Ok(0);
-        };
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(format!("Cannot read {LEDGER}: {e}")),
-        };
-        let (updated, replaced) = repin_text(&text, pairs);
-        if replaced == 0 {
-            return Ok(0);
-        }
-        if stamp(&path) != Some(before) {
-            continue;
-        }
-        atomic(&path, updated.as_bytes())?;
-        return Ok(replaced);
-    }
-    Ok(0)
+    rewrite(root, |text| repin_text(text, pairs))
 }
 
 #[cfg(test)]

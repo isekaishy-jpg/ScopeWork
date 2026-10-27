@@ -59,23 +59,17 @@ pub fn registered(home: &Path) -> Result<Vec<String>, String> {
 /// Registers `name`; returns false when it was already registered.
 pub fn register(home: &Path, name: &str) -> Result<bool, String> {
     let name = valid(name)?;
-    fs::create_dir_all(home).map_err(|e| e.to_string())?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(home.join(LOCK))
-        .map_err(|e| format!("{}: {e}", home.join(LOCK).display()))?;
-    lock.lock().map_err(|e| format!("Agents lock: {e}"))?;
-    let mut agents = load(home)?;
-    if agents.agents.iter().any(|a| a.name == name) {
-        return Ok(false);
-    }
-    agents.agents.push(Agent {
-        name,
-        registered_unix: crate::research::unix_now(),
-    });
-    let bytes = serde_json::to_vec_pretty(&agents).map_err(|e| e.to_string())?;
-    crate::research::atomic(&home.join(FILE), &bytes)?;
-    Ok(true)
+    crate::paths::locked(home, LOCK, || {
+        let mut agents = load(home)?;
+        if agents.agents.iter().any(|a| a.name == name) {
+            return Ok(false);
+        }
+        agents.agents.push(Agent {
+            name,
+            registered_unix: crate::research::unix_now(),
+        });
+        let bytes = serde_json::to_vec_pretty(&agents).map_err(|e| e.to_string())?;
+        crate::research::atomic(&home.join(FILE), &bytes)?;
+        Ok(true)
+    })
 }

@@ -4,7 +4,7 @@
 //! requests without a payload are covered by the holder's overall result. Several resources
 //! are granted together or not at all, and a waiting request reserves its resources against
 //! later ones, so nobody holds a resource while waiting and requests cannot starve.
-use super::{AGEING, Class, MERGE_BYTES, MERGE_OPERATIONS};
+use super::{Class, MERGE_BYTES, MERGE_OPERATIONS};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Sender;
@@ -40,8 +40,7 @@ pub(super) struct Request {
 }
 impl Request {
     fn rank(&self, now: Instant) -> u64 {
-        let aged = now.duration_since(self.queued).as_secs() / AGEING.as_secs();
-        self.class.rank().saturating_sub(aged)
+        self.class.aged(self.queued, now)
     }
     fn entry(&self) -> Value {
         json!({"payload_id": self.id, "submitter": self.submitter, "kind": self.kind, "payload": self.payload})
