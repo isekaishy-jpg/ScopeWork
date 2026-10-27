@@ -792,15 +792,13 @@ fn node_view(lib: &Library, p: usize, id: u64) -> Result<Value, String> {
 fn remove(
     lib: &mut Library,
     id: &str,
-    file: &PathBuf,
+    file: &std::path::Path,
     expect: Option<&str>,
     directed_by: Option<String>,
     prune: bool,
 ) -> Result<Value, String> {
     let p = project(lib, id)?;
-    let mut request: crate::research::Removal =
-        serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+    let mut request: crate::research::Removal = crate::research::read_json(file)?;
     if directed_by.is_some() {
         request.directed_by = directed_by;
     }
@@ -937,8 +935,7 @@ fn run(args: Args) -> Result<Value, String> {
     if let Command::Import(command) = &args.command {
         return match command {
             ImportCommand::Plan { project, file } => {
-                let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+                let batch = crate::research::read_json(file)?;
                 imports::plan(&root, project, &batch)
             }
             ImportCommand::Start {
@@ -946,8 +943,7 @@ fn run(args: Args) -> Result<Value, String> {
                 file,
                 paused,
             } => {
-                let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+                let batch = crate::research::read_json(file)?;
                 let job = imports::reserve(&root, project, &batch)?;
                 job_result(if *paused {
                     imports::request(&root, project, &job.id, false)?
@@ -1156,8 +1152,7 @@ fn run(args: Args) -> Result<Value, String> {
         directed_by,
     }) = &args.command
     {
-        let mut batch: Batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        let mut batch: Batch = crate::research::read_json(file)?;
         if directed_by.is_some() {
             batch.directed_by = directed_by.clone();
         }
@@ -1203,12 +1198,12 @@ fn run(args: Args) -> Result<Value, String> {
         Command::Init | Command::Project(ProjectCommand::Create { .. })
     );
     let mut lib = if read_only {
-        Library::read_project(home.join("projects"), selected.unwrap())?
+        Library::read_project(root, selected.unwrap())?
     } else if creating {
         // Creating one project needs none of the others opened, or recovered.
-        Library::empty(home.join("projects"))?
+        Library::empty(root)?
     } else {
-        Library::open_project(home.join("projects"), selected)?
+        Library::open_project(root, selected)?
     };
     if let Some(reason) = &lib.recovery_blocked {
         eprintln!(
@@ -1220,6 +1215,14 @@ fn run(args: Args) -> Result<Value, String> {
         return Ok(locations);
     }
     execute(args.command, &mut lib)
+}
+/// Who has claimed `node` (directly or through an ancestor), as answers show it.
+fn claimed_by(covered: &std::collections::HashMap<u64, (u64, String)>, node: u64) -> Value {
+    json!(
+        covered
+            .get(&node)
+            .map(|(at, owner)| json!({"node": at, "owner": owner}))
+    )
 }
 /// `research agent`: the research home's registered agents, never a project.
 fn agents(home: &std::path::Path, command: &AgentCommand) -> Result<Value, String> {
@@ -1431,8 +1434,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             }
             NodeCommand::SaveBatch { project: id, file } => {
                 let p = project(lib, &id)?;
-                let batch = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+                let batch = crate::research::read_json(&file)?;
                 let saved = lib.save_reports(p, &batch)?;
                 Ok(json!({"project":id,"revision":lib.projects[p].revision,"saved":saved}))
             }
@@ -1451,9 +1453,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 directed_by,
             } => {
                 let p = project(lib, &id)?;
-                let mut batch: Batch =
-                    serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-                        .map_err(|e| e.to_string())?;
+                let mut batch: Batch = crate::research::read_json(&file)?;
                 if directed_by.is_some() {
                     batch.directed_by = directed_by;
                 }
@@ -1467,9 +1467,9 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                     .review_queue(p, &states)?
                     .into_iter()
                     .filter(|(_, entries)| entries.iter().any(|e| e.revision == revision))
-                    .map(|(node, _)| {
-                        json!({"node": node, "claimed_by": covered.get(&node).map(|(at, owner)| json!({"node": at, "owner": owner}))})
-                    })
+                    .map(
+                        |(node, _)| json!({"node": node, "claimed_by": claimed_by(&covered, node)}),
+                    )
                     .collect();
                 let moved: Vec<_> = outcome
                     .moved
@@ -1588,9 +1588,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 struct Request {
                     proofs: Vec<crate::research::proofs::ProofInput>,
                 }
-                let request: Request =
-                    serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-                        .map_err(|e| e.to_string())?;
+                let request: Request = crate::research::read_json(&file)?;
                 let entries: Vec<_> = request
                     .proofs
                     .into_iter()
@@ -1628,8 +1626,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             }
             NodeCommand::ResetStatus { project: id, file } => {
                 let p = project(lib, &id)?;
-                let request = serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
+                let request = crate::research::read_json(&file)?;
                 let reset = lib.reset_status(p, &request)?;
                 Ok(json!({"project":id,"revision":lib.projects[p].revision,"reset":reset}))
             }
@@ -1725,7 +1722,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 *counts.entry(format!("{:?}", n.kind)).or_default().entry(format!("{:?}", states[&n.id])).or_default() += 1;
                 (!summary).then(|| json!({"id":n.id,"name":n.name,"kind":n.kind,"status":states[&n.id],"required_research":required.contains(&n.id),"blocked_children":blocked_children,"blocked_prerequisites":blocked_prerequisites,
                     "ready_for_review":ready_for_review,"ready_for_synthesis":ready_for_synthesis,"review_flag":flags.get(&n.id),"pool":pooled.get(&n.id),
-                    "claimed_by":covered.get(&n.id).map(|(at, owner)| json!({"node": at, "owner": owner})),
+                    "claimed_by":claimed_by(&covered, n.id),
                     "review_queue":queue.get(&n.id)}))
             }).collect();
             let inventory = lib.projects[p]
@@ -1916,10 +1913,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
         }) => {
             let p = project(lib, &id)?;
             let diff = diff_file
-                .map(|f| -> Result<Value, String> {
-                    serde_json::from_slice(&fs::read(f).map_err(|e| e.to_string())?)
-                        .map_err(|e| e.to_string())
-                })
+                .map(|f| crate::research::read_json::<Value>(&f))
                 .transpose()?;
             lib.append_history(p, &kind, &summary, &nodes, &refs, diff)
         }
@@ -1932,7 +1926,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 lib.projects[p].nodes.iter().map(|n| (n.id, n)).collect();
             let entries: Vec<_> = lib.review_queue(p, &states)?.into_iter().map(|(node, reasons)| {
                 json!({"node": node, "name": names.get(&node).map(|n| n.name.as_str()), "kind": names.get(&node).map(|n| n.kind), "status": states.get(&node), "reasons": reasons,
-                    "claimed_by": covered.get(&node).map(|(at, owner)| json!({"node": at, "owner": owner}))})
+                    "claimed_by": claimed_by(&covered, node)})
             }).collect();
             Ok(json!({"project": id, "count": entries.len(), "entries": entries}))
         }
