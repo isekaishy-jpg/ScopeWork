@@ -286,6 +286,8 @@ struct Server {
     connections: AtomicUsize,
     last_activity: Mutex<Instant>,
     next_operation: AtomicU64,
+    /// Leases on the research home's shared resources (`job run --shared`).
+    shared: Mutex<leases::Leases>,
 }
 static SERVER: std::sync::OnceLock<Arc<Server>> = std::sync::OnceLock::new();
 
@@ -567,7 +569,14 @@ impl Server {
             .lock()
             .map(|l| l.view())
             .unwrap_or_else(|_| json!({"held": [], "waiting": []}));
-        json!({"project": state.id, "source": "coordinator", "running": running, "waiting": waiting, "leases": leases})
+        json!({"project": state.id, "source": "coordinator", "running": running, "waiting": waiting, "leases": leases, "shared_leases": self.shared_view()})
+    }
+    /// Held and waiting leases on the home's shared resources.
+    fn shared_view(&self) -> Value {
+        self.shared
+            .lock()
+            .map(|l| l.view())
+            .unwrap_or_else(|_| json!({"held": [], "waiting": []}))
     }
 
     fn enqueue(
@@ -990,8 +999,9 @@ pub fn lock_queue(root: &Path, project: &str) -> Result<Value, String> {
         (Some(true), _) => vec![json!({"command": "another operation"})],
         _ => vec![],
     };
+    // Resources held by `job run` without a coordinator, the shared ones included.
     Ok(
-        json!({"project": project, "source": "locks", "running": running, "waiting": locks["waiting"]}),
+        json!({"project": project, "source": "locks", "running": running, "waiting": locks["waiting"], "resources": locks["resources"]}),
     )
 }
 
@@ -1054,6 +1064,7 @@ pub fn serve(home: &Path) -> Result<Value, String> {
         connections: AtomicUsize::new(0),
         last_activity: Mutex::new(Instant::now()),
         next_operation: AtomicU64::new(1),
+        shared: Mutex::new(leases::Leases::default()),
     });
     let _ = SERVER.set(server.clone());
     let accepting = server.clone();
@@ -1105,7 +1116,7 @@ impl Server {
                     .is_ok_and(|q| q.waiting.is_empty() && q.running.is_empty())
                     && state.leases.lock().is_ok_and(|l| l.is_empty())
             })
-        })
+        }) && self.shared.lock().is_ok_and(|l| l.is_empty())
     }
     /// Admits work again after Windows cancelled the end of session it had asked about, unless
     /// the coordinator is already finishing to exit.
@@ -1183,11 +1194,16 @@ impl Server {
         if !self.admitting.load(Ordering::Acquire) {
             return send(json!({"id": id, "unavailable": "stopping"}));
         }
-        let project = lease["project"].as_str().unwrap_or_default();
-        let state = match self.project(project) {
-            Ok(state) => state,
-            Err(e) => return refuse(send, e),
+        // A project's lease queue, or the home's for shared resources.
+        let state = if lease["shared"].as_bool() == Some(true) {
+            None
+        } else {
+            match self.project(lease["project"].as_str().unwrap_or_default()) {
+                Ok(state) => Some(state),
+                Err(e) => return refuse(send, e),
+            }
         };
+        let queue = state.as_ref().map_or(&self.shared, |s| &s.leases);
         let resources: std::collections::BTreeSet<String> = lease["resources"]
             .as_array()
             .into_iter()
@@ -1213,7 +1229,7 @@ impl Server {
         let kind = lease["kind"].as_str().unwrap_or("lease").to_string();
         let (reply, events) = std::sync::mpsc::channel();
         let request_id = self.next_operation.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut leases) = state.leases.lock() {
+        if let Ok(mut leases) = queue.lock() {
             leases.enqueue(leases::Request {
                 id: request_id,
                 kind,
@@ -1237,7 +1253,7 @@ impl Server {
             }
             Ok(leases::Event::Granted { lease, payloads }) => {
                 if !send(json!({"id": id, "granted": {"lease": lease, "payloads": payloads}})) {
-                    if let Ok(mut leases) = state.leases.lock() {
+                    if let Ok(mut leases) = queue.lock() {
                         leases.release(lease);
                     }
                     return false;
@@ -1246,7 +1262,7 @@ impl Server {
             }
         };
         let release = || {
-            if let Ok(mut leases) = state.leases.lock() {
+            if let Ok(mut leases) = queue.lock() {
                 leases.release(granted);
             }
         };
@@ -1264,8 +1280,7 @@ impl Server {
             };
             let message_id = message["id"].clone();
             if let Some(results) = message["results"].as_array() {
-                let reported = state
-                    .leases
+                let reported = queue
                     .lock()
                     .map_err(|_| "The lease queue failed".to_string())
                     .and_then(|mut l| l.results(granted, results, &message["overall"]));
@@ -1408,6 +1423,9 @@ impl Server {
                 Ok(state) => self.read(&state, &arguments, nodes, submitter),
                 Err(e) => Answer::of(Err(e)),
             },
+            Route::Queue { project } if project == research::SHARED => Answer::of(Ok(
+                json!({"shared": true, "source": "coordinator", "leases": self.shared_view()}),
+            )),
             Route::Queue { project } => match self.project(&project) {
                 Ok(state) => Answer::of(Ok(self.queue_view(&state))),
                 Err(e) => Answer::of(Err(e)),

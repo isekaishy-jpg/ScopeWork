@@ -39,6 +39,15 @@ impl QueueView {
         running.extend(lines(&value["leases"]["held"]));
         let mut waiting = lines(&value["waiting"]);
         waiting.extend(lines(&value["leases"]["waiting"]));
+        // Leases on the research home's shared resources concern every project.
+        let shared = |list: &Value| -> Vec<String> {
+            lines(list)
+                .into_iter()
+                .map(|l| format!("shared: {l}"))
+                .collect()
+        };
+        running.extend(shared(&value["shared_leases"]["held"]));
+        waiting.extend(shared(&value["shared_leases"]["waiting"]));
         Self {
             project: value["project"].as_str().unwrap_or_default().to_string(),
             source: value["source"].as_str().unwrap_or_default().to_string(),
@@ -203,6 +212,15 @@ mod tests {
         assert_eq!(
             leased.waiting,
             ["annotations-apply lease on ghidra, ledger - agent-4"]
+        );
+        let shared = QueueView::from_json(
+            &json!({"project": "p", "source": "coordinator", "running": [], "waiting": [],
+            "shared_leases": {"held": [{"lease": 3, "kind": "lease", "resources": ["verify-worktree"], "submitter": "astra"}],
+                "waiting": []}}),
+        );
+        assert_eq!(
+            shared.running,
+            ["shared: lease lease on verify-worktree - astra"]
         );
     }
 }

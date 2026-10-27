@@ -554,6 +554,18 @@ research tools audit example
   - `{"covered": {"by", "result"}}`.
 - When granted, `{"id": n, "results": [...], "overall": ...}`, then `{"id": n, "release": lease}`, or it closes the connection.
 
+### Shared resources
+
+A resource that belongs to no project, such as a verification worktree every session commits through, is leased home-wide:
+
+```powershell
+research --wait 3600 job run --shared --resource verify-worktree --class job -- bash mycommit.sh
+research queue --shared
+research job status --shared
+```
+
+`--shared` replaces the project and needs `--resource` (shared resources have no declarations). Everything else is as for a project lease: ordering, classes, joining with `--key`, payloads, results and exit codes, and release when the holder dies. The command runs in the caller's current folder, and its payload and result files go in the research home's `tools/scratch`. Without a coordinator, exclusive lock files named `_shared.res-NAME` under `projects/.project-locks/` order the requests with fair tickets; they wait at most the lock wait, so give a long `--wait` for work that takes minutes. With a coordinator, a request waits until it is granted. `queue --shared` and `job status --shared` show held and waiting shared leases, every project's `queue` carries them as `shared_leases`, and the dashboard's queue panes list them marked `shared`. This replaces hand-written lock directories and ticket scripts kept outside Scopework.
+
 ### Declarations: `tools/coordinator.toml`
 
 ```toml

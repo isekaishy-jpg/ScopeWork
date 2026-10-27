@@ -589,7 +589,7 @@ pub fn lock_status(projects: &Path, id: &str) -> Result<serde_json::Value> {
 /// `lock_status`, probing for shared readers only when `readers` is set. That probe briefly
 /// takes the project lock exclusively, so the queue view, polled every 2 s, skips it.
 pub fn lock_status_probing(projects: &Path, id: &str, readers: bool) -> Result<serde_json::Value> {
-    if !valid_id(id) {
+    if !valid_id(id) && id != SHARED {
         return Err("Invalid project ID".into());
     }
     let mut status = lock_entry(projects, id, readers);
@@ -617,6 +617,9 @@ pub fn lock_status_probing(projects: &Path, id: &str, readers: bool) -> Result<s
     Ok(status)
 }
 /// The lock name of a project's tool resource.
+/// The lock scope of home-wide shared resources (`job run --shared`). Project IDs never begin
+/// with an underscore, so its lock names cannot collide with a project's.
+pub const SHARED: &str = "_shared";
 fn resource_lock_id(project: &str, resource: &str) -> String {
     format!("{project}.res-{resource}")
 }
@@ -627,7 +630,7 @@ pub(crate) fn resource_locks(
     project: &str,
     resources: &[String],
 ) -> Result<Vec<ResourceLock>> {
-    if !valid_id(project) {
+    if !valid_id(project) && project != SHARED {
         return Err("Invalid project ID".into());
     }
     let mut names = resources.to_vec();

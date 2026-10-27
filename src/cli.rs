@@ -115,8 +115,14 @@ pub(crate) enum Command {
         #[arg(long)]
         summary: bool,
     },
-    /// Running and waiting operations on a project (from the coordinator, or the lock queue).
-    Queue { project: String },
+    /// Running and waiting operations on a project (from the coordinator, or the lock queue),
+    /// or with --shared, the leases on the research home's shared resources.
+    Queue {
+        #[arg(required_unless_present = "shared", conflicts_with = "shared")]
+        project: Option<String>,
+        #[arg(long)]
+        shared: bool,
+    },
     /// Inspect or stop this research home's coordinator.
     #[command(subcommand)]
     Coordinator(CoordinatorCommand),
@@ -135,7 +141,12 @@ pub(crate) enum JobCommand {
     /// Run COMMAND while holding a lease. Requests with the same key that wait together share
     /// one run: COMMAND then receives every payload and reports a result for each.
     Run {
-        project: String,
+        #[arg(required_unless_present = "shared", conflicts_with = "shared")]
+        project: Option<String>,
+        /// Lease the research home's shared resources (a repository, a worktree) instead of a
+        /// project's; the command runs in the current folder. Needs --resource.
+        #[arg(long, requires = "resources")]
+        shared: bool,
         /// A kind declared in tools/coordinator.toml, or a new name used with --resource.
         #[arg(long)]
         kind: Option<String>,
@@ -155,8 +166,14 @@ pub(crate) enum JobCommand {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
-    /// Held and waiting leases (from the coordinator, or the resource lock files).
-    Status { project: String },
+    /// Held and waiting leases (from the coordinator, or the resource lock files); --shared for
+    /// the research home's shared resources.
+    Status {
+        #[arg(required_unless_present = "shared", conflicts_with = "shared")]
+        project: Option<String>,
+        #[arg(long)]
+        shared: bool,
+    },
 }
 #[derive(Subcommand)]
 pub(crate) enum ToolsCommand {
@@ -836,8 +853,6 @@ fn project_of(command: &Command) -> Option<&str> {
         Command::Pool(command) => Some(command.project()),
         Command::Wait { project, .. }
         | Command::Locks { project }
-        | Command::Queue { project }
-        | Command::Job(JobCommand::Run { project, .. } | JobCommand::Status { project })
         | Command::Tools(ToolsCommand::Audit { project })
         | Command::Import(
             ImportCommand::Plan { project, .. }
@@ -846,6 +861,20 @@ fn project_of(command: &Command) -> Option<&str> {
             | ImportCommand::Pause { project, .. }
             | ImportCommand::Resume { project, .. }
             | ImportCommand::Cancel { project, .. },
+        ) => Some(project.as_str()),
+        Command::Queue {
+            project: Some(project),
+            ..
+        }
+        | Command::Job(
+            JobCommand::Run {
+                project: Some(project),
+                ..
+            }
+            | JobCommand::Status {
+                project: Some(project),
+                ..
+            },
         ) => Some(project.as_str()),
         _ => None,
     }
@@ -947,9 +976,15 @@ fn run(args: Args) -> Result<Value, String> {
             return crate::coordinator::client::stop(&home);
         }
         // Reached only in direct mode: the lock queue stands in for the coordinator's.
-        Command::Queue { project } => return crate::coordinator::lock_queue(&root, project),
+        Command::Queue { project, .. } => {
+            return crate::coordinator::lock_queue(
+                &root,
+                project.as_deref().unwrap_or(crate::research::SHARED),
+            );
+        }
         Command::Job(JobCommand::Run {
             project,
+            shared: _,
             kind,
             resources,
             key,
@@ -957,10 +992,14 @@ fn run(args: Args) -> Result<Value, String> {
             payload_file,
             command,
         }) => {
-            if !valid_id(project) {
+            if project.as_deref().is_some_and(|p| !valid_id(p)) {
                 return Err("Invalid project ID".into());
             }
-            let manifest = crate::coordinator::manifest::load(&root.join(project))?;
+            // Shared resources have no declarations: only flags describe their leases.
+            let manifest = match project {
+                Some(project) => crate::coordinator::manifest::load(&root.join(project))?,
+                None => Default::default(),
+            };
             let spec =
                 manifest.resolve(kind.as_deref(), resources, key.as_deref(), class.as_deref())?;
             let payload = match payload_file {
@@ -978,10 +1017,16 @@ fn run(args: Args) -> Result<Value, String> {
             };
             // The answer carries the command's `exit`; `main` exits with it, and a session
             // answers it like any other command.
-            return crate::coordinator::job::run(&home, project, &spec, payload, command);
+            return crate::coordinator::job::run(
+                &home,
+                project.as_deref(),
+                &spec,
+                payload,
+                command,
+            );
         }
-        Command::Job(JobCommand::Status { project }) => {
-            return crate::coordinator::job::status(&home, project);
+        Command::Job(JobCommand::Status { project, .. }) => {
+            return crate::coordinator::job::status(&home, project.as_deref());
         }
         Command::Tools(ToolsCommand::Audit { project }) => {
             if !valid_id(project) {
@@ -2315,8 +2360,10 @@ pub(crate) fn route(command: &Command) -> Route {
         Command::History(HistoryCommand::Append { project, nodes, .. }) => {
             write_route(project, "history", nodes.clone(), &[], false, 0)
         }
-        Command::Queue { project } => Route::Queue {
-            project: project.clone(),
+        Command::Queue { project, .. } => Route::Queue {
+            project: project
+                .clone()
+                .unwrap_or_else(|| crate::research::SHARED.to_string()),
         },
         Command::Home
         | Command::Init

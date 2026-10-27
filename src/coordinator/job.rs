@@ -13,30 +13,44 @@ use super::manifest::LeaseSpec;
 use serde_json::{Value, json};
 use std::path::Path;
 
-/// Runs `command` under the lease `spec` describes. The answer's `exit` is the exit code.
+/// Runs `command` under the lease `spec` describes, on a project's resources or, with no
+/// project, on the research home's shared resources. The answer's `exit` is the exit code.
 pub fn run(
     home: &Path,
-    project: &str,
+    project: Option<&str>,
     spec: &LeaseSpec,
     payload: Option<Value>,
     command: &[String],
 ) -> Result<Value, String> {
     let projects = home.join("projects");
-    let dir = projects.join(project);
-    if !dir.join("project.json").is_file() {
-        return Err(format!("Unknown project: {project}"));
-    }
+    // A project's command runs in its folder; shared work runs where its caller is.
+    let (scope, scratch, dir) = match project {
+        Some(project) => {
+            let dir = projects.join(project);
+            if !dir.join("project.json").is_file() {
+                return Err(format!("Unknown project: {project}"));
+            }
+            (project, dir.join("tools/scratch"), dir)
+        }
+        None => (
+            crate::research::SHARED,
+            home.join("tools/scratch"),
+            std::env::current_dir().map_err(|e| e.to_string())?,
+        ),
+    };
     if command.is_empty() {
         return Err("Name the command to run after --".into());
     }
     let payload_given = payload.is_some();
     let answer = |source: &str, lease: Option<u64>, ran: bool, result: Value, exit: i32| {
-        json!({"project": project, "kind": spec.kind, "resources": spec.resources, "source": source,
-            "lease": lease, "ran": ran, "result": result, "exit": exit})
+        json!({"project": project, "shared": project.is_none(), "kind": spec.kind,
+            "resources": spec.resources, "source": source, "lease": lease, "ran": ran,
+            "result": result, "exit": exit})
     };
     if let Some(mut connection) = client::connect(home, "tool", true)? {
-        let request = json!({"id": 1, "lease": {"project": project, "resources": spec.resources,
-            "key": spec.key, "class": spec.class, "kind": spec.kind, "payload": payload}});
+        let request = json!({"id": 1, "lease": {"project": project.unwrap_or_default(),
+            "shared": project.is_none(), "resources": spec.resources, "key": spec.key,
+            "class": spec.class, "kind": spec.kind, "payload": payload}});
         connection.post(&request)?;
         let reply = connection.receive()?;
         if let Some(error) = reply["error"].as_str() {
@@ -59,9 +73,9 @@ pub fn run(
                 .unwrap_or(lease);
             // The lease orders and batches; the resource lock files exclude, the same ones
             // direct mode takes, so a direct-mode job can never run beside a leased one.
-            let locks = crate::research::resource_locks(&projects, project, &spec.resources);
+            let locks = crate::research::resource_locks(&projects, scope, &spec.resources);
             let (results, overall, exit) = match &locks {
-                Ok(_) => execute(&dir, lease, &payloads, command)?,
+                Ok(_) => execute(&scratch, &dir, lease, &payloads, command)?,
                 Err(e) => {
                     let error = format!("job_failed: {e}");
                     let results = payloads
@@ -87,11 +101,11 @@ pub fn run(
             return Err(format!("Unexpected answer from the coordinator: {reply}"));
         }
     }
-    let _locks = crate::research::resource_locks(&projects, project, &spec.resources)?;
+    let _locks = crate::research::resource_locks(&projects, scope, &spec.resources)?;
     let payloads = vec![
         json!({"payload_id": 1, "submitter": client::submitter(), "kind": spec.kind, "payload": payload}),
     ];
-    let (results, overall, exit) = execute(&dir, 1, &payloads, command)?;
+    let (results, overall, exit) = execute(&scratch, &dir, 1, &payloads, command)?;
     let result = own_result(&results, 1, payload_given, &overall);
     let exit = exit_code(exit, &result);
     Ok(answer("locks", None, true, result, exit))
@@ -140,13 +154,13 @@ fn own_result(results: &[Value], own: u64, payload_given: bool, overall: &Value)
 /// Runs the command with the payload and result files; returns per-payload results, the
 /// overall result and the exit code.
 fn execute(
+    scratch: &Path,
     dir: &Path,
     lease: u64,
     payloads: &[Value],
     command: &[String],
 ) -> Result<(Vec<Value>, Value, i32), String> {
-    let scratch = dir.join("tools/scratch");
-    std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(scratch).map_err(|e| e.to_string())?;
     let stem = format!("job-{}", uuid::Uuid::new_v4().simple());
     let payload_file = scratch.join(format!("{stem}-payloads.json"));
     let results_file = scratch.join(format!("{stem}-results.json"));
@@ -202,13 +216,19 @@ fn execute(
 
 /// `research job status`: held and waiting leases, or the resource lock files without a
 /// coordinator.
-pub fn status(home: &Path, project: &str) -> Result<Value, String> {
+/// Held and waiting leases of a project's resources, or (no project) the shared resources.
+pub fn status(home: &Path, project: Option<&str>) -> Result<Value, String> {
+    let scope = project.unwrap_or(crate::research::SHARED);
     if let Some(mut connection) = client::connect(home, "cli", false)? {
-        let answer = connection.request(&["queue".into(), project.into()], None)?;
+        let request: Vec<String> = match project {
+            Some(project) => vec!["queue".into(), project.into()],
+            None => vec!["queue".into(), "--shared".into()],
+        };
+        let answer = connection.request(&request, None)?;
         return match answer.stdout {
-            Some(out) => {
-                Ok(json!({"project": project, "source": "coordinator", "leases": out["leases"]}))
-            }
+            Some(out) => Ok(
+                json!({"project": project, "shared": project.is_none(), "source": "coordinator", "leases": out["leases"]}),
+            ),
             None => Err(answer
                 .stderr
                 .first()
@@ -217,6 +237,8 @@ pub fn status(home: &Path, project: &str) -> Result<Value, String> {
                 .to_string()),
         };
     }
-    let locks = crate::research::lock_status(&home.join("projects"), project)?;
-    Ok(json!({"project": project, "source": "locks", "resources": locks["resources"]}))
+    let locks = crate::research::lock_status(&home.join("projects"), scope)?;
+    Ok(
+        json!({"project": project, "shared": project.is_none(), "source": "locks", "resources": locks["resources"]}),
+    )
 }

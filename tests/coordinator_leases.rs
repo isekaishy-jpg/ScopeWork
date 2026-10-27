@@ -629,3 +629,153 @@ fn a_session_answers_job_run_and_keeps_going() {
     assert_eq!(answers[2]["ok"]["project"], "fixture");
     assert_eq!(answers[3]["kind"], "usage");
 }
+
+impl Fixture {
+    /// `job run --shared --resource <resource> -- powershell tool.ps1 <log> <sleep> 0 [<write>]`,
+    /// started in `cwd`.
+    fn shared_job(
+        &self,
+        mode: &str,
+        resource: &str,
+        sleep_ms: u32,
+        cwd: &std::path::Path,
+        write: Option<&str>,
+    ) -> Command {
+        let tool = self.home.join("tool.ps1");
+        let log = self.log();
+        let sleep = sleep_ms.to_string();
+        let mut args = vec![
+            "job",
+            "run",
+            "--shared",
+            "--resource",
+            resource,
+            "--",
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            tool.to_str().unwrap(),
+            log.to_str().unwrap(),
+            &sleep,
+            "0",
+        ];
+        if let Some(write) = write {
+            args.push(write);
+        }
+        let mut c = self.command(mode, &args);
+        c.current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        c
+    }
+    fn shared_status(&self) -> Value {
+        let o = self
+            .command("required", &["queue", "--shared"])
+            .output()
+            .unwrap();
+        serde_json::from_slice(&o.stdout).unwrap_or(Value::Null)
+    }
+}
+
+#[test]
+fn shared_resources_exclude_across_sessions_in_both_modes() {
+    let f = Fixture::new();
+    for mode in ["required", "off"] {
+        let _ = fs::remove_file(f.log());
+        let a = spawn(f.shared_job(mode, "verify-worktree", 600, &f.home, None));
+        let b = spawn(f.shared_job(mode, "verify-worktree", 600, &f.home, None));
+        for child in [a, b] {
+            let (answer, code) = Fixture::answer(child.wait_with_output().unwrap());
+            assert_eq!(code, 0, "{mode}: {answer}");
+            assert_eq!(answer["shared"], true);
+        }
+        let runs = f.runs();
+        assert_eq!(
+            runs.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            ["start", "end", "start", "end"],
+            "{mode}"
+        );
+        assert!(runs[2].2 >= runs[1].2, "{mode}: the runs overlapped");
+    }
+}
+
+#[test]
+fn a_held_shared_lease_shows_everywhere_and_dies_with_its_holder() {
+    let f = Fixture::new();
+    let mut holder = spawn(f.shared_job("required", "verify-worktree", 8_000, &f.home, None));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while f.shared_status()["leases"]["held"]
+        .as_array()
+        .is_none_or(Vec::is_empty)
+    {
+        assert!(Instant::now() < deadline, "no shared lease was held");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // A project's queue lists the shared work too.
+    let o = f
+        .command("required", &["queue", "fixture"])
+        .output()
+        .unwrap();
+    let project: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(
+        project["shared_leases"]["held"][0]["resources"],
+        json!(["verify-worktree"])
+    );
+    let next = spawn(f.shared_job("required", "verify-worktree", 0, &f.home, None));
+    while f.shared_status()["leases"]["waiting"]
+        .as_array()
+        .is_none_or(Vec::is_empty)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the second request did not queue"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    holder.kill().unwrap();
+    let _ = holder.wait();
+    let (answer, code) = Fixture::answer(next.wait_with_output().unwrap());
+    assert_eq!((code, answer["ran"].as_bool()), (0, Some(true)), "{answer}");
+}
+
+#[test]
+fn shared_commands_run_in_the_callers_folder_and_need_a_resource() {
+    let f = Fixture::new();
+    let folder = f.home.join("caller");
+    fs::create_dir_all(&folder).unwrap();
+    let o = f
+        .shared_job("off", "verify-worktree", 0, &folder, Some("marker.txt"))
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(folder.join("marker.txt").is_file());
+    let missing = f
+        .command(
+            "off",
+            &["job", "run", "--shared", "--", "cmd", "/c", "exit"],
+        )
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    let both = f
+        .command(
+            "off",
+            &[
+                "job",
+                "run",
+                "fixture",
+                "--shared",
+                "--resource",
+                "x",
+                "--",
+                "cmd",
+                "/c",
+                "exit",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert!(!both.status.success());
+}
