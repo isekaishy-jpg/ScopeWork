@@ -548,3 +548,32 @@ fn only_members_take_records_out_of_or_move_them_between_pools() {
     );
     assert!(f.show("sol", "3")["pool"].is_null());
 }
+
+#[test]
+fn a_function_covered_by_its_chunk_cannot_be_moved_to_another_pool_by_a_non_member() {
+    let f = Fixture::new();
+    f.refused(
+        "sol",
+        &[
+            "pool", "add", "fixture", "mine", "3", "--origin", "human", "--reason", "mine",
+        ],
+        "pooled",
+    );
+    assert_eq!(f.show("sol", "3")["pool"]["pool"], "voice");
+    // A member may give it an entry of its own.
+    f.ok(
+        "astra",
+        &[
+            "pool",
+            "add",
+            "fixture",
+            "narrow",
+            "3",
+            "--origin",
+            "human",
+            "--reason",
+            "Codec only",
+        ],
+    );
+    assert_eq!(f.show("sol", "3")["pool"]["pool"], "narrow");
+}

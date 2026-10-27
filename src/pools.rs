@@ -372,10 +372,12 @@ impl Library {
         let mut file = self.pools_for_write(p)?;
         // Records already in a pool change only through its members (or the human); pooling
         // one that is in no pool is open to everyone. The journal guard checks them.
+        // A function covered through its chunk counts too: an entry of its own would take
+        // precedence over the chunk's and open it to another pool's members.
         let guarded: Vec<u64> = ids
             .iter()
             .copied()
-            .filter(|id| file.records.contains_key(id))
+            .filter(|id| file.covering(&self.projects[p], *id).is_some())
             .collect();
         let revision = self.projects[p].revision + 1;
         let by = caller();
