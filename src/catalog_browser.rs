@@ -34,6 +34,8 @@ pub(super) struct BrowserData {
     pub queued: HashMap<u64, String>,
     /// Pooled records (recorded or through their chunk) with a short description.
     pub pooled: HashMap<u64, String>,
+    /// Functions pooled only through their chunk, with that chunk.
+    pub pooled_through: HashMap<u64, u64>,
 }
 struct Row {
     id: u64,

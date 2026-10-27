@@ -401,12 +401,13 @@ fn snapshot_observed(root: PathBuf, last: Refresh, after_read: &dyn Fn(&str)) ->
                 .map(|(i, p, sidecars)| {
                     let read =
                         sidecars.unwrap_or_else(|| Sidecars::read(&flag_root.join(&p.id), &p));
-                    let data = catalog_browser::BrowserData::new(
+                    let mut data = catalog_browser::BrowserData::new(
                         &p,
                         &read.flags,
                         &read.queued,
                         &super::pools::descriptions(&p, &read.pools),
                     );
+                    data.pooled_through = super::pools::carriers(&p, &read.pools);
                     (i, Arc::new(data))
                 })
                 .collect()

@@ -541,7 +541,16 @@ impl ResearchUi {
         });
         if matches!(n.kind, Kind::Chunk | Kind::Function) {
             classic::group(ui, "Research pool", |ui| {
-                if data.pooled.contains_key(&n.id) {
+                if let Some(chunk) = data.pooled_through.get(&n.id) {
+                    // Its membership is its chunk's: only the chunk can be taken out.
+                    classic::label(
+                        ui,
+                        format!(
+                            "In its chunk's pool (chunk {chunk}). Select the chunk to take it out."
+                        ),
+                        None,
+                    );
+                } else if data.pooled.contains_key(&n.id) {
                     ui.horizontal(|ui| {
                         classic::field(ui, &mut self.pool_reason, 300.0, "Reason to take it out");
                         let ready = enabled && !self.pool_reason.trim().is_empty();
@@ -553,11 +562,9 @@ impl ResearchUi {
                             });
                         }
                     });
-                    classic::label(
-                        ui,
-                        "A function of a pooled chunk leaves with its chunk.",
-                        None,
-                    );
+                    if n.kind == Kind::Chunk {
+                        classic::label(ui, "Its functions leave the pool with it.", None);
+                    }
                 } else {
                     ui.horizontal(|ui| {
                         classic::field(ui, &mut self.pool_name, 140.0, "Pool");

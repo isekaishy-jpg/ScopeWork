@@ -196,6 +196,18 @@ pub(super) fn descriptions(project: &Project, file: &PoolFile) -> HashMap<u64, S
     }
     out
 }
+/// Functions pooled only through their chunk, with the chunk that carries the pool.
+pub(super) fn carriers(project: &Project, file: &PoolFile) -> HashMap<u64, u64> {
+    project
+        .nodes
+        .iter()
+        .filter(|n| !file.records.contains_key(&n.id))
+        .filter_map(|n| {
+            let parent = n.parent?;
+            file.records.contains_key(&parent).then_some((n.id, parent))
+        })
+        .collect()
+}
 /// Pools read from a project folder (for snapshots built outside a library).
 pub(super) fn read_file(dir: &Path) -> PoolFile {
     fs::read_to_string(dir.join(POOLS))
@@ -654,6 +666,7 @@ mod tests {
         );
         let pooled: HashSet<u64> = file.effective(&project).into_keys().collect();
         assert_eq!(pooled, [2, 3].into());
+        assert_eq!(carriers(&project, &file), [(3, 2)].into());
         assert_eq!(file.closed_to(&project, "sol"), [2, 3].into());
         assert!(file.closed_to(&project, "astra").is_empty());
         assert!(parse(r#"{"schema":2}"#).is_err());
