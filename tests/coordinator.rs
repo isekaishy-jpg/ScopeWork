@@ -1113,3 +1113,26 @@ fn operations_record_their_own_submitter_not_the_coordinators() {
         "beta"
     );
 }
+
+#[test]
+fn a_coordinator_exits_once_its_research_home_is_gone() {
+    let f = Fixture::new(1);
+    f.coordinated(&["project", "show", "fixture"]);
+    let running = |f: &Fixture| {
+        f.output("auto", &["coordinator", "status"])
+            .status
+            .success()
+            && f.ok("auto", &["coordinator", "status"])["running"] != false
+    };
+    assert!(running(&f), "the coordinator serves the home");
+    // The home goes away with its lock file (Windows lets a held lock file be deleted).
+    fs::remove_file(f.home.join(".coordinator.lock")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while running(&f) {
+        assert!(
+            Instant::now() < deadline,
+            "the coordinator kept serving a deleted home"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}

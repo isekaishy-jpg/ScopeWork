@@ -132,11 +132,17 @@ pub fn connect(home: &Path, role: &str, start: bool) -> Result<Option<Connection
     if mode() == Mode::Off {
         return Ok(None);
     }
-    let name = match pipe::pipe_name(home) {
-        Ok(name) => name,
-        Err(e) if mode() == Mode::Required => return Err(e),
-        Err(_) => return Ok(None),
-    };
+    match reach(home, role, start) {
+        Ok(connection) => Ok(connection),
+        Err(e) if mode() == Mode::Required => Err(format!("coordinator_unavailable: {e}")),
+        // In `auto`, anything but an accepted connection means direct mode.
+        Err(_) => Ok(None),
+    }
+}
+/// Reaches `home`'s coordinator: `None` when none listens (and none was to be started), an
+/// error when one could not be used (busy, another version, a failed handshake or start).
+fn reach(home: &Path, role: &str, start: bool) -> Result<Option<Connection>, String> {
+    let name = pipe::pipe_name(home)?;
     let mut started = false;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -144,10 +150,10 @@ pub fn connect(home: &Path, role: &str, start: bool) -> Result<Option<Connection
             Ok(Some(pipe)) => match handshake(pipe, role) {
                 Ok(Handshake::Accepted(connection)) => return Ok(Some(connection)),
                 Ok(Handshake::Refused) => {
-                    return refuse("The coordinator runs a different version");
+                    return Err("The coordinator runs a different version".into());
                 }
                 // Nothing was sent yet, so direct mode is safe.
-                Err(e) => return refuse(&format!("The handshake failed: {e}")),
+                Err(e) => return Err(format!("The handshake failed: {e}")),
                 Ok(Handshake::Retiring) => {
                     // Wait for the old coordinator to exit, then start ours.
                     std::thread::sleep(Duration::from_millis(100));
@@ -159,30 +165,24 @@ pub fn connect(home: &Path, role: &str, start: bool) -> Result<Option<Connection
                 }
                 if !started {
                     if let Err(e) = spawn(home) {
-                        return refuse(&format!("Cannot start a coordinator: {e}"));
+                        return Err(format!("Cannot start a coordinator: {e}"));
                     }
                     started = true;
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
-            Err(e) => return refuse(&e),
+            Err(e) => return Err(e),
         }
         if Instant::now() >= deadline {
-            return refuse("No coordinator answered in time");
+            return Err("No coordinator answered in time".into());
         }
-    }
-}
-fn refuse<T>(reason: &str) -> Result<Option<T>, String> {
-    if mode() == Mode::Required {
-        Err(format!("coordinator_unavailable: {reason}"))
-    } else {
-        Ok(None)
     }
 }
 
-/// `research coordinator status`.
+/// `research coordinator status`: whether one runs, and what it reports. A coordinator that
+/// cannot be used (busy, another version) is an error, never "not running".
 pub fn status(home: &Path) -> Result<Value, String> {
-    match connect(home, "cli", false)? {
+    match reach(home, "cli", false)? {
         None => Ok(json!({"running": false})),
         Some(mut connection) => {
             let reply = connection.send(&json!({"id": 1, "status": true}))?;
@@ -190,9 +190,10 @@ pub fn status(home: &Path) -> Result<Value, String> {
         }
     }
 }
-/// `research coordinator stop`.
+/// `research coordinator stop`. A coordinator that cannot be reached is an error, so a caller
+/// never takes a running one for stopped.
 pub fn stop(home: &Path) -> Result<Value, String> {
-    match connect(home, "cli", false)? {
+    match reach(home, "cli", false)? {
         None => Ok(json!({"running": false})),
         Some(mut connection) => {
             let _ = connection.send(&json!({"id": 1, "stop": true}));

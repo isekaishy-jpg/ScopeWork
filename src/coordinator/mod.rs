@@ -1123,7 +1123,8 @@ pub fn serve(home: &Path) -> Result<Value, String> {
             });
         }
     });
-    // Idle watch: exit when nothing has happened for a while and nobody is connected.
+    // Idle watch: exit when nothing has happened for a while and nobody is connected, or once
+    // the research home is gone (its lock file with it): there is nothing left to serve.
     loop {
         std::thread::sleep(Duration::from_secs(5));
         let idle = server
@@ -1131,7 +1132,11 @@ pub fn serve(home: &Path) -> Result<Value, String> {
             .lock()
             .map(|last| last.elapsed() >= IDLE)
             .unwrap_or(false);
-        if idle && server.connections.load(Ordering::Acquire) == 0 && server.queues_empty() {
+        let gone = !lock_path.exists();
+        if (idle || gone)
+            && server.connections.load(Ordering::Acquire) == 0
+            && server.queues_empty()
+        {
             server.drain_and_exit();
         }
     }

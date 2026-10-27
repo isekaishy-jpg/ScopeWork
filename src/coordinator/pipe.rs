@@ -226,10 +226,14 @@ mod imp {
             {
                 Ok(pipe) => break pipe,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                // Every instance is busy; the server creates another for each client.
+                // Every instance is busy; the server creates another for each client. A server
+                // that stays busy is there, not absent.
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                     if std::time::Instant::now() >= deadline {
-                        return Ok(None);
+                        return Err(
+                            "coordinator_busy: the coordinator accepted no connection for 5 s"
+                                .into(),
+                        );
                     }
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }

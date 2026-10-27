@@ -441,11 +441,18 @@ pub fn set_lock_wait(wait: std::time::Duration) {
 }
 /// Runs `work` with its own lock wait on this thread.
 pub fn with_lock_wait<T>(wait: std::time::Duration, work: impl FnOnce() -> T) -> T {
-    let previous = THREAD_LOCK_WAIT_MS
-        .with(|w| w.replace(Some(wait.as_millis().min(u64::MAX as u128) as u64)));
-    let result = work();
-    THREAD_LOCK_WAIT_MS.with(|w| w.set(previous));
-    result
+    /// Restores the previous wait however `work` ends, a panic the thread survives included.
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            THREAD_LOCK_WAIT_MS.with(|w| w.set(self.0));
+        }
+    }
+    let _restore = Restore(
+        THREAD_LOCK_WAIT_MS
+            .with(|w| w.replace(Some(wait.as_millis().min(u64::MAX as u128) as u64))),
+    );
+    work()
 }
 fn lock_wait_ms() -> u64 {
     THREAD_LOCK_WAIT_MS
@@ -2790,6 +2797,19 @@ mod dependency_tests {
 mod caller_tests {
     use super::*;
 
+    #[test]
+    fn a_panicking_operation_leaves_the_previous_lock_wait() {
+        let outer = std::time::Duration::from_secs(7);
+        with_lock_wait(outer, || {
+            let panicked = std::panic::catch_unwind(|| {
+                with_lock_wait(std::time::Duration::from_secs(1), || -> () {
+                    panic!("operation failed")
+                })
+            });
+            assert!(panicked.is_err());
+            assert_eq!(lock_wait_ms(), 7_000);
+        });
+    }
     #[test]
     fn a_panicking_operation_leaves_the_previous_caller() {
         with_caller("outer", || {
