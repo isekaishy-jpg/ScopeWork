@@ -323,7 +323,7 @@ impl Library {
             return Err("Invalid project identity".into());
         }
         let dir = root.join(id);
-        contained(&root, &dir)?;
+        layout::inside(&root, &dir)?;
         let gate = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -335,7 +335,7 @@ impl Library {
             "Research library is busy with another operation. Retry shortly.".to_owned()
         })?;
         let path = dir.join("project.json");
-        contained(&root, &path)?;
+        layout::inside(&root, &path)?;
         if !path.is_file() {
             return Err(format!("Unknown project: {id}"));
         }
@@ -387,7 +387,7 @@ impl Library {
             if !folder.exists() {
                 continue;
             }
-            contained(&root, &folder)?;
+            layout::inside(&root, &folder)?;
             for entry in fs::read_dir(&folder).map_err(|e| e.to_string())? {
                 let entry = entry.map_err(|e| e.to_string())?;
                 if !entry.file_type().map_err(|e| e.to_string())?.is_dir() {
@@ -398,7 +398,7 @@ impl Library {
                 if !path.is_file() {
                     continue;
                 }
-                contained(&root, &path)?;
+                layout::inside(&root, &path)?;
                 let size = fs::metadata(&path).map_err(|e| e.to_string())?.len();
                 if name == "pending" {
                     pending_bytes += size;

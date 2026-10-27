@@ -2,12 +2,15 @@
 use super::*;
 use std::collections::HashSet;
 
+/// A report's body and evidence, split at the markers every rendered report carries.
 pub(super) fn parts(text: &str) -> Result<(&str, &str)> {
     text.split_once("\n<!-- research-content -->\n")
-        .ok_or("Missing report content marker")?
+        .ok_or("Report marker is missing; restore the canonical report header before editing.")?
         .1
         .split_once("\n<!-- research-evidence -->\n")
-        .ok_or_else(|| "Missing evidence marker".into())
+        .ok_or_else(|| {
+            "Evidence marker is missing; restore the canonical report layout before editing.".into()
+        })
 }
 
 pub(super) fn draft(

@@ -158,7 +158,7 @@ impl Library {
                         continue;
                     }
                     let path = root.join(&old.paths[&n.id]);
-                    contained(&root, &path)?;
+                    layout::inside(&root, &path)?;
                     let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
                     let (body, evidence) = parts(&text)?;
                     if !request.include_authored {
@@ -254,8 +254,8 @@ impl Library {
             }
             let from = old.paths[&n.id].trim_end_matches("/research.md").to_owned();
             let to = format!("{archive}/{}", n.id);
-            contained(&root, &root.join(&from))?;
-            contained(&root, &root.join(&to))?;
+            layout::inside(&root, &root.join(&from))?;
+            layout::inside(&root, &root.join(&to))?;
             if root.join(&to).exists() {
                 return Err("Removal archive destination exists; refusing overwrite.".into());
             }
@@ -297,7 +297,7 @@ impl Library {
                 {
                     continue;
                 }
-                contained(&root, &root.join(path))?;
+                layout::inside(&root, &root.join(path))?;
                 let original = fs::read_to_string(root.join(path)).map_err(|e| e.to_string())?;
                 let destination = if removed.contains(&n.id) {
                     format!("{archive}/{}/research.md", n.id)

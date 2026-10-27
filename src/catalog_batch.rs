@@ -159,17 +159,7 @@ pub(super) struct Journal {
     pub(super) repin_ids: Vec<u64>,
 }
 
-fn parts(text: &str) -> Result<(&str, &str)> {
-    text.split_once("\n<!-- research-content -->\n")
-        .ok_or("Missing report content marker")?
-        .1
-        .split_once("\n<!-- research-evidence -->\n")
-        .ok_or_else(|| "Missing evidence marker".into())
-}
-
-fn same(a: &Project, b: &Project) -> bool {
-    a == b
-}
+use super::edit_tokens::parts;
 /// An I/O error naming the file it concerns, so a locked or missing file can be found.
 fn at(path: &Path, e: std::io::Error) -> String {
     format!("{}: {e}", path.display())
@@ -192,9 +182,6 @@ fn pending(root: &Path) -> PathBuf {
 fn staged(root: &Path, id: u64) -> PathBuf {
     pending(root).join("moves").join(id.to_string())
 }
-fn contained(root: &Path, path: &Path) -> Result<()> {
-    layout::inside(root, path)
-}
 
 fn fault(_point: &str) {
     #[cfg(debug_assertions)]
@@ -211,11 +198,11 @@ pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
     if !path.exists() {
         return Ok(0);
     }
-    contained(root, &path)?;
+    layout::inside(root, &path)?;
     let j = journal_history::read_pending(&fs::read(&path).map_err(|e| at(&path, e))?, project)
         .map_err(|e| blocked(root, e))?;
     fault("journal");
-    if !same(project, &j.before) && !same(project, &j.after) {
+    if *project != j.before && *project != j.after {
         return Err(blocked(
             root,
             "Catalog changed during batch transaction".into(),
@@ -335,7 +322,7 @@ fn finish(
             Some(root.join(&edit.new)),
         ];
         for candidate in candidates.into_iter().flatten() {
-            contained(root, &candidate)?;
+            layout::inside(root, &candidate)?;
             if candidate.is_file() {
                 let text = fs::read_to_string(&candidate).map_err(|e| at(&candidate, e))?;
                 if Some(&text) != edit.before.as_ref() && text != edit.after {
@@ -362,7 +349,7 @@ fn finish(
     let mut repath_ledger = j.ledger;
     for file in &j.sidecars {
         let path = root.join(&file.path);
-        contained(root, &path)?;
+        layout::inside(root, &path)?;
         if file.path == ledger::LEDGER {
             repath_ledger = true;
             continue;
@@ -382,9 +369,9 @@ fn finish(
         let from = root.join(&m.old);
         let stage = staged(root, m.id);
         let to = root.join(&m.new);
-        contained(root, &from)?;
-        contained(root, &stage)?;
-        contained(root, &to)?;
+        layout::inside(root, &from)?;
+        layout::inside(root, &stage)?;
+        layout::inside(root, &to)?;
         if from.exists() {
             if stage.exists() || to.exists() {
                 return Err(format!(
@@ -823,7 +810,7 @@ impl Library {
                 return Err("Reserved report markers cannot appear in report content.".into());
             }
             let path = &index.paths[&input.id];
-            contained(&root, &root.join(path))?;
+            layout::inside(&root, &root.join(path))?;
             let original = self.text(p, path)?;
             let current = if input.expect.starts_with("d4:") {
                 edit_tokens::draft(&before, &index, input.id, &original)?
@@ -1568,7 +1555,7 @@ pub(super) fn bare_mentions(text: &str, rename: &Rename) -> usize {
 
 fn prepare_pending(root: &Path) -> Result<PathBuf> {
     let folder = pending(root);
-    contained(root, &folder)?;
+    layout::inside(root, &folder)?;
     if folder.exists() {
         for entry in fs::read_dir(&folder).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
@@ -2037,8 +2024,8 @@ mod tests {
         );
         for current in [&j.before, &j.after] {
             let recovered = journal_history::read_pending(&bytes, current).unwrap();
-            assert!(same(&recovered.before, &j.before));
-            assert!(same(&recovered.after, &j.after));
+            assert!(recovered.before == j.before);
+            assert!(recovered.after == j.after);
         }
         let mut conflict = j.before.clone();
         conflict.nodes[4].name = "Unrelated external edit".into();
@@ -2065,8 +2052,8 @@ mod tests {
         );
         for current in [&deletion.before, &deletion.after] {
             let recovered = journal_history::read_pending(&bytes, current).unwrap();
-            assert!(same(&recovered.before, &deletion.before));
-            assert!(same(&recovered.after, &deletion.after));
+            assert!(recovered.before == deletion.before);
+            assert!(recovered.after == deletion.after);
         }
         let mut reordered = j.after.clone();
         reordered.nodes.swap(3, 4);
@@ -2091,8 +2078,8 @@ mod tests {
         let bytes = journal_history::pending_bytes(&rearranged).unwrap();
         for current in [&rearranged.before, &rearranged.after] {
             let recovered = journal_history::read_pending(&bytes, current).unwrap();
-            assert!(same(&recovered.before, &rearranged.before));
-            assert!(same(&recovered.after, &rearranged.after));
+            assert!(recovered.before == rearranged.before);
+            assert!(recovered.after == rearranged.after);
         }
     }
 
@@ -2126,7 +2113,7 @@ mod tests {
         let pending = serde_json::to_vec(&delta).unwrap();
         for current in [&before, &after] {
             let recovered = journal_history::read_pending(&pending, current).unwrap();
-            assert!(same(&recovered.before, &before) && same(&recovered.after, &after));
+            assert!(recovered.before == before && recovered.after == after);
         }
     }
 

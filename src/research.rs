@@ -1033,12 +1033,20 @@ impl Library {
     /// commits replaced, so answers always come from this one revision.
     pub(crate) fn snapshot_view(root: PathBuf, project: Project, overlay: Overlay) -> Self {
         Self {
-            root,
             projects: vec![project],
+            overlay: Some(overlay),
+            ..Self::bare(root)
+        }
+    }
+    /// A library at `root` with no projects, no lock and nothing staged.
+    fn bare(root: PathBuf) -> Self {
+        Self {
+            root,
+            projects: vec![],
             busy_projects: vec![],
             unreadable: vec![],
             recovery_blocked: None,
-            overlay: Some(overlay),
+            overlay: None,
             staging: None,
             _lock: None,
         }
@@ -1053,16 +1061,7 @@ impl Library {
     /// without opening (and recovering) every project in the home.
     pub fn empty(root: PathBuf) -> Result<Self> {
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-        Ok(Self {
-            root,
-            projects: vec![],
-            busy_projects: vec![],
-            unreadable: vec![],
-            recovery_blocked: None,
-            overlay: None,
-            staging: None,
-            _lock: None,
-        })
+        Ok(Self::bare(root))
     }
     /// Releases this library's locks while keeping its catalog in memory (the coordinator's
     /// writer between batches). Only `relock` makes it writable again.
@@ -1087,16 +1086,7 @@ impl Library {
     ) -> Result<Self> {
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         let Some(id) = selected else {
-            let mut lib = Self {
-                root: root.clone(),
-                projects: vec![],
-                busy_projects: vec![],
-                unreadable: vec![],
-                _lock: None,
-                recovery_blocked: None,
-                overlay: None,
-                staging: None,
-            };
+            let mut lib = Self::bare(root.clone());
             for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
                 let entry = entry.map_err(|e| e.to_string())?;
                 if entry.file_type().map_err(|e| e.to_string())?.is_symlink()
@@ -1226,14 +1216,10 @@ impl Library {
             }
         }
         Ok(Self {
-            root,
             projects: project.into_iter().collect(),
-            busy_projects: vec![],
-            unreadable: vec![],
             recovery_blocked,
-            overlay: None,
-            staging: None,
             _lock: Some(locks),
+            ..Self::bare(root)
         })
     }
     fn validate_project(p: &Project, id: &str) -> Result<()> {
@@ -1270,14 +1256,8 @@ impl Library {
             return Err("Invalid app ID or next node ID".into());
         }
         let validation = Self {
-            root: PathBuf::new(),
             projects: vec![p.clone()],
-            busy_projects: vec![],
-            unreadable: vec![],
-            _lock: None,
-            recovery_blocked: None,
-            overlay: None,
-            staging: None,
+            ..Self::bare(PathBuf::new())
         };
         validation.validate_dependencies(0, &p.dependencies)
     }
@@ -1374,14 +1354,7 @@ impl Library {
     pub fn read(&self, p: usize, id: u64) -> Result<(String, String)> {
         self.path(p, id)?;
         let full = self.text(p, &self.report_rel(p, id)?)?;
-        let marker = "\n<!-- research-content -->\n";
-        let content = full
-            .split_once(marker)
-            .ok_or("Report marker is missing; restore the canonical report header before editing.")?
-            .1;
-        let (body, evidence) = content
-            .split_once("\n<!-- research-evidence -->\n")
-            .ok_or("Evidence marker missing")?;
+        let (body, evidence) = edit_tokens::parts(&full)?;
         Ok((body.to_string(), evidence.to_string()))
     }
     /// Reopens the complete records a change to `id` reaches (see `reopen.rs`).
@@ -1574,82 +1547,59 @@ impl Library {
             if complete { "completion" } else { "draft" },
         )?;
         if !complete {
-            let batch = catalog_batch::ReportBatch {
-                schema: 2,
-                binary: self.projects[p].binary.clone(),
-                expect_revision: None,
-                reports: vec![catalog_batch::ReportSave {
-                    id,
-                    expect: expected.into(),
-                    body: body.into(),
-                    evidence: evidence.into(),
-                }],
-                evidence_only: false,
-                reopen: false,
-            };
+            let batch = self.one_report(p, id, expected, body.into(), evidence.into());
             self.save_reports(p, &batch)?;
             return Ok(());
         }
+        // Completion from here on.
         let n = self.projects[p].nodes.iter().find(|n| n.id == id).unwrap();
         let (old_body, old_evidence) = self.read(p, id)?;
+        let states = self.completion_states(p, id);
         if old_body == body
             && old_evidence == evidence
-            && complete == (n.status == Status::Complete)
-            && self.completion_states(p, id)[&id] == n.status
+            && n.status == Status::Complete
+            && states[&id] == Status::Complete
         {
             return Ok(());
         }
-        let states = if complete {
-            self.completion_states(p, id)
-        } else {
-            Default::default()
-        };
-        if complete && self.review_flags(p)?.contains_key(&id) {
+        if self.review_flags(p)?.contains_key(&id) {
             return Err(
                 "This record is flagged for review. Clear the review flag before completing it."
                     .into(),
             );
         }
-        if complete {
-            self.check_proof(p, id)?;
+        self.check_proof(p, id)?;
+        if body.trim().is_empty() {
+            return Err("Write the compiled understanding report before marking complete.".into());
         }
-        if complete {
-            if body.trim().is_empty() {
-                return Err(
-                    "Write the compiled understanding report before marking complete.".into(),
-                );
-            }
-            if n.kind == Kind::Function && evidence.trim().is_empty() {
-                return Err("A function needs evidence references and claim classification before completion.".into());
-            }
-            let kids: Vec<_> = self.projects[p]
-                .nodes
-                .iter()
-                .filter(|k| k.parent == Some(id) && !k.context_only)
-                .collect();
-            if n.kind != Kind::Function
-                && (kids.is_empty() || kids.iter().any(|k| states[&k.id] != Status::Complete))
-            {
-                return Err("Every required child must be complete, and the parent needs its own compiled report.".into());
-            }
+        if n.kind == Kind::Function && evidence.trim().is_empty() {
+            return Err(
+                "A function needs evidence references and claim classification before completion."
+                    .into(),
+            );
         }
-        if complete
-            && self.projects[p]
-                .dependencies
-                .iter()
-                .filter(|e| e.dependent == id)
-                .any(|e| states[&e.prerequisite] != Status::Complete)
+        let kids: Vec<_> = self.projects[p]
+            .nodes
+            .iter()
+            .filter(|k| k.parent == Some(id) && !k.context_only)
+            .collect();
+        if n.kind != Kind::Function
+            && (kids.is_empty() || kids.iter().any(|k| states[&k.id] != Status::Complete))
+        {
+            return Err("Every required child must be complete, and the parent needs its own compiled report.".into());
+        }
+        if self.projects[p]
+            .dependencies
+            .iter()
+            .filter(|e| e.dependent == id)
+            .any(|e| states[&e.prerequisite] != Status::Complete)
         {
             return Err(
                 "Every tagged prerequisite must be complete before this function can be complete."
                     .into(),
             );
         }
-        let stamps = if complete {
-            self.dependency_stamps(p, id)
-        } else {
-            Default::default()
-        };
+        let stamps = self.dependency_stamps(p, id);
         if body.contains("<!-- research-") || evidence.contains("<!-- research-") {
             return Err("Reserved report markers cannot appear in report content.".into());
         }
@@ -1661,14 +1611,8 @@ impl Library {
             .iter_mut()
             .find(|n| n.id == id)
             .unwrap();
-        n.status = if complete {
-            Status::Complete
-        } else if body.trim().is_empty() && evidence.trim().is_empty() {
-            Status::NotStarted
-        } else {
-            Status::InProgress
-        };
-        n.accepted_hash = complete.then(|| hash(&report));
+        n.status = Status::Complete;
+        n.accepted_hash = Some(hash(&report));
         n.accepted_prerequisites = stamps;
         n.revision += 1;
         self.reopen_affected(p, id);
@@ -1693,17 +1637,8 @@ impl Library {
         }
         self.check_edit_token(p, id, expected, "draft")?;
         let batch = catalog_batch::ReportBatch {
-            schema: 2,
-            binary: self.projects[p].binary.clone(),
-            expect_revision: None,
-            reports: vec![catalog_batch::ReportSave {
-                id,
-                expect: expected.into(),
-                body: body.into(),
-                evidence: evidence.into(),
-            }],
             evidence_only: true,
-            reopen: false,
+            ..self.one_report(p, id, expected, body.into(), evidence.into())
         };
         self.save_reports(p, &batch).map(|_| ())
     }
@@ -1717,6 +1652,21 @@ impl Library {
         self.check_edit_token(p, id, expected, "draft")?;
         let (body, evidence) = self.read(p, id)?;
         let batch = catalog_batch::ReportBatch {
+            reopen: true,
+            ..self.one_report(p, id, expected, body, evidence)
+        };
+        self.save_reports(p, &batch).map(|_| ())
+    }
+    /// A schema-2 report batch saving one record's draft, checked against its token.
+    fn one_report(
+        &self,
+        p: usize,
+        id: u64,
+        expected: &str,
+        body: String,
+        evidence: String,
+    ) -> catalog_batch::ReportBatch {
+        catalog_batch::ReportBatch {
             schema: 2,
             binary: self.projects[p].binary.clone(),
             expect_revision: None,
@@ -1727,9 +1677,8 @@ impl Library {
                 evidence,
             }],
             evidence_only: false,
-            reopen: true,
-        };
-        self.save_reports(p, &batch).map(|_| ())
+            reopen: false,
+        }
     }
 }
 
@@ -2397,13 +2346,12 @@ impl Library {
 
 impl Library {
     fn views(&self) -> Vec<ProjectView> {
-        let lib = self;
-        lib.projects
+        self.projects
             .iter()
             .enumerate()
             .map(|(p, project)| {
                 let index = catalog_index::Index::new(project);
-                let states_all = index.states(&lib.dir(p));
+                let states_all = index.states(&self.dir(p));
                 let mut counts = std::collections::HashMap::<u64, (usize, usize, usize)>::new();
                 let mut inventory_functions = 0;
                 let mut required_functions = 0;
