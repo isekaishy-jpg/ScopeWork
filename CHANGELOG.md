@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+Fixes from the review of this batch ([proposal](docs/proposal-review-fixes-4.md)):
+
+- Only a pool's members (or `--directed-by`, or the dashboard) take a record out of a pool or move it to another; a move logs `remove` and `add`, and a new reason updates the entry (`update`).
+- Pool access is checked once, on every journal's intended changes, wherever a journal commits, so no write path can skip it. Re-saving identical text into a pooled record commits nothing and is no longer refused.
+- A damaged `proofs.json` no longer breaks reads; proof writes and function completion refuse with `proofs_unreadable`.
+- Pool checks look up chunks through one map per check (a whole-project batch was quadratic), and `node show` reads `pools.json` once.
+- The dashboard offers taking a record out of a pool only where it can succeed, and its queue panes show resource locks held without a coordinator, shared ones included.
+- An operation that panics in the coordinator no longer leaves its caller set for the thread.
+
 - **Shared work queue** ([proposal](docs/proposal-shared-work-queue.md)). `research job run --shared --resource NAME -- COMMAND` leases a resource of the research home rather than of a project, such as a verification worktree every session commits through: the same fair ordering, joining and release on a dead holder as project leases, with lock files in direct mode. It shows in `research queue --shared`, `job status --shared`, every project's `queue` (`shared_leases`) and the dashboard's queue panes.
 - **Research pools replace quarantine** ([proposal](docs/proposal-research-pools.md)). A pooled chunk or function (`research pool add`, or **Research pool** in the record panel) can be changed only by its pool's members: saves, completion, flags, claims, proofs, its prerequisites and structural changes. Every other agent may read it and build on it, and is offered it as open work never. Unlike quarantine, its status is its own, so it stays open work until it is researched. Agents register in the home (`research agent register`), and the human directs who joins (`pool join`). `node quarantine`, `unquarantine` and `quarantined` are gone. `pool migrate-quarantine` moves 0.14 quarantine records into the pool `quarantine`; until then, writes to a project with quarantine records are refused.
 - **Commands run as their caller through the coordinator** ([proposal](docs/proposal-caller-identity.md)). The coordinator recorded every operation under the name of the client that started it, so `impl complete` marks named the wrong agent. Each operation now runs as the submitter its own client sent.
