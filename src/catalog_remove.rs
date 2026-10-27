@@ -374,6 +374,17 @@ impl Library {
                 });
             }
         }
+        let proofs_path = root.join(crate::research::proofs::PROOFS);
+        if !removed.is_empty() && proofs_path.is_file() {
+            let original = fs::read_to_string(&proofs_path).map_err(|e| e.to_string())?;
+            if let Some(updated) = crate::research::proofs::without_removed(&original, &removed)? {
+                sidecars.push(Sidecar {
+                    path: crate::research::proofs::PROOFS.into(),
+                    before: original,
+                    after: updated,
+                });
+            }
+        }
         let quarantine_path = root.join(crate::research::quarantine::QUARANTINE);
         if !removed.is_empty() && quarantine_path.is_file() {
             let original = fs::read_to_string(&quarantine_path).map_err(|e| e.to_string())?;

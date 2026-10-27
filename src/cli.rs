@@ -408,6 +408,15 @@ pub(crate) enum ProjectCommand {
         #[arg(long)]
         apply: bool,
     },
+    /// Set whether completing a function needs a proof (its recreation and tests), and the
+    /// repository proof paths are checked against (an empty value clears it).
+    SetProof {
+        project: String,
+        #[arg(long, action = clap::ArgAction::Set)]
+        required: bool,
+        #[arg(long)]
+        repository: Option<String>,
+    },
     /// Set the short research-topic label displayed above the meters.
     SetScope {
         project: String,
@@ -570,6 +579,31 @@ pub(crate) enum NodeCommand {
         #[arg(long)]
         expect: String,
     },
+    /// Record the recreation and tests that prove a function, or clear them (--clear).
+    Proof {
+        project: String,
+        node: u64,
+        /// The recreation: a path in the repository, optionally followed by ::item.
+        #[arg(long, required_unless_present = "clear")]
+        recreation: Option<String>,
+        /// A test that checks it; repeat for several.
+        #[arg(long = "test", required_unless_present = "clear")]
+        tests: Vec<String>,
+        #[arg(long, conflicts_with_all = ["recreation", "tests"])]
+        clear: bool,
+    },
+    /// Record many proofs in one transaction: {"proofs":[{"id":N,"recreation":"...","tests":["..."]}]}.
+    ProofBatch {
+        project: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// List functions without a proof (--complete: only completed ones).
+    Unproven {
+        project: String,
+        #[arg(long)]
+        complete: bool,
+    },
 }
 #[derive(Subcommand)]
 pub(crate) enum HistoryCommand {
@@ -719,6 +753,7 @@ fn project_of(command: &Command) -> Option<&str> {
             | ProjectCommand::Revision { project }
             | ProjectCommand::SetBinary { project, .. }
             | ProjectCommand::SetScope { project, .. }
+            | ProjectCommand::SetProof { project, .. }
             | ProjectCommand::Tidy { project, .. },
         ) => Some(project.as_str()),
         Command::Node(
@@ -741,7 +776,10 @@ fn project_of(command: &Command) -> Option<&str> {
             | NodeCommand::Unquarantine { project, .. }
             | NodeCommand::Quarantined { project, .. }
             | NodeCommand::Complete { project, .. }
-            | NodeCommand::Reopen { project, .. },
+            | NodeCommand::Reopen { project, .. }
+            | NodeCommand::Proof { project, .. }
+            | NodeCommand::ProofBatch { project, .. }
+            | NodeCommand::Unproven { project, .. },
         ) => Some(project.as_str()),
         Command::Claim(
             ClaimCommand::Set { project, .. }
@@ -1055,6 +1093,7 @@ fn run(args: Args) -> Result<Value, String> {
                 | NodeCommand::Resolve { .. }
                 | NodeCommand::Flagged { .. }
                 | NodeCommand::Quarantined { .. }
+                | NodeCommand::Unproven { .. }
                 | NodeCommand::Delete { expect: None, .. }
                 | NodeCommand::Prune { expect: None, .. }
         ) | Command::Deps(DepsCommand::Get { .. })
@@ -1226,7 +1265,22 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             }
             ProjectCommand::Show { project: id } => {
                 let p = project(lib, &id)?;
-                Ok(json!(&lib.projects[p]))
+                let proofs = lib.proofs(p)?;
+                let mut out = json!(&lib.projects[p]);
+                out["proof"] = json!({"required":proofs.required,"repository":proofs.repository,"recorded":proofs.proofs.len()});
+                Ok(out)
+            }
+            ProjectCommand::SetProof {
+                project: id,
+                required,
+                repository,
+            } => {
+                let p = project(lib, &id)?;
+                lib.set_proof_policy(p, required, repository.as_deref())?;
+                let proofs = lib.proofs(p)?;
+                Ok(
+                    json!({"project":id,"required":proofs.required,"repository":proofs.repository,"revision":lib.projects[p].revision}),
+                )
             }
             ProjectCommand::SetBinary {
                 project: id,
@@ -1440,6 +1494,57 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 }).collect();
                 Ok(json!({"project":id,"quarantined":rows,"records_covered":covered.len()}))
             }
+            NodeCommand::Proof {
+                project: id,
+                node,
+                recreation,
+                tests,
+                clear,
+            } => {
+                let p = project(lib, &id)?;
+                let input = (!clear).then(|| crate::research::proofs::ProofInput {
+                    id: node,
+                    recreation: recreation.unwrap_or_default(),
+                    tests,
+                });
+                lib.set_proofs(p, &[(node, input)])?;
+                node_view(lib, p, node)
+            }
+            NodeCommand::ProofBatch { project: id, file } => {
+                let p = project(lib, &id)?;
+                #[derive(serde::Deserialize)]
+                struct Request {
+                    proofs: Vec<crate::research::proofs::ProofInput>,
+                }
+                let request: Request =
+                    serde_json::from_slice(&fs::read(file).map_err(|e| e.to_string())?)
+                        .map_err(|e| e.to_string())?;
+                let entries: Vec<_> = request
+                    .proofs
+                    .into_iter()
+                    .map(|input| (input.id, Some(input)))
+                    .collect();
+                lib.set_proofs(p, &entries)?;
+                Ok(
+                    json!({"project":id,"recorded":entries.len(),"revision":lib.projects[p].revision}),
+                )
+            }
+            NodeCommand::Unproven {
+                project: id,
+                complete,
+            } => {
+                let p = project(lib, &id)?;
+                let proofs = lib.proofs(p)?;
+                let states = lib.effective_all(p);
+                let rows: Vec<_> = lib.projects[p]
+                    .nodes
+                    .iter()
+                    .filter(|n| n.kind == Kind::Function && !proofs.proofs.contains_key(&n.id))
+                    .filter(|n| !complete || states[&n.id] == Status::Complete)
+                    .map(|n| json!({"id":n.id,"name":n.name,"rva":n.rva.map(|r| format!("0x{r:08X}")),"effective_status":states[&n.id],"context_only":n.context_only}))
+                    .collect();
+                Ok(json!({"project":id,"required":proofs.required,"unproven":rows}))
+            }
             NodeCommand::Flagged { project: id } => {
                 let p = project(lib, &id)?;
                 let flags = lib.review_flags(p)?;
@@ -1522,6 +1627,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             let covered = lib.claim_index(p, &claims);
             let queue = lib.review_queue(p, &states)?;
             let quarantined = lib.quarantined(p);
+            let proofs = lib.proofs(p)?;
             let mut counts: std::collections::BTreeMap<
                 String,
                 std::collections::BTreeMap<String, usize>,
@@ -1534,7 +1640,8 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 let blocked_prerequisites:Vec<_>=deps.get(&n.id).into_iter().flatten().copied().filter(|id|states[id]!=Status::Complete).collect();
                 // Review needs written research: the record's own report has been started. A parent whose
                 // children are all complete but whose own report is empty is ready for synthesis instead.
-                let unblocked = states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty());
+                let unproven = proofs.required&&n.kind==Kind::Function&&!proofs.proofs.contains_key(&n.id);
+                let unblocked = states[&n.id]!=Status::Complete&&!flags.contains_key(&n.id)&&!unproven&&blocked_children.is_empty()&&blocked_prerequisites.is_empty()&&(n.kind==Kind::Function||!children.is_empty());
                 let ready_for_review = unblocked&&n.status!=Status::NotStarted;
                 let ready_for_synthesis = unblocked&&n.status==Status::NotStarted&&n.kind!=Kind::Function;
                 if ready && !ready_for_review { return None; }
@@ -1563,6 +1670,15 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                 out["ready_for_review"] = json!(ready_count);
                 out["ready_for_synthesis"] = json!(synthesis_count);
                 out["quarantined"] = json!(quarantined.len());
+                out["unproven_complete"] = json!(
+                    lib.projects[p]
+                        .nodes
+                        .iter()
+                        .filter(|n| n.kind == Kind::Function
+                            && states.get(&n.id) == Some(&Status::Complete)
+                            && !proofs.proofs.contains_key(&n.id))
+                        .count()
+                );
             } else {
                 out["records"] = json!(records);
             }
@@ -1973,6 +2089,10 @@ pub(crate) fn route(command: &Command) -> Route {
         Command::Project(ProjectCommand::SetScope { project, .. }) => {
             write_route(project, "set-scope", vec![], &["scope"], false, 0)
         }
+        // Proof writes touch only their sidecar: record operations that may share a commit.
+        Command::Project(ProjectCommand::SetProof { project, .. }) => {
+            write_route(project, "proof", vec![], &["proof"], true, 0)
+        }
         Command::Project(
             ProjectCommand::List | ProjectCommand::Create { .. } | ProjectCommand::Tidy { .. },
         ) => Route::Direct,
@@ -1982,7 +2102,19 @@ pub(crate) fn route(command: &Command) -> Route {
             NodeCommand::List { project, .. }
             | NodeCommand::Flagged { project }
             | NodeCommand::Quarantined { project }
+            | NodeCommand::Unproven { project, .. }
             | NodeCommand::Resolve { project, .. } => read_route(project, None),
+            NodeCommand::Proof { project, node, .. } => {
+                write_route(project, "proof", vec![*node], &["proof"], true, 0)
+            }
+            NodeCommand::ProofBatch { project, file } => write_route(
+                project,
+                "proof",
+                ids_in(file, "proofs"),
+                &["proof"],
+                true,
+                0,
+            ),
             NodeCommand::Delete {
                 project,
                 expect: None,

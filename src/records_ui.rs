@@ -550,6 +550,9 @@ impl ResearchUi {
                         Err(e) => format!("Implemented in: unavailable ({e})"),
                     };
                     classic::label(ui, placed, None);
+                    if !self.proof.is_empty() {
+                        classic::label(ui, self.proof.clone(), None);
+                    }
                 }
                 if n.kind == Kind::Function
                     && classic::button(ui, true, "Open data folder").clicked()

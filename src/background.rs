@@ -102,6 +102,8 @@ pub(super) struct Loaded {
     /// Where the record is implemented, from the implementation tracker; an error when the
     /// tracker cannot be read, which never stops the record itself from loading.
     pub implemented_in: std::result::Result<Option<String>, String>,
+    /// The function's proof, "Unproven" when the project requires one, else empty.
+    pub proof: String,
 }
 pub(super) fn load(project: &str, id: u64) -> Result<Loaded> {
     let root = crate::paths::home(None)?.join("projects");
@@ -125,6 +127,11 @@ pub(super) fn load(project: &str, id: u64) -> Result<Loaded> {
         status: record.effective_status,
         blockers: lib.completion_blockers(0, id)?,
         implemented_in: implemented_in(&lib, id),
+        proof: match (&record.proof, record.unproven) {
+            (Some(p), _) => format!("Proof: {} (tests: {})", p.recreation, p.tests.join(", ")),
+            (None, true) => "Unproven: this project requires a proof before completion.".into(),
+            (None, false) => String::new(),
+        },
     })
 }
 

@@ -118,6 +118,8 @@ mod layout;
 mod ledger;
 #[path = "operations.rs"]
 pub(crate) mod operations;
+#[path = "proofs.rs"]
+pub mod proofs;
 #[path = "quarantine.rs"]
 pub mod quarantine;
 #[path = "records_ui.rs"]
@@ -1359,6 +1361,13 @@ impl Library {
         if self.review_flags(p)?.contains_key(&id) {
             blockers.push("Flagged for review: clear the flag first.".to_string());
         }
+        let proofs = self.proofs(p)?;
+        if proofs.required && self.unproven(p, id, &proofs) {
+            blockers.push(
+                "No proof: this project requires the recreation and its tests (research node proof)."
+                    .to_string(),
+            );
+        }
         if let Some(kind) = node.kind.child() {
             let kids: Vec<_> = project
                 .nodes
@@ -1536,6 +1545,9 @@ impl Library {
             );
         }
         if complete {
+            self.check_proof(p, id)?;
+        }
+        if complete {
             if body.trim().is_empty() {
                 return Err(
                     "Write the compiled understanding report before marking complete.".into(),
@@ -1708,6 +1720,8 @@ pub struct ResearchUi {
     blockers: Vec<String>,
     /// Where the loaded record is implemented, from the implementation tracker.
     implemented_in: std::result::Result<Option<String>, String>,
+    /// The loaded function's proof line (empty when there is nothing to show).
+    proof: String,
     /// Message styling: errors in the alert colour.
     message_error: bool,
     tab: usize,
@@ -1777,6 +1791,7 @@ impl ResearchUi {
             status: Status::NotStarted,
             blockers: vec![],
             implemented_in: Ok(None),
+            proof: String::new(),
             message_error: false,
             tab: 0,
             confirm_complete: false,
@@ -1918,6 +1933,7 @@ impl ResearchUi {
                                 self.status = v.status;
                                 self.blockers = v.blockers;
                                 self.implemented_in = v.implemented_in;
+                                self.proof = v.proof;
                                 self.dirty = false;
                                 self.scope_dirty = false;
                                 self.confirm_complete = false;
@@ -2462,6 +2478,7 @@ mod background_ui_tests {
             status: Status::NotStarted,
             blockers: vec![],
             implemented_in: Ok(None),
+            proof: String::new(),
         }
     }
     fn fixture_project(id: &str) -> std::sync::Arc<Project> {

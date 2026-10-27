@@ -206,6 +206,10 @@ pub struct RecordRead {
     pub review_flag: Option<super::ReviewFlag>,
     /// The quarantine covering this record (`node` is the record that carries it).
     pub quarantine: Option<serde_json::Value>,
+    /// The recreation and tests that prove this function, if recorded.
+    pub proof: Option<super::proofs::Proof>,
+    /// A function without a proof in a project that requires one.
+    pub unproven: bool,
 }
 impl Library {
     pub fn record(&self, p: usize, id: u64) -> Result<RecordRead> {
@@ -221,6 +225,9 @@ impl Library {
         let structural_token = prerequisites(project, &index, id)?;
         let effective_status =
             index.states_with(&self.dir(p), [id], &|| self.hash_overrides())[&id];
+        let proofs = self.proofs(p)?;
+        let unproven = proofs.required && self.unproven(p, id, &proofs);
+        let proof = proofs.proofs.get(&id).cloned();
         let requires = index.requires.get(&id).cloned().unwrap_or_default();
         let dependency_rvas = requires
             .iter()
@@ -257,6 +264,8 @@ impl Library {
                 serde_json::json!({"node": carrier, "origin": q.origin, "reason": q.reason,
                     "at_revision": q.at_revision, "by": q.by})
             }),
+            proof,
+            unproven,
         })
     }
 }

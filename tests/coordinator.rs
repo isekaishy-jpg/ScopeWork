@@ -1039,3 +1039,43 @@ fn the_writer_recovers_an_interrupted_import_before_committing() {
         "Second save through the coordinator"
     );
 }
+
+#[test]
+fn concurrent_proofs_merge_without_losing_any() {
+    let f = Fixture::new(12);
+    f.coordinated(&["project", "set-proof", "fixture", "--required", "true"]);
+    let running: Vec<_> = (3..15u64)
+        .map(|id| {
+            f.command("required", &[])
+                .args([
+                    "node",
+                    "proof",
+                    "fixture",
+                    &id.to_string(),
+                    "--recreation",
+                    &format!("src/f{id}.rs"),
+                    "--test",
+                    &format!("tests/f{id}.rs"),
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for child in running {
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let shown = f.direct(&["project", "show", "fixture"]);
+    assert_eq!(shown["proof"]["required"], true);
+    assert_eq!(shown["proof"]["recorded"], 12, "no proof lost");
+    assert_eq!(
+        f.direct(&["node", "show", "fixture", "9"])["proof"]["recreation"],
+        "src/f9.rs"
+    );
+}

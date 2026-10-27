@@ -125,6 +125,20 @@ research node unflag example 12
 
 A flag marks a record for review with a short reason. It does not change status, but it blocks completion until cleared. `node show` returns `review_flag`; `status` reports the flag count and a per-record `review_flag`, and flagged records are not `ready_for_review`. Flags are stored in `review-flags.json` beside `project.json` and change through the catalog journal. Deleting a node removes its flag. In the GUI, flagged records show ⚑ in the browser, the "Flagged for review" filter lists them, and the editor has flag and clear controls.
 
+## Proofs
+
+```powershell
+research project set-proof example --required true --repository C:/src/example-rs
+research node proof example 12 --recreation src/heap.rs::alloc --test tests/heap.rs
+research node proof example 12 --clear
+research node proof-batch example --file proofs.json   # {"proofs":[{"id":12,"recreation":"...","tests":["..."]}]}
+research node unproven example --complete
+```
+
+A proof names the recreation of a function (a path, optionally `::item`) and one or more tests that check it. When a project requires proof (`set-proof --required true`), a function cannot be completed without one: `node complete` fails with `proof_required`, and an unproven function is not `ready_for_review`. Saving drafts stays free, and chunks, architectures and the app take no proof. With `--repository` (an absolute path; `--repository ""` clears it), every recreation and test file must exist under it when the proof is recorded (`proof_path_missing` otherwise); whether the named item is still defined is the project's own check. `proof-batch` records many proofs in one transaction and refuses the whole batch on any invalid entry.
+
+Functions completed before the requirement stay complete; they show as unproven. `node show` returns `proof` and `unproven`, `node unproven` lists functions without a proof (`--complete`: only completed ones), `status --summary` counts `unproven_complete`, `project show` gives the policy under `proof`, and the GUI's Files group shows the proof or **Unproven**. Proofs are stored in `proofs.json` beside `project.json`, change through the catalog journal and merge in the coordinator like review flags. Deleting a node removes its proof.
+
 ## Quarantined records
 
 ```powershell
