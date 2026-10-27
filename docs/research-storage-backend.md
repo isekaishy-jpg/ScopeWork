@@ -165,3 +165,23 @@ A read-only look at how the research agents actually work in `3-3-5a` (their too
 - **The implementation tracker is not available to them yet.** It ships in 0.14.0a, and the installed Scopework is still 0.13.1a. Once installed, the proof crate is the project's implementation, and placements could be filled from the proof commits.
 - **Not only Claude agents.** Codex agents also file complaints and work on the project, so every interface must stay usable from a plain CLI.
 - **Two open complaints are about the project's own tools**, not Scopework: the contract gate's `SBB CL,CL` (already fixed in `wow-335a-rust`, with a test) and Ghidra's recovered C for `__cftog_l`. They belong in the tools' own records.
+
+## 12. Technical questions settled (2026-10-27)
+
+Measured with a disposable probe on this machine (Windows 10, the research home's disk) and on the live `3-3-5a` catalog, read only.
+
+| Question | Finding | Answer for the design |
+|---|---|---|
+| Commit cost | Append a framed record and flush (`sync_data`): median 2.4–2.9 ms for 200 B to 20 KB, p90 under 5 ms. Rewriting a 6.1 MB catalog with sync and rename: 13 ms here, growing with the catalog | Append per commit; the cost follows the change, not the project |
+| Readers while appending | Two reader processes re-read the log over 40,000 times each while a writer appended 3,000 records in two writes each: no sharing violation, no corrupt record; 35–54 reads ended inside a record being written and recognised it by its length and end mark | Readers take no lock: they read framed records up to the last complete one |
+| Publishing a checkpoint | A file held open by a reader can be deleted or renamed over (std opens with delete sharing); the reader keeps reading the old contents | A new checkpoint is a new file, named by the log; old ones are deleted afterwards |
+| Encoding (1) | A typical one-record change is about 160 bytes of JSON; the `3-3-5a` catalog (10.6 MB, 31,514 records, 85,227 edges) compresses with zlib to 12–14% (1.2–1.5 MB) and inflates in about 25 ms | JSON records inside checksummed frames (readable, small); checkpoints compressed whole |
+| Compression codec | zlib (`flate2`) and CRC-32 (`crc32fast`) are already in the lock file through the image library; zstd would be a new download | zlib now; the format names its codec, so zstd can follow |
+| Checkpoint policy (2) | Replaying a change costs a parse of its ~160–2,000 byte record | A checkpoint after every 4 MB of log, at `store init`, and on `store checkpoint` |
+| The receipt chain | `3-3-5a` holds 37,433 receipts for revisions 7 to 37,439, without a gap; each holds the record changes before and after, report texts before and after, sidecar texts, and the catalog hash before and after | A follower can rebuild every revision, and also walk back from the current catalog, checking each step against the recorded hash |
+| Writers without receipts | Import publication records itself in the import job (`publication/committed.json`), not as a receipt; layout migration (formats before 5) writes none | The follower re-synchronises from the catalog across such a gap and records the gap |
+| Side by side (architecture §9) | Every writer that matters leaves a receipt, including older builds, direct mode and the GUI | Follow the receipts (option B): the backend never touches the authoritative commit path |
+| Interface cut (architecture §12.1) | The commit path stays as it is during side by side | A store module beside `Library`, fed by receipts; the trait under `Library` waits for promotion |
+| Sibling order (architecture §12.4) | Order is the catalog's array order, which receipts carry as record positions | The store keeps the catalog as the catalog orders it; an explicit key waits for promotion |
+| Lock-free readers, GUI change detection (§12.6, §12.7) | Shown possible above | Store readers take no lock; the GUI keeps its current refresh until promotion |
+| Ghidra rebuilt from stored inputs (8) | A project-tools check, not Scopework's | Left to the projects |

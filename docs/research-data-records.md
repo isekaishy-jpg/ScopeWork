@@ -63,3 +63,11 @@ Data therefore also has to be addressable inside **files**, not only inside a lo
 - Folder naming: functions use the RVA; a data item at the same address scheme is safe only with the uniqueness rule above (no data start inside a function). Files and other address spaces need a prefix.
 - Whether the 225 `.text` data items stay data or are treated as parts of the functions that own them.
 - How the GUI shows a chunk's two kinds of children, and how the dashboard's meters count them.
+
+## Answers for the design (2026-10-27)
+
+- **Nesting:** data items stay flat in their chunk. Containment is allowed and follows from the extents, as with the 87 nested ledger items. Type fields belong to annotations, which the backend takes over at promotion.
+- **Identity:** an RVA names at most one record, function or data. Function extents are not in the catalog, so "no data start inside a function body" cannot be checked yet; a data item at a function's start address is refused.
+- **Folders:** `D<RVA>` beside the chunk's function folders, so a data folder can never be mistaken for a function's.
+- **The 225 `.text` items** may be data items; projects decide.
+- **Files and other address spaces** (the Populous data disks, the SNES ROM) wait for the backend's model of artifacts and address spaces. The first version places data in the project's image, by RVA, as functions are placed.
