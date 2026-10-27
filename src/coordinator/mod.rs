@@ -999,9 +999,15 @@ pub fn lock_queue(root: &Path, project: &str) -> Result<Value, String> {
         (Some(true), _) => vec![json!({"command": "another operation"})],
         _ => vec![],
     };
-    // Resources held by `job run` without a coordinator, the shared ones included.
+    // Resources held by `job run` without a coordinator: the project's own, and the research
+    // home's shared ones, which concern every project.
+    let shared = if project == research::SHARED {
+        Value::Null
+    } else {
+        research::lock_status_probing(root, research::SHARED, false)?["resources"].take()
+    };
     Ok(
-        json!({"project": project, "source": "locks", "running": running, "waiting": locks["waiting"], "resources": locks["resources"]}),
+        json!({"project": project, "source": "locks", "running": running, "waiting": locks["waiting"], "resources": locks["resources"], "shared_resources": shared}),
     )
 }
 

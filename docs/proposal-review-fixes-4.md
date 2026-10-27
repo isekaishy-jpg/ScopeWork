@@ -1,6 +1,6 @@
 # Proposal: fixes from the 2026-10-27 review of the shared-work batch
 
-Status: proposed 2026-10-27. Research is the review itself: a high-effort read of `ae82f78..378ca59` (the `deps set` token, proofs, the caller fix, research pools and the shared work queue). It reported ten findings, and the user asked for all ten to be fixed. Numbers follow the review's ranking.
+Status: implemented 2026-10-27. Research is the review itself: a high-effort read of `ae82f78..378ca59` (the `deps set` token, proofs, the caller fix, research pools and the shared work queue). It reported ten findings, and the user asked for all ten to be fixed. Numbers follow the review's ranking.
 
 ## 1. Non-members can take records out of a pool (high)
 

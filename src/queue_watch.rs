@@ -48,6 +48,24 @@ impl QueueView {
         };
         running.extend(shared(&value["shared_leases"]["held"]));
         waiting.extend(shared(&value["shared_leases"]["waiting"]));
+        // Without a coordinator: resource lock files held by `job run`, and their waiters.
+        for (field, prefix) in [("resources", ""), ("shared_resources", "shared: ")] {
+            for (name, lock) in value[field].as_object().into_iter().flatten() {
+                if lock["writer_active"].as_bool() == Some(true) {
+                    let holder = match lock["writer"]["pid"].as_u64() {
+                        Some(pid) => format!(" - pid {pid}"),
+                        None => String::new(),
+                    };
+                    running.push(format!("{prefix}lock on {name}{holder}"));
+                }
+                for waiter in lock["waiting"].as_array().into_iter().flatten() {
+                    let who = waiter["pid"]
+                        .as_u64()
+                        .map_or(String::new(), |pid| format!(" - pid {pid}"));
+                    waiting.push(format!("{prefix}lock on {name}{who}"));
+                }
+            }
+        }
         Self {
             project: value["project"].as_str().unwrap_or_default().to_string(),
             source: value["source"].as_str().unwrap_or_default().to_string(),
@@ -222,5 +240,12 @@ mod tests {
             shared.running,
             ["shared: lease lease on verify-worktree - astra"]
         );
+        let locked = QueueView::from_json(&json!({"project": "p", "source": "locks",
+            "running": [], "waiting": [],
+            "resources": {"ghidra": {"writer_active": false, "waiting": []}},
+            "shared_resources": {"verify-worktree": {"writer_active": true, "writer": {"pid": 12},
+                "waiting": [{"pid": 13}]}}}));
+        assert_eq!(locked.running, ["shared: lock on verify-worktree - pid 12"]);
+        assert_eq!(locked.waiting, ["shared: lock on verify-worktree - pid 13"]);
     }
 }
