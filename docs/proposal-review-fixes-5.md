@@ -22,8 +22,8 @@ Status: proposed 2026-10-27. Research is the review itself: a high-effort read o
 **Problem.** `sidecar_text` writes a missing sidecar's empty form before the caller knows whether anything changes. When nothing does, the file appears with no revision bump, and the coordinator records it as drift. The same happens when clearing a flag that does not exist, or restating the default proof policy.
 
 **Design.**
-- Reading a sidecar never writes.
-- `commit_sidecar` takes the current text, or none when the file is missing, together with the empty form. Only when a change will commit does it write the empty form, so the transaction still has a `before` to recover to.
+- Reading a sidecar never writes: a missing one reads as its empty form. That covers `sidecar_text` and the claims reader.
+- The commit's apply step replaces existing sidecar files. So `commit_or_stage` writes a missing sidecar's empty form only after the pool guard has passed, right before the commit that changes it.
 
 ## 4. A repeated quarantine migration commits nothing new (low)
 

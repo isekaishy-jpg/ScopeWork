@@ -58,6 +58,10 @@ pub(super) fn current_or_empty(root: &Path, name: &str, field: &str) -> Result<S
     }
 }
 /// Current text of a sidecar, creating an empty one first so its transaction has a `before`.
+/// The text of an empty sidecar keyed by node under `field`.
+pub(super) fn empty_text(field: &str) -> Result<String> {
+    write_map::<serde_json::Value>(field, &BTreeMap::new())
+}
 pub(super) fn ensure(root: &Path, name: &str, field: &str) -> Result<String> {
     let path = root.join(name);
     if !path.is_file() {
@@ -233,12 +237,9 @@ impl Library {
         Ok(true)
     }
     /// The claims sidecar as this view sees it (including claims staged earlier in a merged
-    /// commit), created empty first when it does not exist yet.
+    /// commit), or an empty one when it does not exist yet.
     fn claims_text(&self, p: usize) -> Result<String> {
-        match self.text_opt(p, CLAIMS)? {
-            Some(text) => Ok(text),
-            None => ensure(&self.dir(p), CLAIMS, "claims"),
-        }
+        self.sidecar_text(p, CLAIMS, &empty_text("claims")?)
     }
     /// Open review-queue entries: records reopened by structural changes and not complete again.
     pub fn review_queue(

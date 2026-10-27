@@ -577,28 +577,19 @@ impl Library {
         after_text: String,
         changes: Vec<u64>,
     ) -> Result<()> {
-        let root = self.dir(p);
         let field = if name == coordination::CLAIMS {
             "claims"
         } else {
             "entries"
         };
-        let before_text = match self.text_opt(p, name)? {
-            Some(text) => text,
-            None => coordination::ensure(&root, name, field)?,
-        };
+        let before_text = self.sidecar_text(p, name, &coordination::empty_text(field)?)?;
         self.commit_sidecar(p, name, before_text, after_text, changes, None)
     }
-    /// The text of sidecar `name`, writing `empty` first when it does not exist yet, so the
-    /// transaction that changes it has a `before` to recover to.
+    /// The text of sidecar `name`, or `empty` when it does not exist yet. Nothing is written:
+    /// a commit replays forward from its journal, so a missing sidecar needs no file before
+    /// the transaction that creates it, and a change that turns out to be none leaves no file.
     pub(super) fn sidecar_text(&self, p: usize, name: &str, empty: &str) -> Result<String> {
-        match self.text_opt(p, name)? {
-            Some(text) => Ok(text),
-            None => {
-                atomic(&self.dir(p).join(name), empty.as_bytes())?;
-                Ok(empty.to_string())
-            }
-        }
+        Ok(self.text_opt(p, name)?.unwrap_or_else(|| empty.to_string()))
     }
     /// Commits one sidecar's change from `before_text` to `after_text` as a catalog
     /// transaction (nothing when they are equal). `changes` are the records it changes on

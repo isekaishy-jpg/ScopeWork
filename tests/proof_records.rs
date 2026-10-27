@@ -338,3 +338,19 @@ fn a_damaged_proofs_file_keeps_reads_and_refuses_proof_writes_and_function_compl
         "proofs_unreadable",
     );
 }
+
+#[test]
+fn writes_that_change_nothing_leave_no_sidecar_files() {
+    let f = Fixture::new();
+    let dir = f.home.join("projects/fixture");
+    // The default proof policy, a flag that does not exist and a claim nobody holds.
+    f.ok(&["project", "set-proof", "fixture", "--required", "false"]);
+    f.ok(&["node", "unflag", "fixture", "3"]);
+    f.ok(&["claim", "release", "fixture", "2", "--owner", "tester"]);
+    for name in ["proofs.json", "review-flags.json", "claims.json"] {
+        assert!(!dir.join(name).exists(), "{name} was created");
+    }
+    // A real change creates the file in its transaction.
+    f.ok(&["project", "set-proof", "fixture", "--required", "true"]);
+    assert!(dir.join("proofs.json").is_file());
+}

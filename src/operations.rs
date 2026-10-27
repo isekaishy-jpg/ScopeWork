@@ -143,6 +143,13 @@ impl Library {
         } else {
             self.check_journal(p, &j)?;
         }
+        // The apply step replaces existing sidecar files: a sidecar this commit creates starts
+        // as its `before` (empty) form, written only now that the change will commit.
+        for sidecar in &j.sidecars {
+            if self.text_opt(p, &sidecar.path)?.is_none() {
+                atomic(&self.dir(p).join(&sidecar.path), sidecar.before.as_bytes())?;
+            }
+        }
         let Some(staged) = self.staging.as_mut() else {
             let root = self.dir(p);
             return catalog_batch::commit(&root, &mut self.projects[p], &j);
