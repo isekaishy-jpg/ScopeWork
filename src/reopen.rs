@@ -6,10 +6,9 @@
 //! function, transitively through records it reopens. A record that is not complete is left
 //! untouched: it has no acceptance to lose, and its completion token will see the change
 //! through the changed records' own revisions. Bumping such records only produced conflicts
-//! and journal noise. A quarantined record is never reopened and never passed through: its
-//! effective status is Complete whatever changes around it, and its own status must survive
-//! for when the quarantine is lifted. A context-only record is inventory, not part of its
-//! parent's required research, so a change to it does not reach its parent either.
+//! and journal noise. A context-only record is inventory, not part of its parent's required
+//! research, so a change to it does not reach its parent either. Pooled records are reopened
+//! like any other: a pool decides who may change a record, not how changes reach it.
 use super::*;
 use std::collections::{HashMap, HashSet};
 

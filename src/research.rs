@@ -135,7 +135,6 @@ pub use catalog_batch::Removal;
 pub use catalog_batch::ReviewFlag;
 pub use pools::{Pool, Pooled};
 pub(crate) use report_hashes::retain_on_this_thread as retain_report_hashes_on_this_thread;
-// Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 thread_local! {
     static CALLER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
@@ -288,6 +287,7 @@ pub(crate) fn record_name(name: &str) -> Result<String> {
     header_text("Node name", name)?;
     Ok(name.to_string())
 }
+// Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
 /// A record's report path relative to its project folder, given its parent's report path (none
 /// for the App and architectures). The one rule for report locations: `app.md`,
 /// `architectures/<id>/research.md`, then a folder per chunk (`<id>`) and per function (`<RVA>`)
@@ -643,10 +643,10 @@ pub fn resource_lock_status<const N: usize>(
     }
     out
 }
-/// The lock name of a project's tool resource.
 /// The lock scope of home-wide shared resources (`job run --shared`). Project IDs never begin
 /// with an underscore, so its lock names cannot collide with a project's.
 pub const SHARED: &str = "_shared";
+/// The lock name of a tool resource of a project (or of the `SHARED` scope).
 fn resource_lock_id(project: &str, resource: &str) -> String {
     format!("{project}.res-{resource}")
 }
@@ -1480,7 +1480,8 @@ impl Library {
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
         self.add_directed(p, parent, name, rva, None)
     }
-    /// `add`, accepting a quarantined parent when the human directed it.
+    /// `add`, accepting a pooled parent the caller is not a member for when the human directed
+    /// it.
     pub fn add_directed(
         &mut self,
         p: usize,
@@ -1694,7 +1695,7 @@ impl Library {
     }
     /// Reopens a completed record for review: its status returns to In Progress and its
     /// acceptance is cleared, as if its text had changed, and the records that depend on it
-    /// reopen with it. A quarantined record keeps its status (lifting restores it).
+    /// reopen with it.
     pub fn reopen(&mut self, p: usize, id: u64, expected: &str) -> Result<()> {
         if !self.writable(p) {
             return self.write_project(p, |l, p| l.reopen(p, id, expected));
@@ -2288,7 +2289,8 @@ impl Library {
     pub fn set_dependencies(&mut self, p: usize, id: u64, rvas: &str) -> Result<()> {
         self.set_dependencies_directed(p, id, rvas, None)
     }
-    /// `set_dependencies`, accepting quarantined records when the human directed it.
+    /// `set_dependencies`, accepting a pooled record the caller is not a member for when the
+    /// human directed it.
     pub fn set_dependencies_directed(
         &mut self,
         p: usize,

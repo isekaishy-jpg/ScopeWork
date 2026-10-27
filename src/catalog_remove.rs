@@ -20,7 +20,8 @@ pub struct Removal {
     pub include_authored: bool,
     #[serde(default)]
     pub recursive: bool,
-    /// The human's instruction, required to remove quarantined records.
+    /// The human's instruction, required to remove pooled records the caller is not a member
+    /// for.
     #[serde(default)]
     pub directed_by: Option<String>,
 }
@@ -74,7 +75,7 @@ impl Library {
             .as_deref()
             .map(str::trim)
             .filter(|d| !d.is_empty());
-        let sealed = if directed_by.is_some() {
+        let closed = if directed_by.is_some() {
             HashSet::new()
         } else {
             self.closed_to_caller(p)
@@ -113,7 +114,7 @@ impl Library {
                         report_exclusion(&mut excluded, n, json!({"reason":"keep"}));
                         continue;
                     }
-                    if sealed.contains(&n.id) {
+                    if closed.contains(&n.id) {
                         report_exclusion(
                             &mut excluded,
                             n,
@@ -219,7 +220,7 @@ impl Library {
             }
         }
         // A surviving record that loses a prerequisite has its own prerequisites changed, which
-        // the seal covers like any other change to them.
+        // its pool covers like any other change to them.
         let losing: std::collections::BTreeSet<u64> = before
             .dependencies
             .iter()

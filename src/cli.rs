@@ -1221,7 +1221,6 @@ fn run(args: Args) -> Result<Value, String> {
     }
     execute(args.command, &mut lib)
 }
-/// The project IDs in `root`, sorted: folders with a catalog.
 /// `research agent`: the research home's registered agents, never a project.
 fn agents(home: &std::path::Path, command: &AgentCommand) -> Result<Value, String> {
     match command {

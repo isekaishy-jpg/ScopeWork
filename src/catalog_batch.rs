@@ -25,7 +25,8 @@ pub struct Batch {
     pub update: Vec<Update>,
     #[serde(default)]
     pub reorder: Vec<Order>,
-    /// The human's instruction when the batch touches quarantined records.
+    /// The human's instruction when the batch touches pooled records the caller is not a
+    /// member for.
     #[serde(default)]
     pub directed_by: Option<String>,
 }
@@ -150,7 +151,7 @@ pub(super) struct Journal {
     /// `report_sha256` is an edited report's old hash to its new hash when the catalog commits.
     #[serde(default)]
     pub(super) repin_ledger: bool,
-    /// The human's instruction for a change to quarantined records (`--directed-by`).
+    /// The human's instruction for a change to pooled records (`--directed-by`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) directed_by: Option<String>,
     /// With `repin_ledger`: re-pin only these records' edits (mechanical ones); empty means all.
@@ -664,12 +665,12 @@ impl Library {
         }
         // A reset of every record passes over the pooled ones the caller may not change; named
         // ones are checked with the journal.
-        let sealed = self.closed_to_caller(p);
+        let closed = self.closed_to_caller(p);
         let mut after = before.clone();
         let mut reset = vec![];
         for n in &mut after.nodes {
             if n.status == Status::InProgress
-                && !sealed.contains(&n.id)
+                && !closed.contains(&n.id)
                 && (request.all_in_progress || wanted.contains(&n.id))
             {
                 n.status = Status::NotStarted;
@@ -728,7 +729,7 @@ impl Library {
     }
     /// `commit_metadata`, optionally re-pinning annotation-ledger rows of the rewritten reports
     /// (for mechanical rewrites that keep completion), and recording the human's direction for
-    /// a change to quarantined records.
+    /// a change to pooled records.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_metadata_with(
         &mut self,
