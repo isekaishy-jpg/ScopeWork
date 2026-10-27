@@ -122,11 +122,10 @@ fn metadata(path: &Path) -> Option<(u64, u64)> {
     Some((meta.len(), mtime))
 }
 fn hash_file(path: &Path) -> Option<String> {
-    use sha2::{Digest, Sha256};
     let bytes = fs::read(path).ok()?;
     // Status hashes the report as text; a non-UTF-8 file is never a valid accepted report.
     std::str::from_utf8(&bytes).ok()?;
-    Some(format!("{:x}", Sha256::digest(&bytes)))
+    Some(sha256_hex(&bytes))
 }
 
 /// The shared runtime's Low workers for bulk passes, or `None` (serial) if it cannot start.

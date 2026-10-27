@@ -69,10 +69,6 @@ fn record_changes<T: PartialEq + Serialize, K: Eq + std::hash::Hash>(
 fn delta(j: &Journal) -> Result<Value> {
     Ok(delta_with_after(j)?.0)
 }
-fn sha256(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
-}
 /// The last catalog this process fingerprinted, with its fingerprint. A commit's after-catalog
 /// is usually the next commit's before-catalog, so its fingerprint is reused instead of
 /// serialising and hashing the catalog again. Reuse requires equality: catalogs serialise
@@ -85,7 +81,7 @@ fn before_fingerprint(before: &Project) -> Result<String> {
     {
         return Ok(hash.clone());
     }
-    Ok(sha256(&catalog_bytes(before)?))
+    Ok(sha256_hex(&catalog_bytes(before)?))
 }
 fn remember_fingerprint(catalog: &Project, hash: &str) {
     if let Ok(mut last) = LAST_FINGERPRINT.lock() {
@@ -97,7 +93,7 @@ fn remember_fingerprint(catalog: &Project, hash: &str) {
 fn delta_with_after(j: &Journal) -> Result<(Value, Vec<u8>)> {
     let after_bytes = catalog_bytes(&j.after)?;
     let before_hash = before_fingerprint(&j.before)?;
-    let after_hash = sha256(&after_bytes);
+    let after_hash = sha256_hex(&after_bytes);
     let mut changes = serde_json::Map::new();
     changes.insert(
         "nodes".into(),

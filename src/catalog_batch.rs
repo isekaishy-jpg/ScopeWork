@@ -455,9 +455,7 @@ fn finish(
     } else {
         rename_retrying(&folder, &receipt).map_err(|e| at(&folder, e))?;
     }
-    let committed_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let committed_at = unix_now();
     // Debug builds only: fails the receipt's final journal write this many times, for the
     // regression test of a retry after the pending folder became the receipt.
     #[cfg(debug_assertions)]

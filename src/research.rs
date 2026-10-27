@@ -166,9 +166,24 @@ pub fn caller() -> String {
         .or_else(|| std::env::var("USERNAME").ok())
         .unwrap_or_else(|| "unknown".into())
 }
-fn hash(text: &str) -> String {
+/// SHA-256 of `bytes` as lowercase hexadecimal: the one hash of reports, catalogs and files.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(text.as_bytes()))
+    format!("{:x}", Sha256::digest(bytes))
+}
+fn hash(text: &str) -> String {
+    sha256_hex(text.as_bytes())
+}
+/// Seconds since the Unix epoch (0 on a clock set before 1970).
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+/// A JSON file parsed as `T`; errors name the file.
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 /// The values a binary identity pins: SHA-256 digests (64 hex digits) and hexadecimal `0x`
 /// values such as image bases and mappings, lowercased for comparison.
@@ -254,17 +269,20 @@ pub(crate) fn valid_id(id: &str) -> bool {
             && (id.starts_with("com") || id.starts_with("lpt"))
             && matches!(id.as_bytes()[3], b'1'..=b'9'))
 }
+/// One hexadecimal RVA, with an optional `0x` and surrounding spaces.
+pub(crate) fn parse_rva(text: &str) -> Result<u32> {
+    let rva = text.trim();
+    let digits = rva
+        .strip_prefix("0x")
+        .or_else(|| rva.strip_prefix("0X"))
+        .unwrap_or(rva);
+    u32::from_str_radix(digits, 16).map_err(|_| format!("Invalid hexadecimal RVA: {rva}"))
+}
 /// A list of hexadecimal RVAs separated by commas or whitespace, each with an optional `0x`.
 pub(crate) fn parse_rvas(text: &str) -> Result<Vec<u32>> {
     text.split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
-        .map(|rva| {
-            let digits = rva
-                .strip_prefix("0x")
-                .or_else(|| rva.strip_prefix("0X"))
-                .unwrap_or(rva);
-            u32::from_str_radix(digits, 16).map_err(|_| format!("Invalid hexadecimal RVA: {rva}"))
-        })
+        .map(parse_rva)
         .collect()
 }
 /// Refuses text that every report header renders ahead of the markers delimiting a report's
@@ -488,6 +506,12 @@ impl Drop for Ticket {
         let _ = fs::remove_file(&self.lock);
     }
 }
+/// What lock holder and waiter records say about this process: its first three arguments, and
+/// the time.
+fn this_process() -> (String, u64) {
+    let command: Vec<String> = std::env::args().skip(1).take(3).collect();
+    (command.join(" "), unix_now())
+}
 fn take_ticket(folder: &Path, id: &str, writable: bool) -> Option<Ticket> {
     let waiters = folder.join(format!("{id}.waiters"));
     fs::create_dir_all(&waiters).ok()?;
@@ -514,11 +538,8 @@ fn take_ticket(folder: &Path, id: &str, writable: bool) -> Option<Ticket> {
         return None;
     }
     let record = waiters.join(format!("{name}.json"));
-    let command: Vec<String> = std::env::args().skip(1).take(3).collect();
-    let since = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let info = serde_json::json!({"pid": std::process::id(), "command": command.join(" "), "since_unix": since, "write": writable});
+    let (command, since) = this_process();
+    let info = serde_json::json!({"pid": std::process::id(), "command": command, "since_unix": since, "write": writable});
     let _ = fs::write(&record, info.to_string());
     Some(Ticket {
         name,
@@ -793,11 +814,8 @@ fn project_lock(root: &Path, id: &str, writable: bool) -> Result<fs::File> {
     }
     if writable {
         // Waiters read this to say who holds the lock; it is advisory and never trusted for safety.
-        let command: Vec<String> = std::env::args().skip(1).take(3).collect();
-        let since = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let holder = serde_json::json!({"pid": std::process::id(), "command": command.join(" "), "since": format!("unix {since}")});
+        let (command, since) = this_process();
+        let holder = serde_json::json!({"pid": std::process::id(), "command": command, "since": format!("unix {since}")});
         let _ = fs::write(folder.join(format!("{id}.holder")), holder.to_string());
     }
     Ok(file)
@@ -1507,11 +1525,7 @@ impl Library {
             if self.projects[p].binary.trim().is_empty() {
                 return Err("Set the project's binary build/hash before adding functions.".into());
             }
-            let x = u32::from_str_radix(
-                rva.trim().trim_start_matches("0x").trim_start_matches("0X"),
-                16,
-            )
-            .map_err(|_| "Enter an RVA in hexadecimal, not a VA.")?;
+            let x = parse_rva(rva).map_err(|_| "Enter an RVA in hexadecimal, not a VA.")?;
             if self.projects[p].nodes.iter().any(|n| n.rva == Some(x)) {
                 return Err("That function already has a canonical file in this project.".into());
             }
@@ -2378,30 +2392,6 @@ impl Library {
             // be named as a prerequisite, since later work builds on pooled research.
             vec![id],
         )
-    }
-    pub fn set_dependencies_by_rva(
-        &mut self,
-        project: &str,
-        function: &str,
-        dependencies: &str,
-    ) -> Result<()> {
-        let p = self
-            .projects
-            .iter()
-            .position(|p| p.id == project)
-            .ok_or("Unknown project ID")?;
-        let rva = u32::from_str_radix(
-            function.trim_start_matches("0x").trim_start_matches("0X"),
-            16,
-        )
-        .map_err(|_| "Invalid function RVA")?;
-        let id = self.projects[p]
-            .nodes
-            .iter()
-            .find(|n| n.rva == Some(rva))
-            .ok_or("Unknown function RVA in this project")?
-            .id;
-        self.set_dependencies(p, id, dependencies)
     }
 }
 

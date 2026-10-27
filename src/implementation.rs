@@ -103,9 +103,7 @@ fn valid_name(name: &str) -> Result<String> {
 /// Who completes something: the submitter the coordinator also reports, else the user name.
 fn completion() -> Completion {
     let by = caller();
-    let at_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let at_unix = unix_now();
     Completion { by, at_unix }
 }
 

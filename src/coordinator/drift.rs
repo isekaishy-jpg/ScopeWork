@@ -31,10 +31,9 @@ fn stamp(path: &Path) -> Stamp {
     Some((meta.len(), meta.modified().ok()?))
 }
 fn hash(path: &Path) -> Option<String> {
-    use sha2::{Digest, Sha256};
     std::fs::read(path)
         .ok()
-        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+        .map(|bytes| crate::research::sha256_hex(&bytes))
 }
 
 /// One change found outside its owner.

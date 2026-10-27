@@ -690,9 +690,7 @@ impl Library {
         if let Some(bad) = nodes.iter().find(|id| !known.contains(id)) {
             return Err(format!("Unknown node {bad} in history entry"));
         }
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let at = unix_now();
         let entry = json!({
             "kind": "tooling",
             "entry_kind": entry_kind,

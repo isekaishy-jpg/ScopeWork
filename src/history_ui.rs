@@ -46,12 +46,7 @@ impl HistoryView {
                     .map_err(|_| format!("Node is a record ID: {n}"))
             })
             .transpose()?;
-        let rva = text(&self.rva)
-            .map(|r| {
-                let digits = r.trim_start_matches("0x").trim_start_matches("0X");
-                u32::from_str_radix(digits, 16).map_err(|_| format!("RVA is hexadecimal: {r}"))
-            })
-            .transpose()?;
+        let rva = text(&self.rva).map(|r| super::parse_rva(&r)).transpose()?;
         let from = text(&self.from).map(|d| day_start(&d)).transpose()?;
         let to = text(&self.to)
             .map(|d| day_start(&d).map(|t| t + 86_400))

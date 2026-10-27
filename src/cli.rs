@@ -1882,13 +1882,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
         }) => {
             let p = project(lib, &id)?;
             use crate::research::history::day_start;
-            let rva = rva
-                .map(|r| {
-                    let digits = r.trim().trim_start_matches("0x").trim_start_matches("0X");
-                    u32::from_str_radix(digits, 16)
-                        .map_err(|_| format!("RVAs are hexadecimal: {r}"))
-                })
-                .transpose()?;
+            let rva = rva.map(|r| crate::research::parse_rva(&r)).transpose()?;
             let from = from.as_deref().map(day_start).transpose()?;
             let to = to
                 .as_deref()

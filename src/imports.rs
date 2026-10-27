@@ -85,14 +85,6 @@ struct Publication {
 fn json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     atomic(path, &serde_json::to_vec(value).map_err(|e| e.to_string())?)
 }
-fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?)
-        .map_err(|e| e.to_string())
-}
-fn digest(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
-}
 fn job_path(root: &Path, id: &str) -> Result<PathBuf> {
     uuid::Uuid::parse_str(id).map_err(|_| "Invalid import job ID")?;
     Ok(root.join("tools/workspaces/import-jobs").join(id))
@@ -232,7 +224,7 @@ pub fn reserve(root: &Path, project: &str, batch: &Batch) -> Result<Job> {
         &Reservation {
             binary: before.binary.clone(),
             structural_epoch: before.structural_epoch,
-            request_hash: digest(&request),
+            request_hash: sha256_hex(&request),
         },
     )?;
     let mut job = Job {
@@ -268,7 +260,7 @@ pub fn status(root: &Path, project: &str, id: &str) -> Result<Job> {
     let project_root = root.join(project);
     let folder = job_path(&project_root, id)?;
     layout::inside(&project_root, &folder)?;
-    let job: Job = read(&folder.join("manifest.json"))?;
+    let job: Job = read_json(&folder.join("manifest.json"))?;
     if job.schema != 1 || job.project != project || job.id != id {
         return Err("Invalid import manifest identity".into());
     }
@@ -352,9 +344,9 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
     if lib.projects[0].active_import.as_deref() != Some(&job.id) {
         return Err("reservation_conflict: job is not registered in the catalog".into());
     }
-    let reservation: Reservation = read(&folder.join("reservation.json"))?;
+    let reservation: Reservation = read_json(&folder.join("reservation.json"))?;
     let request_bytes = fs::read(folder.join("request.json")).map_err(|e| e.to_string())?;
-    if digest(&request_bytes) != reservation.request_hash {
+    if sha256_hex(&request_bytes) != reservation.request_hash {
         return Err("Import request changed".into());
     }
     let batch: Batch = serde_json::from_slice(&request_bytes).map_err(|e| e.to_string())?;
@@ -431,7 +423,7 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
                     .collect(),
             };
             if planned.exists() {
-                let old: Segment = read(&planned)?;
+                let old: Segment = read_json(&planned)?;
                 if serde_json::to_vec(&old).unwrap() != serde_json::to_vec(&segment).unwrap() {
                     return Err("Prepared segment changed".into());
                 }
@@ -439,7 +431,7 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
                 json(&planned, &segment)?;
             }
             if done.exists() {
-                let expected = digest(&fs::read(&planned).map_err(|e| e.to_string())?);
+                let expected = sha256_hex(&fs::read(&planned).map_err(|e| e.to_string())?);
                 if fs::read_to_string(&done).map_err(|e| e.to_string())? != expected {
                     return Err("Prepared checkpoint changed".into());
                 }
@@ -474,7 +466,7 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
             *job.timings_ms.entry("file_preparation".into()).or_default() += elapsed(files);
             atomic(
                 &done,
-                digest(&fs::read(&planned).map_err(|e| e.to_string())?).as_bytes(),
+                sha256_hex(&fs::read(&planned).map_err(|e| e.to_string())?).as_bytes(),
             )?;
             job.prepared += segment.ids.len();
             checkpoint(folder, job)?;
@@ -499,7 +491,7 @@ fn prepare_and_publish(root: &Path, job: &mut Job, folder: &Path) -> Result<()> 
             return Ok(());
         }
         let planned = folder.join("segments").join(format!("{sequence:06}.json"));
-        let segment: Segment = read(&planned)?;
+        let segment: Segment = read_json(&planned)?;
         verify_outputs(&project_root, &segment.outputs)?;
         job.verified += segment.ids.len();
         checkpoint(folder, job)?;
@@ -526,7 +518,7 @@ fn render_files(units: Vec<Unit>) -> Result<Vec<Prepared>> {
                 files: vec![(
                     Output {
                         path: u.path,
-                        hash: digest(&bytes),
+                        hash: sha256_hex(&bytes),
                         bytes: bytes.len(),
                     },
                     bytes,
@@ -580,7 +572,7 @@ fn write_owned(root: &Path, job: &str, output: &Output, bytes: &[u8]) -> Result<
     let path = root.join(&output.path);
     layout::inside(root, &path)?;
     if path.exists() {
-        if digest(&fs::read(&path).map_err(|e| e.to_string())?) != output.hash {
+        if sha256_hex(&fs::read(&path).map_err(|e| e.to_string())?) != output.hash {
             return Err(format!("prepared_file_conflict: {}", output.path));
         }
         return Ok(());
@@ -609,7 +601,7 @@ fn verify_outputs(root: &Path, outputs: &[Output]) -> Result<()> {
         let path = root.join(&output.path);
         layout::inside(root, &path)?;
         let bytes = fs::read(&path).map_err(|e| format!("Prepared file {}: {e}", output.path))?;
-        if bytes.len() != output.bytes || digest(&bytes) != output.hash {
+        if bytes.len() != output.bytes || sha256_hex(&bytes) != output.hash {
             return Err(format!("prepared_file_conflict: {}", output.path));
         }
     }
@@ -652,7 +644,7 @@ fn publish(
             "Creating a record in",
         )?;
         let before_hash =
-            digest(&fs::read(project_root.join("project.json")).map_err(|e| e.to_string())?);
+            sha256_hex(&fs::read(project_root.join("project.json")).map_err(|e| e.to_string())?);
         let mut after = before.clone();
         after.nodes.extend(new_nodes.clone());
         let index = catalog_index::Index::new(&after);
@@ -706,7 +698,7 @@ fn publish(
         atomic(&publication.join(&candidate), &bytes)?;
         let mut journal = Publication {
             before_hash,
-            after_hash: digest(&bytes),
+            after_hash: sha256_hex(&bytes),
             catalog: candidate,
             edits,
         };
@@ -729,7 +721,7 @@ fn publish(
                     .is_file()
             });
         if pending
-            || digest(&fs::read(project_root.join("project.json")).map_err(|e| e.to_string())?)
+            || sha256_hex(&fs::read(project_root.join("project.json")).map_err(|e| e.to_string())?)
                 != journal.before_hash
         {
             // This attempt's candidate is never published: do not leave it behind.
@@ -800,14 +792,14 @@ pub(super) fn recover(root: &Path, project: &mut Project) -> Result<()> {
         return Ok(());
     }
     layout::inside(root, &pending)?;
-    let journal: Publication = read(&pending)?;
+    let journal: Publication = read_json(&pending)?;
     let catalog = folder.join("publication").join(&journal.catalog);
     layout::inside(root, &catalog)?;
     let bytes = fs::read(&catalog).map_err(|e| e.to_string())?;
-    if digest(&bytes) != journal.after_hash {
+    if sha256_hex(&bytes) != journal.after_hash {
         return Err("Recovery catalog changed".into());
     }
-    let current = digest(&fs::read(root.join("project.json")).map_err(|e| e.to_string())?);
+    let current = sha256_hex(&fs::read(root.join("project.json")).map_err(|e| e.to_string())?);
     if current != journal.before_hash && current != journal.after_hash {
         return Err("recovery_conflict: catalog differs from publication inputs".into());
     }
@@ -830,7 +822,7 @@ pub(super) fn recover(root: &Path, project: &mut Project) -> Result<()> {
     if project.last_import.as_deref() != Some(&id) || project.active_import.is_some() {
         *project = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     }
-    let mut job: Job = read(&folder.join("manifest.json"))?;
+    let mut job: Job = read_json(&folder.join("manifest.json"))?;
     // The catalog owns the installed folders now; ownership markers only served a resume or a
     // cancel, which a published job no longer allows.
     let leftover = remove_markers(root, &folder, &id);
@@ -856,7 +848,7 @@ fn remove_markers(project_root: &Path, folder: &Path, id: &str) -> Vec<String> {
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(segment) = read::<Segment>(&path) {
+            if let Ok(segment) = read_json::<Segment>(&path) {
                 for output in segment.outputs {
                     if let Some(parent) = Path::new(&output.path).parent() {
                         folders.insert(parent.to_path_buf());
@@ -887,7 +879,7 @@ fn cancel_preparation(root: &Path, job: &mut Job, folder: &Path) -> Result<()> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let segment: Segment = read(&path)?;
+        let segment: Segment = read_json(&path)?;
         for output in &segment.outputs {
             let target = project_root.join(&output.path);
             layout::inside(&project_root, &target)?;
@@ -904,7 +896,7 @@ fn cancel_preparation(root: &Path, job: &mut Job, folder: &Path) -> Result<()> {
                 continue;
             }
             if target.exists() {
-                if digest(&fs::read(&target).map_err(|e| e.to_string())?) != output.hash {
+                if sha256_hex(&fs::read(&target).map_err(|e| e.to_string())?) != output.hash {
                     job.warnings
                         .push(format!("Preserved changed {}", output.path));
                     folders.insert(target.parent().unwrap().to_path_buf());
@@ -945,7 +937,7 @@ fn cancel_preparation(root: &Path, job: &mut Job, folder: &Path) -> Result<()> {
         lib.commit_catalog(0, catalog)?;
         fault("cancel_released");
     } else {
-        let release: serde_json::Value = read(&folder.join("cancel-release.json"))?;
+        let release: serde_json::Value = read_json(&folder.join("cancel-release.json"))?;
         if lib.projects[0].revision
             < release["revision"]
                 .as_u64()

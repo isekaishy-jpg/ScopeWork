@@ -73,9 +73,7 @@ pub fn register(home: &Path, name: &str) -> Result<bool, String> {
     }
     agents.agents.push(Agent {
         name,
-        registered_unix: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs()),
+        registered_unix: crate::research::unix_now(),
     });
     let bytes = serde_json::to_vec_pretty(&agents).map_err(|e| e.to_string())?;
     crate::research::atomic(&home.join(FILE), &bytes)?;

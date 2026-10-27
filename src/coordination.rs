@@ -27,11 +27,6 @@ pub struct QueueEntry {
     pub revision: u64,
 }
 
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
 fn read_map<T: serde::de::DeserializeOwned>(text: &str, field: &str) -> Result<BTreeMap<u64, T>> {
     if text.trim().is_empty() {
         return Ok(BTreeMap::new());
@@ -148,7 +143,7 @@ impl Library {
     /// Claims that are currently in force (unexpired), by node.
     pub fn claims(&self, p: usize) -> Result<BTreeMap<u64, Claim>> {
         let text = self.text_opt(p, CLAIMS)?.unwrap_or_default();
-        let now = now_unix();
+        let now = unix_now();
         Ok(read_map::<Claim>(&text, "claims")?
             .into_iter()
             .filter(|(_, c)| c.expires_unix.is_none_or(|t| t > now))
@@ -181,7 +176,7 @@ impl Library {
             return Err("A claim needs an owner.".into());
         }
         let mut all: BTreeMap<u64, Claim> = read_map(&self.claims_text(p)?, "claims")?;
-        let now = now_unix();
+        let now = unix_now();
         if let Some(existing) = all.get(&id)
             && existing.owner != owner
             && existing.expires_unix.is_none_or(|t| t > now)
