@@ -46,24 +46,19 @@ fn write_map<T: Serialize>(field: &str, map: &BTreeMap<u64, T>) -> Result<String
 pub(super) fn current_or_empty(root: &Path, name: &str, field: &str) -> Result<String> {
     match fs::read_to_string(root.join(name)) {
         Ok(text) => Ok(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            write_map::<serde_json::Value>(field, &BTreeMap::new())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => empty_text(field),
         Err(e) => Err(e.to_string()),
     }
 }
-/// Current text of a sidecar, creating an empty one first so its transaction has a `before`.
 /// The text of an empty sidecar keyed by node under `field`.
 pub(super) fn empty_text(field: &str) -> Result<String> {
     write_map::<serde_json::Value>(field, &BTreeMap::new())
 }
+/// Current text of a sidecar, creating an empty one first so its transaction has a `before`.
 pub(super) fn ensure(root: &Path, name: &str, field: &str) -> Result<String> {
     let path = root.join(name);
     if !path.is_file() {
-        atomic(
-            &path,
-            write_map::<serde_json::Value>(field, &BTreeMap::new())?.as_bytes(),
-        )?;
+        atomic(&path, empty_text(field)?.as_bytes())?;
     }
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }

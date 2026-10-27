@@ -11,6 +11,7 @@ pub mod client;
 mod drift;
 pub mod job;
 mod leases;
+pub(crate) use leases::{PAYLOAD_BYTES, PAYLOAD_TOO_LARGE};
 pub mod manifest;
 pub mod pipe;
 
@@ -1234,7 +1235,7 @@ impl Server {
         let payload = lease.get("payload").filter(|p| !p.is_null()).cloned();
         let bytes = payload.as_ref().map_or(0, |p| p.to_string().len());
         if bytes > leases::PAYLOAD_BYTES {
-            return refuse(send, "lease_refused: a payload may not exceed 1 MB".into());
+            return refuse(send, leases::PAYLOAD_TOO_LARGE.into());
         }
         let class = match lease["class"].as_str() {
             Some("bulk") => Class::Bulk,

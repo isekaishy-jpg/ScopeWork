@@ -1,7 +1,7 @@
 //! The Project history window: catalog receipts and tooling entries of the dashboard's project,
 //! newest first, filtered by kind, record, RVA and UTC day, with the selected entry's details.
 //! Entries are read on a background thread from the committed snapshot.
-use super::history::{HistoryFilter, KINDS, day_start, entry_line};
+use super::history::{HistoryFilter, KINDS, day_range, entry_line};
 use super::*;
 use crate::classic;
 use serde_json::Value;
@@ -47,10 +47,7 @@ impl HistoryView {
             })
             .transpose()?;
         let rva = text(&self.rva).map(|r| super::parse_rva(&r)).transpose()?;
-        let from = text(&self.from).map(|d| day_start(&d)).transpose()?;
-        let to = text(&self.to)
-            .map(|d| day_start(&d).map(|t| t + 86_400))
-            .transpose()?;
+        let (from, to) = day_range(text(&self.from).as_deref(), text(&self.to).as_deref())?;
         Ok(HistoryFilter {
             node,
             rva,
@@ -304,6 +301,7 @@ impl ResearchUi {
 
 #[cfg(test)]
 mod tests {
+    use super::super::history::day_start;
     use super::*;
     use serde_json::json;
 

@@ -11,7 +11,9 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 /// The largest payload one request may carry.
-pub(super) const PAYLOAD_BYTES: usize = 1 << 20;
+pub(crate) const PAYLOAD_BYTES: usize = 1 << 20;
+/// Why a larger payload is refused.
+pub(crate) const PAYLOAD_TOO_LARGE: &str = "lease_refused: a payload may not exceed 1 MB";
 
 /// What a waiting request's connection is told.
 #[derive(Debug, Clone, PartialEq)]

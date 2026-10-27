@@ -186,6 +186,13 @@ pub fn day_start(text: &str) -> Result<u64> {
     Ok(((era * 146_097 + doe - 719_468) * 86_400) as u64)
 }
 
+/// The Unix times a `--from`/`--to` day filter covers: from the start of `from` up to the end
+/// of `to` (the next day's start).
+pub fn day_range(from: Option<&str>, to: Option<&str>) -> Result<(Option<u64>, Option<u64>)> {
+    let from = from.map(day_start).transpose()?;
+    let to = to.map(|d| day_start(d).map(|t| t + 86_400)).transpose()?;
+    Ok((from, to))
+}
 /// One line for an entry: revision, UTC time, kind and what changed.
 pub fn entry_line(entry: &Value) -> String {
     let at = entry["at_unix"]
@@ -655,11 +662,7 @@ impl Library {
             });
         }
         let entry_kind = entry_kind.trim();
-        if entry_kind.is_empty()
-            || !entry_kind
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
+        if !crate::coordinator::manifest::valid_name(entry_kind) {
             return Err(
                 "History kinds are lowercase words joined by hyphens, such as ledger-change."
                     .into(),

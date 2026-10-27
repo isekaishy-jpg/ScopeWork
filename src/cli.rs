@@ -1008,8 +1008,8 @@ fn run(args: Args) -> Result<Value, String> {
                 None => None,
                 Some(path) => {
                     let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                    if bytes.len() > 1 << 20 {
-                        return Err("lease_refused: a payload may not exceed 1 MB".into());
+                    if bytes.len() > crate::coordinator::PAYLOAD_BYTES {
+                        return Err(crate::coordinator::PAYLOAD_TOO_LARGE.into());
                     }
                     Some(
                         serde_json::from_slice::<Value>(&bytes)
@@ -1878,13 +1878,8 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             to,
         }) => {
             let p = project(lib, &id)?;
-            use crate::research::history::day_start;
             let rva = rva.map(|r| crate::research::parse_rva(&r)).transpose()?;
-            let from = from.as_deref().map(day_start).transpose()?;
-            let to = to
-                .as_deref()
-                .map(|d| day_start(d).map(|t| t + 86_400))
-                .transpose()?;
+            let (from, to) = crate::research::history::day_range(from.as_deref(), to.as_deref())?;
             lib.history(
                 p,
                 &crate::research::history::HistoryFilter {

@@ -4,10 +4,11 @@ use std::collections::HashSet;
 
 /// A report's body and evidence, split at the markers every rendered report carries.
 pub(super) fn parts(text: &str) -> Result<(&str, &str)> {
-    text.split_once("\n<!-- research-content -->\n")
+    use catalog_index::{CONTENT_MARKER, EVIDENCE_MARKER};
+    text.split_once(&format!("\n{CONTENT_MARKER}\n"))
         .ok_or("Report marker is missing; restore the canonical report header before editing.")?
         .1
-        .split_once("\n<!-- research-evidence -->\n")
+        .split_once(&format!("\n{EVIDENCE_MARKER}\n"))
         .ok_or_else(|| {
             "Evidence marker is missing; restore the canonical report layout before editing.".into()
         })

@@ -1,6 +1,12 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 
+/// The line every report carries before its body, and the one before its evidence.
+pub(super) const CONTENT_MARKER: &str = "<!-- research-content -->";
+pub(super) const EVIDENCE_MARKER: &str = "<!-- research-evidence -->";
+/// What both markers begin with: report text and headers may never contain it.
+pub(super) const MARKER_PREFIX: &str = "<!-- research-";
+
 /// A per-operation index. The serialized vector remains the explicit sibling order.
 pub(super) struct Index<'a> {
     pub nodes: HashMap<u64, &'a Node>,
@@ -95,9 +101,13 @@ impl<'a> Index<'a> {
                 );
             }
         }
-        md += "\n## Research and understanding\n<!-- research-content -->\n";
+        md += "\n## Research and understanding\n";
+        md += CONTENT_MARKER;
+        md += "\n";
         md += body;
-        md += "\n<!-- research-evidence -->\n";
+        md += "\n";
+        md += EVIDENCE_MARKER;
+        md += "\n";
         md += evidence;
         md
     }

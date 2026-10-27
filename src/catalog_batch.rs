@@ -821,7 +821,8 @@ impl Library {
             if !seen.insert(input.id) {
                 return Err("Duplicate report ID".into());
             }
-            if input.body.contains("<!-- research-") || input.evidence.contains("<!-- research-") {
+            let marker = catalog_index::MARKER_PREFIX;
+            if input.body.contains(marker) || input.evidence.contains(marker) {
                 return Err("Reserved report markers cannot appear in report content.".into());
             }
             let path = &index.paths[&input.id];

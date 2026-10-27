@@ -289,7 +289,7 @@ pub(crate) fn parse_rvas(text: &str) -> Result<Vec<u32>> {
 /// sections (record and project names, the binary identity): text holding a line break or a
 /// marker would split those reports in the wrong place.
 pub(crate) fn header_text(what: &str, text: &str) -> Result<()> {
-    if text.chars().any(char::is_control) || text.contains("<!-- research-") {
+    if text.chars().any(char::is_control) || text.contains(catalog_index::MARKER_PREFIX) {
         return Err(format!(
             "{what} must be one line without report section markers: {text:?}"
         ));
@@ -1600,7 +1600,8 @@ impl Library {
             );
         }
         let stamps = self.dependency_stamps(p, id);
-        if body.contains("<!-- research-") || evidence.contains("<!-- research-") {
+        let marker = catalog_index::MARKER_PREFIX;
+        if body.contains(marker) || evidence.contains(marker) {
             return Err("Reserved report markers cannot appear in report content.".into());
         }
         let before = self.projects[p].clone();
