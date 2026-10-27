@@ -591,14 +591,7 @@ impl Library {
     /// The pools file's current text, creating an empty one first so a transaction has a
     /// `before` to recover to.
     fn pools_before_text(&self, p: usize) -> Result<String> {
-        Ok(match self.text_opt(p, POOLS)? {
-            Some(text) => text,
-            None => {
-                let empty = render(&parse("")?)?;
-                atomic(&self.dir(p).join(POOLS), empty.as_bytes())?;
-                empty
-            }
-        })
+        self.sidecar_text(p, POOLS, &render(&parse("")?)?)
     }
     fn write_pools(
         &mut self,
@@ -608,27 +601,7 @@ impl Library {
         directed_by: Option<&str>,
     ) -> Result<()> {
         let before_text = self.pools_before_text(p)?;
-        let before = self.projects[p].clone();
-        let mut after = before.clone();
-        after.revision += 1;
-        let journal = Journal {
-            changes,
-            before,
-            after,
-            edits: vec![],
-            moves: vec![],
-            dependencies: vec![],
-            sidecars: vec![Sidecar {
-                path: POOLS.into(),
-                before: before_text,
-                after: render(file)?,
-            }],
-            ledger: false,
-            repin_ledger: false,
-            directed_by: directed_by.map(str::to_string),
-            repin_ids: vec![],
-        };
-        self.commit_or_stage(p, journal).map(|_| ())
+        self.commit_sidecar(p, POOLS, before_text, render(file)?, changes, directed_by)
     }
 }
 

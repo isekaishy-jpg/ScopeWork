@@ -537,15 +537,7 @@ impl Library {
         if !self.projects[p].nodes.iter().any(|n| n.id == id) {
             return Err("Unknown node".into());
         }
-        let before_text = match self.text_opt(p, REVIEW_FLAGS)? {
-            Some(text) => text,
-            None => {
-                // An empty file first, so the transaction has a `before` to recover to.
-                let empty = flags_text(&Default::default())?;
-                atomic(&self.dir(p).join(REVIEW_FLAGS), empty.as_bytes())?;
-                empty
-            }
-        };
+        let before_text = self.sidecar_text(p, REVIEW_FLAGS, &flags_text(&Default::default())?)?;
         let mut flags = parse_flags(&before_text)?;
         match reason.map(str::trim) {
             Some("") => return Err("A review flag needs a short reason.".into()),
@@ -564,27 +556,15 @@ impl Library {
                 }
             }
         }
-        let before = self.projects[p].clone();
-        let mut after = before.clone();
-        after.revision += 1;
-        let journal = Journal {
-            changes: if reason.is_some() { vec![id] } else { vec![] },
-            before,
-            after,
-            edits: vec![],
-            moves: vec![],
-            dependencies: vec![],
-            sidecars: vec![Sidecar {
-                path: REVIEW_FLAGS.into(),
-                before: before_text,
-                after: flags_text(&flags)?,
-            }],
-            ledger: false,
-            repin_ledger: false,
-            directed_by: None,
-            repin_ids: vec![],
-        };
-        self.commit_or_stage(p, journal).map(|_| ())
+        let changes = if reason.is_some() { vec![id] } else { vec![] };
+        self.commit_sidecar(
+            p,
+            REVIEW_FLAGS,
+            before_text,
+            flags_text(&flags)?,
+            changes,
+            None,
+        )
     }
 }
 impl Library {
@@ -607,6 +587,31 @@ impl Library {
             Some(text) => text,
             None => coordination::ensure(&root, name, field)?,
         };
+        self.commit_sidecar(p, name, before_text, after_text, changes, None)
+    }
+    /// The text of sidecar `name`, writing `empty` first when it does not exist yet, so the
+    /// transaction that changes it has a `before` to recover to.
+    pub(super) fn sidecar_text(&self, p: usize, name: &str, empty: &str) -> Result<String> {
+        match self.text_opt(p, name)? {
+            Some(text) => Ok(text),
+            None => {
+                atomic(&self.dir(p).join(name), empty.as_bytes())?;
+                Ok(empty.to_string())
+            }
+        }
+    }
+    /// Commits one sidecar's change from `before_text` to `after_text` as a catalog
+    /// transaction (nothing when they are equal). `changes` are the records it changes on
+    /// purpose, for the pools guard; `directed_by` is the human's instruction, if any.
+    pub(super) fn commit_sidecar(
+        &mut self,
+        p: usize,
+        name: &str,
+        before_text: String,
+        after_text: String,
+        changes: Vec<u64>,
+        directed_by: Option<&str>,
+    ) -> Result<()> {
         if before_text == after_text {
             return Ok(());
         }
@@ -627,7 +632,7 @@ impl Library {
             }],
             ledger: false,
             repin_ledger: false,
-            directed_by: None,
+            directed_by: directed_by.map(str::to_string),
             repin_ids: vec![],
         };
         self.commit_or_stage(p, journal).map(|_| ())

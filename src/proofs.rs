@@ -3,7 +3,6 @@
 //!
 //! Stored in a journaled sidecar beside the catalog, like review flags, so older Scopework
 //! versions leave it intact instead of dropping an unknown catalog field.
-use super::catalog_batch::{Journal, Sidecar};
 use super::*;
 use std::collections::{BTreeMap, HashSet};
 
@@ -211,38 +210,11 @@ impl Library {
         self.write_proofs(p, file, changes)
     }
     fn write_proofs(&mut self, p: usize, file: ProofFile, changes: Vec<u64>) -> Result<()> {
-        let before_text = match self.text_opt(p, PROOFS)? {
-            Some(text) => text,
-            None => {
-                // An empty file first, so the transaction has a `before` to recover to.
-                let empty = render(&parse("")?)?;
-                atomic(&self.dir(p).join(PROOFS), empty.as_bytes())?;
-                empty
-            }
-        };
+        let before_text = self.sidecar_text(p, PROOFS, &render(&parse("")?)?)?;
+        // An equal file in another layout is no change either.
         if parse(&before_text)? == file {
             return Ok(());
         }
-        let before = self.projects[p].clone();
-        let mut after = before.clone();
-        after.revision += 1;
-        let journal = Journal {
-            changes,
-            before,
-            after,
-            edits: vec![],
-            moves: vec![],
-            dependencies: vec![],
-            sidecars: vec![Sidecar {
-                path: PROOFS.into(),
-                before: before_text,
-                after: render(&file)?,
-            }],
-            ledger: false,
-            repin_ledger: false,
-            directed_by: None,
-            repin_ids: vec![],
-        };
-        self.commit_or_stage(p, journal).map(|_| ())
+        self.commit_sidecar(p, PROOFS, before_text, render(&file)?, changes, None)
     }
 }
