@@ -102,11 +102,7 @@ fn valid_name(name: &str) -> Result<String> {
 }
 /// Who completes something: the submitter the coordinator also reports, else the user name.
 fn completion() -> Completion {
-    let by = std::env::var("SCOPEWORK_SUBMITTER")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("USERNAME").ok())
-        .unwrap_or_else(|| "unknown".into());
+    let by = caller();
     let at_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());

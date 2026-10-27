@@ -136,6 +136,31 @@ pub use catalog_batch::ReviewFlag;
 pub use quarantine::Quarantine;
 pub(crate) use report_hashes::retain_on_this_thread as retain_report_hashes_on_this_thread;
 // Reports contain their editable source in Markdown; the catalog stores no duplicate report prose.
+thread_local! {
+    static CALLER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+/// Runs `f` on behalf of `caller`: the coordinator executes every client's command in its own
+/// process, so the name a command records or is checked against must come from the request.
+pub fn with_caller<T>(caller: &str, f: impl FnOnce() -> T) -> T {
+    let previous = CALLER.with(|c| c.replace(Some(caller.to_string())));
+    let result = f();
+    CALLER.with(|c| *c.borrow_mut() = previous);
+    result
+}
+/// Who is asking: the coordinator's caller for this operation, else `SCOPEWORK_SUBMITTER`, else
+/// the Windows user name.
+pub fn caller() -> String {
+    CALLER
+        .with(|c| c.borrow().clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("SCOPEWORK_SUBMITTER")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| std::env::var("USERNAME").ok())
+        .unwrap_or_else(|| "unknown".into())
+}
 fn hash(text: &str) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(text.as_bytes()))

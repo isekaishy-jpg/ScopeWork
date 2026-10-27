@@ -412,7 +412,21 @@ impl Server {
         Ok(fresh)
     }
 
-    fn read(&self, state: &ProjectState, arguments: &[String], nodes: Option<Vec<u64>>) -> Answer {
+    fn read(
+        &self,
+        state: &ProjectState,
+        arguments: &[String],
+        nodes: Option<Vec<u64>>,
+        submitter: &str,
+    ) -> Answer {
+        research::with_caller(submitter, || self.read_as(state, arguments, nodes))
+    }
+    fn read_as(
+        &self,
+        state: &ProjectState,
+        arguments: &[String],
+        nodes: Option<Vec<u64>>,
+    ) -> Answer {
         let command = match cli::parse(arguments) {
             Ok(args) => args.command,
             Err(e) => return Answer::of(Err(e)),
@@ -811,12 +825,18 @@ impl Server {
             move |previous| record_previous(&observed, previous),
             || {
                 if batch.len() == 1 && !batch[0].route.merge {
-                    return vec![execute(&batch[0].arguments, &mut lib)];
+                    return vec![execute(&batch[0].arguments, &batch[0].submitter, &mut lib)];
                 }
                 lib.begin_staging(0);
                 let answers: Vec<Answer> = batch
                     .iter()
-                    .map(|op| lib.stage_one(0, |lib| execute(&op.arguments, lib), |a| a.exit != 0))
+                    .map(|op| {
+                        lib.stage_one(
+                            0,
+                            |lib| execute(&op.arguments, &op.submitter, lib),
+                            |a| a.exit != 0,
+                        )
+                    })
                     .collect();
                 match lib.commit_staged(0) {
                     Ok(_) => answers,
@@ -901,9 +921,11 @@ impl Server {
     }
 }
 
-/// Runs one queued command on the writer's library.
-fn execute(arguments: &[String], lib: &mut Library) -> Answer {
-    Answer::of(cli::parse(arguments).and_then(|args| cli::execute(args.command, lib)))
+/// Runs one queued command on the writer's library, as the client that submitted it.
+fn execute(arguments: &[String], submitter: &str, lib: &mut Library) -> Answer {
+    research::with_caller(submitter, || {
+        Answer::of(cli::parse(arguments).and_then(|args| cli::execute(args.command, lib)))
+    })
 }
 
 /// Inserts the previous texts a commit is about to replace into every live snapshot's overlay
@@ -1383,7 +1405,7 @@ impl Server {
                 "direct_only: this command runs in the client process".into(),
             )),
             Route::Read { project, nodes } => match self.project(&project) {
-                Ok(state) => self.read(&state, &arguments, nodes),
+                Ok(state) => self.read(&state, &arguments, nodes, submitter),
                 Err(e) => Answer::of(Err(e)),
             },
             Route::Queue { project } => match self.project(&project) {

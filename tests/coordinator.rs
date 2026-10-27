@@ -1079,3 +1079,37 @@ fn concurrent_proofs_merge_without_losing_any() {
         "src/f9.rs"
     );
 }
+
+#[test]
+fn operations_record_their_own_submitter_not_the_coordinators() {
+    let f = Fixture::new(2);
+    // The first client starts the coordinator, which inherits its environment.
+    let started = f
+        .command("required", &["project", "show", "fixture"])
+        .env("SCOPEWORK_SUBMITTER", "alpha")
+        .output()
+        .unwrap();
+    assert!(started.status.success());
+    let o = f
+        .command(
+            "required",
+            &[
+                "node",
+                "proof",
+                "fixture",
+                "3",
+                "--recreation",
+                "src/a.rs",
+                "--test",
+                "tests/a.rs",
+            ],
+        )
+        .env("SCOPEWORK_SUBMITTER", "beta")
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        f.direct(&["node", "show", "fixture", "3"])["proof"]["by"],
+        "beta"
+    );
+}

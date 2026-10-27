@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Commands run as their caller through the coordinator** ([proposal](docs/proposal-caller-identity.md)). The coordinator recorded every operation under the name of the client that started it, so `impl complete` marks named the wrong agent. Each operation now runs as the submitter its own client sent.
 - **Proofs** ([proposal](docs/proposal-proof-records.md)). A function record can name its recreation and the tests that check it (`node proof`, `node proof-batch`). A project can require proof (`project set-proof --required true`): completing a function then needs one, and with `--repository` the cited files must exist. Functions completed earlier stay complete and are listed by `node unproven --complete` and counted in `status`. Stored in a journaled `proofs.json` sidecar.
 - **`deps set` conflicts only on the function's own prerequisites** ([proposal](docs/proposal-deps-record-token.md)). `node show` now issues an `s5:` `structural_token` that binds that function's prerequisite list and the binary identity, instead of the project-wide structural epoch. Moves, renames, report saves and other functions' prerequisite changes no longer make it stale, so sessions working one project stop invalidating each other's tokens. Cycles, missing prerequisites and the seal are still checked when `deps set` runs. `s4:` tokens keep their old meaning.
 

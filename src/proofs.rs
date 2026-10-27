@@ -65,14 +65,6 @@ pub(crate) fn without_removed(text: &str, removed: &HashSet<u64>) -> Result<Opti
     }
     render(&file).map(Some)
 }
-/// Who records a proof: the submitter the coordinator also reports, else the user name.
-fn submitter() -> String {
-    std::env::var("SCOPEWORK_SUBMITTER")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("USERNAME").ok())
-        .unwrap_or_default()
-}
 /// A proof path must be one line; under a repository its file part (before `::`) must exist.
 fn check_path(repository: &str, label: &str, path: &str) -> Result<String> {
     let path = path.trim();
@@ -155,7 +147,7 @@ impl Library {
         let mut file = self.proofs(p)?;
         let mut seen = HashSet::new();
         let at_revision = self.projects[p].revision + 1;
-        let by = submitter();
+        let by = caller();
         for (id, input) in entries {
             if !seen.insert(*id) {
                 return Err(format!("Node {id} appears twice in the proof request."));
