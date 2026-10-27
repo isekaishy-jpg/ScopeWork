@@ -673,6 +673,18 @@ impl Library {
         Ok(reset)
     }
 }
+/// What a metadata commit records besides the catalogs and the rewritten reports.
+#[derive(Default)]
+pub(super) struct MetadataCommit {
+    /// Records whose prerequisite views change.
+    pub(super) dependencies: Vec<u64>,
+    /// The records the operation changes on purpose (see `Journal::changes`).
+    pub(super) changes: Vec<u64>,
+    /// Re-pin annotation-ledger rows of the rewritten reports (mechanical rewrites).
+    pub(super) repin_ledger: bool,
+    /// The human's instruction, for a change to pooled records.
+    pub(super) directed_by: Option<String>,
+}
 impl Library {
     pub(super) fn commit_report(
         &mut self,
@@ -706,27 +718,30 @@ impl Library {
             before,
             after,
             reports,
-            dependencies,
-            false,
-            None,
-            changes,
+            MetadataCommit {
+                dependencies,
+                changes,
+                ..Default::default()
+            },
         )
     }
     /// `commit_metadata`, optionally re-pinning annotation-ledger rows of the rewritten reports
     /// (for mechanical rewrites that keep completion), and recording the human's direction for
     /// a change to pooled records.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn commit_metadata_with(
         &mut self,
         p: usize,
         before: Project,
         after: Project,
         reports: Vec<(u64, String, String)>,
-        dependencies: Vec<u64>,
-        repin_ledger: bool,
-        directed_by: Option<String>,
-        changes: Vec<u64>,
+        commit: MetadataCommit,
     ) -> Result<()> {
+        let MetadataCommit {
+            dependencies,
+            changes,
+            repin_ledger,
+            directed_by,
+        } = commit;
         let index = catalog_index::Index::new(&before);
         let edits = reports
             .into_iter()

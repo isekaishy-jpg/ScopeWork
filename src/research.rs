@@ -998,10 +998,10 @@ impl Library {
                 before,
                 after,
                 reports,
-                vec![],
-                true,
-                None,
-                vec![],
+                catalog_batch::MetadataCommit {
+                    repin_ledger: true,
+                    ..Default::default()
+                },
             );
         }
         for node in &mut after.nodes {
@@ -1269,7 +1269,7 @@ impl Library {
     /// `before` is the catalog before the change.
     fn commit_catalog(&mut self, p: usize, before: Project) -> Result<()> {
         let after = std::mem::replace(&mut self.projects[p], before.clone());
-        self.commit_metadata_with(p, before, after, vec![], vec![], false, None, vec![])
+        self.commit_metadata_with(p, before, after, vec![], Default::default())
     }
     pub fn create(&mut self, id: &str, name: &str, binary: &str) -> Result<()> {
         if self
@@ -2334,12 +2334,14 @@ impl Library {
             before,
             after,
             vec![],
-            affected.into_iter().collect(),
-            false,
-            directed_by,
-            // The pool covers the record whose prerequisites change; a pooled record may itself
-            // be named as a prerequisite, since later work builds on pooled research.
-            vec![id],
+            catalog_batch::MetadataCommit {
+                dependencies: affected.into_iter().collect(),
+                // The pool covers the record whose prerequisites change; a pooled record may
+                // itself be named as a prerequisite, since later work builds on pooled research.
+                changes: vec![id],
+                directed_by,
+                ..Default::default()
+            },
         )
     }
 }

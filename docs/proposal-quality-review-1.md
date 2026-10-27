@@ -1,6 +1,6 @@
 # Proposal: app-wide code-quality review, round 1
 
-Status: proposed 2026-10-27. The user asked for app-wide reviews in two parts, code quality and then bugs, each repeated until a round finds nothing. Fixes are the obvious ones only: no feature or behaviour changes.
+Status: implemented 2026-10-27. The user asked for app-wide reviews in two parts, code quality and then bugs, each repeated until a round finds nothing. Fixes are the obvious ones only: no feature or behaviour changes.
 
 ## Method
 
