@@ -142,10 +142,16 @@ thread_local! {
 /// Runs `f` on behalf of `caller`: the coordinator executes every client's command in its own
 /// process, so the name a command records or is checked against must come from the request.
 pub fn with_caller<T>(caller: &str, f: impl FnOnce() -> T) -> T {
-    let previous = CALLER.with(|c| c.replace(Some(caller.to_string())));
-    let result = f();
-    CALLER.with(|c| *c.borrow_mut() = previous);
-    result
+    /// Restores the previous caller however `f` ends, a panic the writer survives included.
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CALLER.with(|c| *c.borrow_mut() = previous);
+        }
+    }
+    let _restore = Restore(CALLER.with(|c| c.replace(Some(caller.to_string()))));
+    f()
 }
 /// Who is asking: the coordinator's caller for this operation, else `SCOPEWORK_SUBMITTER`, else
 /// the Windows user name.
@@ -2813,5 +2819,21 @@ mod dependency_tests {
         let error = lib.validate_dependencies(0, &edges).unwrap_err();
         assert!(error.contains("cycle"), "{error}");
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_operation_leaves_the_previous_caller() {
+        with_caller("outer", || {
+            let panicked = std::panic::catch_unwind(|| {
+                with_caller("inner", || -> () { panic!("operation failed") })
+            });
+            assert!(panicked.is_err());
+            assert_eq!(caller(), "outer");
+        });
     }
 }
