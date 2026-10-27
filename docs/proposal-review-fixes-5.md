@@ -1,6 +1,6 @@
 # Proposal: fixes from the review of the fourth review's fixes
 
-Status: proposed 2026-10-27. Research is the review itself: a high-effort read of `378ca59..16fad2a`, the fixes from [the fourth round](proposal-review-fixes-4.md). It reported eight findings, and the user asked for all eight to be fixed. Numbers follow the review's ranking.
+Status: implemented 2026-10-27. Research is the review itself: a high-effort read of `378ca59..16fad2a`, the fixes from [the fourth round](proposal-review-fixes-4.md). It reported eight findings, and the user asked for all eight to be fixed. Numbers follow the review's ranking.
 
 ## 1. Re-pooling a function covered by its chunk escapes the pool (high)
 
