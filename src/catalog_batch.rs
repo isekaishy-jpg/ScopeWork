@@ -968,13 +968,8 @@ impl Library {
             )
             .chain(batch.reorder.iter().filter(reorders).map(|o| o.parent))
             .collect();
-        // Checked now, before the work, and again by the journal guard when it commits.
-        self.check_pool(
-            p,
-            changes.iter().copied(),
-            batch.directed_by.as_deref(),
-            "Changing",
-        )?;
+        // The journal guard checks `changes` before anything is written: until its commit a
+        // batch only computes in memory.
         let mut after = before.clone();
         let mut positions: HashMap<_, _> = after
             .nodes
@@ -1432,7 +1427,11 @@ impl Library {
             .chain(reached)
             .collect();
         if !reopened.is_empty() {
-            let original = coordination::ensure(&root, coordination::REVIEW_QUEUE, "entries")?;
+            let original = self.sidecar_text(
+                p,
+                coordination::REVIEW_QUEUE,
+                &coordination::empty_text("entries")?,
+            )?;
             let updated = coordination::queue_reopened(
                 &original,
                 &after,
@@ -1468,6 +1467,14 @@ impl Library {
             sidecars,
         };
         self.check_journal(p, &j)?;
+        // The apply step replaces existing sidecar files; a review queue this batch starts is
+        // written empty only now that the batch will commit.
+        if j.sidecars
+            .iter()
+            .any(|s| s.path == coordination::REVIEW_QUEUE)
+        {
+            coordination::ensure(&root, coordination::REVIEW_QUEUE, "entries")?;
+        }
         let ledger_rows_repathed = commit(&root, &mut self.projects[p], &j)?;
         Ok(BatchOutcome {
             created,
