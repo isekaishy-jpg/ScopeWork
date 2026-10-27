@@ -473,3 +473,42 @@ fn large_sidecar_copies_in_completed_receipts_can_be_reclaimed() {
     assert!(fs::metadata(&receipt).unwrap().len() < size / 100);
     assert_eq!(f.revision().1, revision, "the catalog is untouched");
 }
+
+/// `deps set` conflicts only on the function's own prerequisite list: unrelated prerequisite
+/// changes, moving or renaming the function and saving its report leave its token valid.
+#[test]
+fn prerequisite_tokens_conflict_only_on_the_functions_own_list() {
+    let f = Fixture::new();
+    let token = |id: u64| f.show(id)["structural_token"].as_str().unwrap().to_string();
+    let deps = |id: u64, expect: &str, rvas: &[&str]| {
+        let mut args = vec!["deps", "set", "fixture"];
+        let id = id.to_string();
+        args.extend([id.as_str(), "--expect", expect]);
+        args.extend(rvas);
+        f.run(&args)
+    };
+    let held = token(3);
+    assert!(held.starts_with("s5:"), "{held}");
+    // Another function's prerequisites, a move and a rename of 3, and a save of its report.
+    let other = token(4);
+    assert!(deps(4, &other, &["3000"]).status.success());
+    f.move_node(3, 5);
+    let (binary, revision) = f.revision();
+    let o = f.batch(
+        json!({"schema":1,"binary":binary,"expect_revision":revision,
+        "update":[{"id":3,"name":"Renamed"}]}),
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    f.save(3, "Revised research");
+    let o = deps(3, &held, &["2000"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // The same token after that change to 3's own list is refused.
+    let o = deps(3, &held, &["4000"]);
+    assert!(!o.status.success());
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("record_conflict"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(f.show(3)["dependency_rvas"], "0x00002000");
+}

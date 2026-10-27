@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`deps set` conflicts only on the function's own prerequisites** ([proposal](docs/proposal-deps-record-token.md)). `node show` now issues an `s5:` `structural_token` that binds that function's prerequisite list and the binary identity, instead of the project-wide structural epoch. Moves, renames, report saves and other functions' prerequisite changes no longer make it stale, so sessions working one project stop invalidating each other's tokens. Cycles, missing prerequisites and the seal are still checked when `deps set` runs. `s4:` tokens keep their old meaning.
+
 ## 0.14.0a - 2026-10-24
 
 Release notes, validation and the commit ledger: [docs/releases/0.14.0a.md](docs/releases/0.14.0a.md). A minor release: new features since 0.13.1a, listed below with the fixes from three code reviews.

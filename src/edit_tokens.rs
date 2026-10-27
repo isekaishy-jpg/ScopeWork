@@ -53,6 +53,28 @@ pub(super) fn draft(
     ))
 }
 
+/// The prerequisite-list token: purpose, project, binary, record and its prerequisites.
+fn prerequisites(project: &Project, index: &catalog_index::Index<'_>, id: u64) -> Result<String> {
+    if !index.nodes.contains_key(&id) {
+        return Err("Unknown report".into());
+    }
+    let mut dependencies = index.requires.get(&id).cloned().unwrap_or_default();
+    dependencies.sort_unstable();
+    Ok(format!(
+        "s5:{}",
+        hash(
+            &serde_json::to_string(&(
+                "prerequisites",
+                project.id.as_str(),
+                project.binary.as_str(),
+                id,
+                dependencies
+            ))
+            .map_err(|e| e.to_string())?
+        )
+    ))
+}
+
 impl Library {
     pub fn report_token(&self, p: usize, id: u64) -> Result<String> {
         let index = catalog_index::Index::new(&self.projects[p]);
@@ -66,7 +88,17 @@ impl Library {
         let own = draft(project, &index, id, &self.text(p, path)?)?;
         self.completion(p, &index, id, &own)
     }
+    /// The token `deps set` expects: the record's own prerequisite list, so only a change to
+    /// that list (or to the binary its RVAs belong to) conflicts.
     pub fn structural_token(&self, p: usize, id: u64) -> Result<String> {
+        prerequisites(
+            &self.projects[p],
+            &catalog_index::Index::new(&self.projects[p]),
+            id,
+        )
+    }
+    /// The `s4:` token issued before 0.15: any structural change in the project invalidates it.
+    fn legacy_structural_token(&self, p: usize, id: u64) -> Result<String> {
         Ok(format!(
             "s4:{}",
             hash(&format!(
@@ -80,7 +112,8 @@ impl Library {
         let expected = match purpose {
             "draft" if token.starts_with("d4:") => self.report_token(p, id)?,
             "completion" if token.starts_with("c4:") => self.completion_token(p, id)?,
-            "structural" if token.starts_with("s4:") => self.structural_token(p, id)?,
+            "structural" if token.starts_with("s5:") => self.structural_token(p, id)?,
+            "structural" if token.starts_with("s4:") => self.legacy_structural_token(p, id)?,
             _ if !token.contains(':') => {
                 let content = self.text(p, &self.report_rel(p, id)?)?;
                 hash(&format!("{}\n{content}", self.projects[p].revision))
@@ -185,10 +218,7 @@ impl Library {
         let (body, evidence) = parts(&text)?;
         let token = draft(project, &index, id, &text)?;
         let completion_token = self.completion(p, &index, id, &token)?;
-        let structural_token = format!(
-            "s4:{}",
-            hash(&format!("{}:{}", project.structural_epoch, token))
-        );
+        let structural_token = prerequisites(project, &index, id)?;
         let effective_status =
             index.states_with(&self.dir(p), [id], &|| self.hash_overrides())[&id];
         let requires = index.requires.get(&id).cloned().unwrap_or_default();

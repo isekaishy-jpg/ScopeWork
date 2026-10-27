@@ -113,3 +113,38 @@ fn complete_ancestors_and_consumers_reopen_and_stale_tokens_fail() {
         "a stale structural token is refused"
     );
 }
+
+fn legacy_structural(lib: &Library, id: u64) -> String {
+    use sha2::{Digest, Sha256};
+    let text = format!(
+        "{}:{}",
+        lib.projects[0].structural_epoch,
+        lib.report_token(0, id).unwrap()
+    );
+    format!("s4:{:x}", Sha256::digest(text.as_bytes()))
+}
+
+#[test]
+fn legacy_structural_tokens_keep_their_project_wide_meaning() {
+    let (_home, mut lib) = fixture();
+    let held = legacy_structural(&lib, 5);
+    assert!(lib.check_edit_token(0, 5, &held, "structural").is_ok());
+    // Any structural change in the project invalidates an s4 token, as before 0.15.
+    lib.set_dependencies(0, 4, "1000").unwrap();
+    assert!(
+        lib.check_edit_token(0, 5, &held, "structural").is_err(),
+        "an s4 token after another function's prerequisite change is refused"
+    );
+    // The current token is untouched by that change and refused after 5's own.
+    let current = lib.structural_token(0, 5).unwrap();
+    lib.set_dependencies(0, 4, "").unwrap();
+    assert!(lib.check_edit_token(0, 5, &current, "structural").is_ok());
+    lib.set_dependencies(0, 5, "1000").unwrap();
+    assert!(lib.check_edit_token(0, 5, &current, "structural").is_err());
+    // An amended binary identity changes what the RVAs name, so it invalidates the token too.
+    let current = lib.structural_token(0, 5).unwrap();
+    let revision = lib.projects[0].revision;
+    lib.set_binary(0, "synthetic, amended", Some(revision))
+        .unwrap();
+    assert!(lib.check_edit_token(0, 5, &current, "structural").is_err());
+}
