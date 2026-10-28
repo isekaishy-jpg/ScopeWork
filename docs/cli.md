@@ -392,6 +392,24 @@ Receipts written by 0.8.0 and earlier copy the whole annotation ledger twice per
 
 Retention policy: retain compact completed change history indefinitely, including removed-node archives; never automatically expire evidence. This removes unchanged whole-inventory duplication per edit, while storage still grows with actual changed content. Whole-catalog reorder operations can have large deltas. The format-5 migration keeps one full pre-upgrade catalog. Import publication history and other tool workspaces are separate from catalog-journal compaction and are not included in its byte totals.
 
+## The project store (side by side)
+
+```powershell
+research store init PROJECT
+research store sync PROJECT
+research store status PROJECT
+research store verify PROJECT
+```
+
+The store keeps a project's whole catalog history in `<project>/store/`, beside the files, which stay authoritative ([design](design-storage-backend.md)). It follows the change receipts every writer leaves, so it never takes part in a commit: a store problem can never fail or slow a commit, or change a file.
+
+- **`store init`** is the manual migration step: it creates the store from as much receipt history as verifies (each checkpoint is checked against the fingerprint the receipts recorded for it) and starts following. A project without a store is unaffected.
+- **`store sync`** brings the store to the current revision: it reads the catalog under the project's shared lock, walks the receipts back to the store's head and appends what is new. A change that leaves no receipt (an import publication, a layout migration) is recorded as a gap, and the store re-anchors on the current catalog; later commits connect again. A frame cut short by an interrupted sync is removed; damage anywhere else is refused (`store_damaged`) and reported by `verify`.
+- **`store status`** gives the head, the catalog revision and how far behind the store is, its segments, gaps, text count and sizes.
+- **`store verify`** checks every frame's checksum, every checkpoint's fingerprint, each segment's commit chain by replaying it, every referenced text against its hash, and the head against the catalog.
+
+Every answer names its source (`"backend":"store"`). Readers take no lock. Files: `store.json`; `segment-N.zlib` (the catalog where segment N starts) and `segment-N.log` (checksummed JSON entries: a start entry, then one commit entry per revision, with report and sidecar texts replaced by their SHA-256); `texts-N.pack` (texts compressed in groups). A segment closes after 4 MB of log.
+
 ## Waiting, small answers and coordination (0.8.0)
 
 ### Lock waiting

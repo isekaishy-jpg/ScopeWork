@@ -2102,7 +2102,9 @@ name = "research-dashboard"
 version = "0.14.0-alpha"
 dependencies = [
  "clap",
+ "crc32fast",
  "eframe",
+ "flate2",
  "image",
  "regex",
  "serde",

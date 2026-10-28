@@ -173,6 +173,8 @@ mod records_ui;
 mod reopen;
 #[path = "report_hashes.rs"]
 mod report_hashes;
+#[path = "store.rs"]
+pub mod store;
 #[path = "tidy.rs"]
 mod tidy;
 pub use catalog_batch::Batch;

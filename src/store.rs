@@ -1,0 +1,1027 @@
+//! The project store (docs/design-storage-backend.md): the catalog's whole history beside the
+//! files, in checksummed frames, kept by following the change receipts every writer leaves.
+//!
+//! The files stay authoritative. Nothing here takes part in a commit: `sync` reads the current
+//! catalog under the project's shared lock, walks the receipts back from it to the store's head,
+//! and appends what is new. A store fault therefore never changes the files or fails a commit.
+//!
+//! Layout of `<project>/store/`:
+//! - `store.json`: schema, project and codec.
+//! - `segment-<n>.zlib`: the catalog (`project.json` bytes) where segment `n` starts, compressed.
+//! - `segment-<n>.log`: frames following that checkpoint: a start entry, then one commit entry
+//!   per revision.
+//! - `texts-<n>.pack`: report and sidecar texts by SHA-256, compressed in groups.
+//! - `.lock`: held by the one process writing the store.
+//!
+//! A frame is a 4-byte length, a 4-byte CRC-32 of the payload, then the payload (little-endian).
+//! Readers take no lock: they read frames up to the last complete one.
+use super::*;
+use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
+use std::ops::Range;
+
+pub(crate) const FOLDER: &str = "store";
+const SCHEMA: u64 = 1;
+/// A log longer than this is closed and a new segment, with a checkpoint, started.
+const SEGMENT_BYTES: usize = 4 << 20;
+/// [`SEGMENT_BYTES`]; debug builds take `SCOPEWORK_STORE_SEGMENT_BYTES`, so tests reach
+/// checkpoints with a small history.
+fn segment_bytes() -> usize {
+    #[cfg(debug_assertions)]
+    if let Some(bytes) = std::env::var("SCOPEWORK_STORE_SEGMENT_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return bytes;
+    }
+    SEGMENT_BYTES
+}
+/// Texts are compressed together in groups of about this many bytes.
+const PACK_BYTES: usize = 4 << 20;
+/// A pack file longer than this is closed and the next one started.
+const PACK_FILE_BYTES: u64 = 64 << 20;
+const RECEIPT_FOLDERS: [&str; 2] = [
+    "tools/workspaces/catalog-transactions-v4",
+    "tools/workspaces/catalog-transactions",
+];
+
+fn frame(payload: &[u8]) -> Result<Vec<u8>> {
+    let len = u32::try_from(payload.len()).map_err(|_| "Store frame too large")?;
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+/// How a sequence of frames ends.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum End {
+    Clean,
+    /// A frame still being written, or cut short by a crash, starts at this offset.
+    Torn(usize),
+    /// A complete frame with a wrong checksum starts at this offset.
+    Damaged(usize),
+}
+/// The payload ranges of the complete frames in `bytes`, and how they end.
+fn frames(bytes: &[u8]) -> (Vec<Range<usize>>, End) {
+    let mut out = vec![];
+    let mut at = 0;
+    loop {
+        if at == bytes.len() {
+            return (out, End::Clean);
+        }
+        if at + 8 > bytes.len() {
+            return (out, End::Torn(at));
+        }
+        let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let crc = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap());
+        let body = at + 8;
+        if body + len > bytes.len() {
+            return (out, End::Torn(at));
+        }
+        if crc32fast::hash(&bytes[body..body + len]) != crc {
+            return (out, End::Damaged(at));
+        }
+        out.push(body..body + len);
+        at = body + len;
+    }
+}
+fn deflate(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).map_err(|e| e.to_string())?;
+    encoder.finish().map_err(|e| e.to_string())
+}
+fn inflate(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut out = vec![];
+    flate2::read::ZlibDecoder::new(bytes)
+        .read_to_end(&mut out)
+        .map_err(|e| format!("Store data does not decompress: {e}"))?;
+    Ok(out)
+}
+fn segment_files(store: &Path, seq: u64) -> (PathBuf, PathBuf) {
+    (
+        store.join(format!("segment-{seq:06}.log")),
+        store.join(format!("segment-{seq:06}.zlib")),
+    )
+}
+/// Files in `store` named `<prefix><number><suffix>`, by number.
+fn numbered(store: &Path, prefix: &str, suffix: &str) -> Vec<(u64, PathBuf)> {
+    let mut out: Vec<(u64, PathBuf)> = fs::read_dir(store)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let n = name
+                .strip_prefix(prefix)?
+                .strip_suffix(suffix)?
+                .parse()
+                .ok()?;
+            Some((n, entry.path()))
+        })
+        .collect();
+    out.sort_by_key(|(n, _)| *n);
+    out
+}
+
+/// One segment: a checkpoint and the log that follows it.
+struct Segment {
+    seq: u64,
+    log: PathBuf,
+    checkpoint: PathBuf,
+    bytes: Vec<u8>,
+    frames: Vec<Range<usize>>,
+    end: End,
+    start: Value,
+}
+impl Segment {
+    fn entry(&self, i: usize) -> Result<Value> {
+        serde_json::from_slice(&self.bytes[self.frames[i].clone()]).map_err(|e| e.to_string())
+    }
+    /// The revision and catalog fingerprint this segment ends at.
+    fn head(&self) -> Result<(u64, String)> {
+        let last = self.entry(self.frames.len() - 1)?;
+        let (revision, sha) = if last["type"] == "commit" {
+            (&last["revision"], &last["after_sha256"])
+        } else {
+            (&last["revision"], &last["catalog_sha256"])
+        };
+        Ok((
+            revision.as_u64().ok_or("Store entry without revision")?,
+            sha.as_str()
+                .ok_or("Store entry without fingerprint")?
+                .into(),
+        ))
+    }
+}
+/// The store's segments in order, and the logs that are not part of it: one without a complete
+/// start entry or without its checkpoint (a segment whose creation was interrupted).
+fn segments(store: &Path) -> Result<(Vec<Segment>, Vec<PathBuf>)> {
+    let mut out = vec![];
+    let mut invalid = vec![];
+    for (seq, log) in numbered(store, "segment-", ".log") {
+        let (_, checkpoint) = segment_files(store, seq);
+        let bytes = fs::read(&log).map_err(|e| e.to_string())?;
+        let (frames, end) = frames(&bytes);
+        let start = frames
+            .first()
+            .and_then(|r| serde_json::from_slice::<Value>(&bytes[r.clone()]).ok())
+            .filter(|v| v["type"] == "start");
+        match start {
+            Some(start) if checkpoint.is_file() => out.push(Segment {
+                seq,
+                log,
+                checkpoint,
+                bytes,
+                frames,
+                end,
+                start,
+            }),
+            _ => invalid.push(log),
+        }
+    }
+    Ok((out, invalid))
+}
+fn checkpoint_catalog(segment: &Segment) -> Result<Vec<u8>> {
+    inflate(&fs::read(&segment.checkpoint).map_err(|e| e.to_string())?)
+}
+
+/// Where each stored text is: pack file, frame payload range, and its range in the frame's
+/// uncompressed texts.
+struct TextIndex {
+    at: HashMap<String, (PathBuf, Range<usize>, Range<usize>)>,
+    problems: Vec<String>,
+}
+fn text_index(store: &Path) -> Result<TextIndex> {
+    let mut at = HashMap::new();
+    let mut problems = vec![];
+    for (_, pack) in numbered(store, "texts-", ".pack") {
+        let bytes = fs::read(&pack).map_err(|e| e.to_string())?;
+        let (frames, end) = frames(&bytes);
+        if let End::Damaged(offset) = end {
+            problems.push(format!(
+                "{}: damaged frame at byte {offset}",
+                pack.display()
+            ));
+        }
+        for range in frames {
+            let Some((index, _)) = pack_parts(&bytes[range.clone()]) else {
+                problems.push(format!("{}: unreadable pack index", pack.display()));
+                continue;
+            };
+            for (sha, texts) in index {
+                at.insert(sha, (pack.clone(), range.clone(), texts));
+            }
+        }
+    }
+    Ok(TextIndex { at, problems })
+}
+/// Each text of a pack frame: its SHA-256 and range in the frame's uncompressed texts.
+type PackIndex = Vec<(String, Range<usize>)>;
+/// A pack frame's index and the offset of its compressed texts.
+fn pack_parts(payload: &[u8]) -> Option<(PackIndex, usize)> {
+    let len = u32::from_le_bytes(payload.get(..4)?.try_into().ok()?) as usize;
+    let index: Vec<Value> = serde_json::from_slice(payload.get(4..4 + len)?).ok()?;
+    let index = index
+        .iter()
+        .map(|row| {
+            let offset = row["offset"].as_u64()? as usize;
+            let length = row["length"].as_u64()? as usize;
+            Some((row["sha256"].as_str()?.to_string(), offset..offset + length))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((index, 4 + len))
+}
+
+/// The one process writing a store: its lock and the texts waiting to be packed.
+struct Writer {
+    store: PathBuf,
+    _lock: fs::File,
+    known: HashSet<String>,
+    pending: Vec<(String, String)>,
+    pending_bytes: usize,
+    added: usize,
+}
+impl Writer {
+    fn open(store: &Path) -> Result<Self> {
+        fs::create_dir_all(store).map_err(|e| e.to_string())?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(store.join(".lock"))
+            .map_err(|e| e.to_string())?;
+        lock.try_lock().map_err(|_| {
+            "store_busy: another process is writing this project's store. Retry shortly."
+                .to_string()
+        })?;
+        let index = text_index(store)?;
+        Ok(Self {
+            store: store.into(),
+            _lock: lock,
+            known: index.at.into_keys().collect(),
+            pending: vec![],
+            pending_bytes: 0,
+            added: 0,
+        })
+    }
+    /// Removes what an interrupted writer left: temporaries, segments whose creation did not
+    /// finish, and a frame cut short at the end of the last log or pack. Damage anywhere else
+    /// is refused: `store verify` reports it, and nothing is rewritten.
+    fn repair(&self) -> Result<()> {
+        for entry in fs::read_dir(&self.store)
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
+            if entry.file_name().to_string_lossy().ends_with(".pending") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        let (segments, invalid) = segments(&self.store)?;
+        let last = segments.last().map_or(0, |s| s.seq);
+        for log in invalid {
+            let seq = numbered(&self.store, "segment-", ".log")
+                .into_iter()
+                .find(|(_, path)| *path == log)
+                .map(|(n, _)| n);
+            if seq.is_some_and(|n| n < last) {
+                return Err(format!(
+                    "store_damaged: {} has no valid start; run research store verify",
+                    log.display()
+                ));
+            }
+            let _ = fs::remove_file(&log);
+            if let Some(n) = seq {
+                let _ = fs::remove_file(segment_files(&self.store, n).1);
+            }
+        }
+        // A checkpoint whose log was never created.
+        for (n, checkpoint) in numbered(&self.store, "segment-", ".zlib") {
+            if n > last {
+                let _ = fs::remove_file(checkpoint);
+            }
+        }
+        let tails = segments.last().map(|s| s.log.clone()).into_iter().chain(
+            numbered(&self.store, "texts-", ".pack")
+                .pop()
+                .map(|(_, p)| p),
+        );
+        for path in tails {
+            let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+            match frames(&bytes).1 {
+                End::Clean => {}
+                End::Torn(at) => {
+                    let file = fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .map_err(|e| e.to_string())?;
+                    file.set_len(at as u64).map_err(|e| e.to_string())?;
+                    file.sync_all().map_err(|e| e.to_string())?;
+                }
+                End::Damaged(at) => {
+                    return Err(format!(
+                        "store_damaged: {} has a damaged frame at byte {at}; run research store verify",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        // Earlier segments must be whole: only the last log is ever appended to.
+        for segment in segments.iter().rev().skip(1) {
+            if segment.end != End::Clean {
+                return Err(format!(
+                    "store_damaged: {} does not end cleanly; run research store verify",
+                    segment.log.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+    /// The SHA-256 of `text`, which is packed unless the store already holds it.
+    fn text(&mut self, text: &str) -> Result<String> {
+        let sha = hash(text);
+        if self.known.insert(sha.clone()) {
+            self.pending_bytes += text.len();
+            self.pending.push((sha.clone(), text.to_string()));
+            if self.pending_bytes >= PACK_BYTES {
+                self.flush_texts()?;
+            }
+        }
+        Ok(sha)
+    }
+    /// Appends the waiting texts as one compressed frame, flushed to disk.
+    fn flush_texts(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let mut index = vec![];
+        let mut all = Vec::with_capacity(self.pending_bytes);
+        for (sha, text) in self.pending.drain(..) {
+            index.push(json!({"sha256": sha, "offset": all.len(), "length": text.len()}));
+            all.extend_from_slice(text.as_bytes());
+        }
+        self.added += index.len();
+        self.pending_bytes = 0;
+        let index = serde_json::to_vec(&index).map_err(|e| e.to_string())?;
+        let mut payload = (index.len() as u32).to_le_bytes().to_vec();
+        payload.extend_from_slice(&index);
+        payload.extend_from_slice(&deflate(&all)?);
+        let packs = numbered(&self.store, "texts-", ".pack");
+        let path = match packs.last() {
+            Some((n, path)) => {
+                if fs::metadata(path).map_err(|e| e.to_string())?.len() < PACK_FILE_BYTES {
+                    path.clone()
+                } else {
+                    self.store.join(format!("texts-{:06}.pack", n + 1))
+                }
+            }
+            None => self.store.join("texts-000001.pack"),
+        };
+        append(&path, &frame(&payload)?)
+    }
+}
+fn append(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_data())
+        .map_err(|e| format!("Cannot write {}: {e}", path.display()))
+}
+
+/// Undoes (`forward` false) or applies one receipt delta's record changes to `records` in place.
+/// Every record taken out must be at its stated position with its stated content.
+fn replay<T: PartialEq + serde::de::DeserializeOwned>(
+    records: &mut Vec<T>,
+    changes: &Value,
+    forward: bool,
+) -> Result<()> {
+    let (out, into) = if forward {
+        ("before", "after")
+    } else {
+        ("after", "before")
+    };
+    let rows = |side: &str| -> Result<Vec<(usize, T)>> {
+        let mut rows = changes[side]
+            .as_array()
+            .ok_or("Invalid receipt delta")?
+            .iter()
+            .map(|row| {
+                Ok((
+                    row["index"].as_u64().ok_or("Invalid delta index")? as usize,
+                    serde_json::from_value(row["record"].clone()).map_err(|e| e.to_string())?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        rows.sort_by_key(|(i, _)| *i);
+        Ok(rows)
+    };
+    let remove = rows(out)?;
+    let insert = rows(into)?;
+    for (i, record) in &remove {
+        if records.get(*i) != Some(record) {
+            return Err("Receipt delta does not match the catalog".into());
+        }
+    }
+    // Changed records that kept their positions (the common case) are replaced in place.
+    if remove.len() == insert.len() && remove.iter().zip(&insert).all(|(a, b)| a.0 == b.0) {
+        for (i, record) in insert {
+            records[i] = record;
+        }
+        return Ok(());
+    }
+    for (i, _) in remove.iter().rev() {
+        records.remove(*i);
+    }
+    for (i, record) in insert {
+        if i > records.len() {
+            return Err("Receipt delta index outside the catalog".into());
+        }
+        records.insert(i, record);
+    }
+    Ok(())
+}
+/// `project` with its own fields replaced by `header` (a receipt's `before` or `after`).
+fn with_header(header: &Value, project: &mut Project) -> Result<()> {
+    let mut header = header.clone();
+    let object = header.as_object_mut().ok_or("Invalid receipt header")?;
+    object.insert("nodes".into(), Value::Array(vec![]));
+    object.insert("dependencies".into(), Value::Array(vec![]));
+    let mut next: Project = serde_json::from_value(header).map_err(|e| e.to_string())?;
+    next.nodes = std::mem::take(&mut project.nodes);
+    next.dependencies = std::mem::take(&mut project.dependencies);
+    *project = next;
+    Ok(())
+}
+/// Applies (`forward`) or undoes one commit entry or receipt on `project`.
+fn step(project: &mut Project, delta: &Value, forward: bool) -> Result<()> {
+    let changes = if delta["type"] == "commit" {
+        delta
+    } else {
+        &delta["changes"]
+    };
+    replay(&mut project.nodes, &changes["nodes"], forward)?;
+    replay(&mut project.dependencies, &changes["dependencies"], forward)?;
+    with_header(&delta[if forward { "after" } else { "before" }], project)
+}
+
+/// A receipt's facts as a commit entry, with texts replaced by their hashes (packed by `w`).
+fn commit_entry(receipt: &Value, revision: u64, at: Option<u64>, w: &mut Writer) -> Result<Value> {
+    let mut text = |v: &Value| -> Result<Value> {
+        Ok(match v.as_str() {
+            Some(t) => w.text(t)?.into(),
+            None => Value::Null,
+        })
+    };
+    let mut reports = vec![];
+    for edit in receipt["edits"].as_array().into_iter().flatten() {
+        reports.push(json!({
+            "id": edit["id"],
+            "old_path": edit["old"],
+            "new_path": edit["new"],
+            "before_sha256": text(&edit["before"])?,
+            "after_sha256": text(&edit["after"])?,
+        }));
+    }
+    let mut sidecars = vec![];
+    for s in receipt["sidecars"].as_array().into_iter().flatten() {
+        sidecars.push(if s.get("compacted").is_some() {
+            // Compacted receipts keep only the hashes of these texts.
+            json!({"path": s["path"], "before_sha256": s["before_sha256"], "after_sha256": s["after_sha256"], "stored": false})
+        } else {
+            json!({"path": s["path"], "before_sha256": text(&s["before"])?, "after_sha256": text(&s["after"])?, "stored": true})
+        });
+    }
+    Ok(json!({
+        "type": "commit",
+        "revision": revision,
+        "at_unix": receipt["at_unix"].as_u64().or(at),
+        "directed_by": receipt["directed_by"],
+        "before_sha256": receipt["before_hash"],
+        "after_sha256": receipt["after_hash"],
+        "before": receipt["before"],
+        "after": receipt["after"],
+        "nodes": receipt["changes"]["nodes"],
+        "dependencies": receipt["changes"]["dependencies"],
+        "reports": reports,
+        "moves": receipt["moves"],
+        "dependency_edits": receipt["dependencies"],
+        "ledger": receipt["ledger"],
+        "repin_ledger": receipt["repin_ledger"],
+        "sidecars": sidecars,
+    }))
+}
+
+/// Receipts by revision: journal path and file time.
+fn receipts(dir: &Path) -> HashMap<u64, (PathBuf, Option<u64>)> {
+    let mut out = HashMap::new();
+    for folder in RECEIPT_FOLDERS {
+        for entry in fs::read_dir(dir.join(folder))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(revision) = name
+                .strip_prefix("revision-")
+                .and_then(|r| r.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let journal = entry.path().join("journal.json");
+            let Ok(meta) = fs::metadata(&journal) else {
+                continue;
+            };
+            let at = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            out.entry(revision).or_insert((journal, at));
+        }
+    }
+    out
+}
+fn project_dir(root: &Path, id: &str) -> Result<PathBuf> {
+    if !valid_id(id) {
+        return Err("Invalid project identity".into());
+    }
+    let dir = root.join(id);
+    layout::inside(root, &dir)?;
+    if !dir.join("project.json").is_file() {
+        return Err(format!("Unknown project: {id}"));
+    }
+    Ok(dir)
+}
+
+/// A catalog reached by walking receipts back, kept as a checkpoint candidate: how many entries
+/// back it lies, its revision, fingerprint and compressed bytes.
+struct Mark {
+    back: usize,
+    revision: u64,
+    sha: String,
+    compressed: Vec<u8>,
+}
+
+/// Brings the store of project `id` to the catalog's current revision; with `create`, creates
+/// it first (the manual migration step) from as much receipt history as can be verified.
+pub fn sync(root: &Path, id: &str, create: bool) -> Result<Value> {
+    let started = std::time::Instant::now();
+    let dir = project_dir(root, id)?;
+    let store = dir.join(FOLDER);
+    let marker = store.join("store.json");
+    if create && marker.is_file() {
+        return Err("This project already has a store; use research store sync.".into());
+    }
+    if !create && !marker.is_file() {
+        return Err(format!(
+            "no_store: project {id} has no store. Creating one is a manual step: research store init {id}"
+        ));
+    }
+    let mut w = Writer::open(&store)?;
+    w.repair()?;
+    let (existing, _) = segments(&store)?;
+    let head = match existing.last() {
+        Some(segment) => Some(segment.head()?),
+        None => None,
+    };
+
+    // The current catalog, read under the project's shared lock so no commit is half written.
+    let bytes = {
+        let _locks = acquire_locks(root, id, false, false)?;
+        let pending = RECEIPT_FOLDERS
+            .iter()
+            .any(|f| dir.join(f).join("pending/journal.json").is_file());
+        if pending {
+            return Err("recovery_required: a catalog transaction is pending. Open the project to recover it, then sync.".into());
+        }
+        fs::read(dir.join("project.json")).map_err(|e| e.to_string())?
+    };
+    let current_sha = sha256_hex(&bytes);
+    let mut state: Project = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let current_revision = state.revision;
+    if head
+        .as_ref()
+        .is_some_and(|(r, sha)| *r == current_revision && *sha == current_sha)
+    {
+        if create {
+            atomic(&marker, &store_marker(id)?)?;
+        }
+        return Ok(
+            json!({"backend":"store","project":id,"revision":current_revision,"commits_added":0,"up_to_date":true}),
+        );
+    }
+
+    // Walk back from the current catalog, newest receipt first.
+    let receipts = receipts(&dir);
+    let mut entries: Vec<Vec<u8>> = vec![];
+    let mut marks = vec![Mark {
+        back: 0,
+        revision: current_revision,
+        sha: current_sha.clone(),
+        compressed: deflate(&bytes)?,
+    }];
+    drop(bytes);
+    let mut revision = current_revision;
+    let mut expect = current_sha.clone();
+    let mut since_mark = 0usize;
+    let mut connected = false;
+    let stopped: String = loop {
+        if let Some((head_revision, head_sha)) = &head {
+            if revision == *head_revision && expect == *head_sha {
+                connected = true;
+                break String::new();
+            }
+            if revision <= *head_revision {
+                break format!(
+                    "the receipts reach revision {revision} with another catalog than the store's head"
+                );
+            }
+        }
+        let Some((path, at)) = receipts.get(&revision) else {
+            break format!("no receipt for revision {revision}");
+        };
+        let receipt: Value = match fs::read(path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()))
+        {
+            Ok(v) => v,
+            Err(e) => break format!("receipt for revision {revision} unreadable: {e}"),
+        };
+        let delta = (receipt["kind"] == "completed-catalog-delta"
+            || receipt["kind"] == "pending-catalog-delta")
+            && receipt["schema"] == 1;
+        let previous = receipt["before"]["revision"].as_u64();
+        if !delta || receipt["after"]["revision"] != revision || previous.is_none() {
+            break format!("receipt for revision {revision} is not a catalog delta");
+        }
+        if receipt["after_hash"] != expect.as_str() {
+            break format!("receipt for revision {revision} does not match the catalog after it");
+        }
+        if let Err(e) = step(&mut state, &receipt, false) {
+            break format!("receipt for revision {revision}: {e}");
+        }
+        let entry = commit_entry(&receipt, revision, *at, &mut w)?;
+        let entry = serde_json::to_vec(&entry).map_err(|e| e.to_string())?;
+        since_mark += entry.len();
+        entries.push(entry);
+        expect = receipt["before_hash"]
+            .as_str()
+            .ok_or("Receipt without fingerprint")?
+            .into();
+        revision = previous.unwrap_or_default();
+        if since_mark >= segment_bytes() {
+            let rebuilt = catalog_bytes(&state)?;
+            if sha256_hex(&rebuilt) != expect {
+                break format!(
+                    "the catalog rebuilt at revision {revision} does not match its recorded fingerprint"
+                );
+            }
+            marks.push(Mark {
+                back: entries.len(),
+                revision,
+                sha: expect.clone(),
+                compressed: deflate(&rebuilt)?,
+            });
+            since_mark = 0;
+        }
+    };
+    if !connected && marks.last().is_none_or(|m| m.back != entries.len()) {
+        // Where the walk stopped becomes the oldest checkpoint, once it verifies.
+        let rebuilt = catalog_bytes(&state)?;
+        if sha256_hex(&rebuilt) == expect {
+            marks.push(Mark {
+                back: entries.len(),
+                revision,
+                sha: expect.clone(),
+                compressed: deflate(&rebuilt)?,
+            });
+        }
+    }
+    drop(state);
+    // Entries older than the oldest checkpoint cannot be anchored without the store's head.
+    let oldest = if connected {
+        entries.len()
+    } else {
+        let back = marks.last().map_or(0, |m| m.back);
+        entries.truncate(back);
+        back
+    };
+    // Texts first, so every entry written below finds its texts.
+    w.flush_texts()?;
+
+    let mut next_seq = existing.last().map_or(1, |s| s.seq + 1);
+    let mut started_segments = vec![];
+    let mut write_segment = |mark: &Mark, follows: Value| -> Result<PathBuf> {
+        let (log, checkpoint) = segment_files(&store, next_seq);
+        next_seq += 1;
+        atomic(&checkpoint, &mark.compressed)?;
+        let mut start = json!({"type":"start","revision":mark.revision,"catalog_sha256":mark.sha,"at_unix":unix_now()});
+        if let Value::Object(extra) = follows {
+            start.as_object_mut().unwrap().extend(extra);
+        }
+        append(
+            &log,
+            &frame(&serde_json::to_vec(&start).map_err(|e| e.to_string())?)?,
+        )?;
+        started_segments.push(mark.revision);
+        Ok(log)
+    };
+    let write_entries = |log: &Path, range: Range<usize>, entries: &[Vec<u8>]| -> Result<()> {
+        let mut out = vec![];
+        // `entries` is newest first.
+        for entry in entries[range].iter().rev() {
+            out.extend_from_slice(&frame(entry)?);
+        }
+        if out.is_empty() {
+            Ok(())
+        } else {
+            append(log, &out)
+        }
+    };
+    // Checkpoints from oldest to newest. The current catalog's starts a segment only when
+    // nothing older could be verified and the store does not connect.
+    let mut used: Vec<&Mark> = marks
+        .iter()
+        .filter(|m| m.back > 0 && m.back <= oldest)
+        .collect();
+    used.sort_by_key(|m| std::cmp::Reverse(m.back));
+    used.dedup_by_key(|m| m.back);
+    if used.is_empty() && !connected {
+        used.push(&marks[0]);
+    }
+    let mut log = if connected {
+        existing.last().map(|s| s.log.clone())
+    } else {
+        None
+    };
+    let mut newer_end = oldest;
+    for (i, mark) in used.iter().enumerate() {
+        if let Some(log) = &log {
+            write_entries(log, mark.back..newer_end, &entries)?;
+        }
+        let follows = if i == 0 && !connected {
+            if create {
+                json!({"follows":"init","history_from":mark.revision,"stopped":stopped})
+            } else {
+                json!({"follows":"gap","gap":{"from":head.as_ref().map(|h| h.0),"to":mark.revision,"reason":stopped}})
+            }
+        } else {
+            json!({"follows":"commit"})
+        };
+        log = Some(write_segment(mark, follows)?);
+        newer_end = mark.back;
+    }
+    let log = log.ok_or("Store has no segment to append to")?;
+    write_entries(&log, 0..newer_end, &entries)?;
+    // A long log is closed with a checkpoint of the current catalog.
+    let long = fs::metadata(&log).map_err(|e| e.to_string())?.len() as usize >= segment_bytes();
+    if long && newer_end > 0 {
+        write_segment(&marks[0], json!({"follows":"commit"}))?;
+    }
+    if create {
+        atomic(&marker, &store_marker(id)?)?;
+    }
+    Ok(json!({
+        "backend": "store",
+        "project": id,
+        "from": head.as_ref().map(|h| h.0),
+        "revision": current_revision,
+        "commits_added": entries.len(),
+        "segments_started": started_segments,
+        "gap": (!connected && !create).then(|| json!({"from": head.as_ref().map(|h| h.0), "reason": stopped})),
+        "history_from": create.then(|| used.first().map(|m| m.revision)).flatten(),
+        "stopped": (!connected).then_some(stopped),
+        "texts_added": w.added,
+        "took_ms": started.elapsed().as_millis() as u64,
+    }))
+}
+fn store_marker(id: &str) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(&json!({"schema": SCHEMA, "project": id, "codec": "zlib"}))
+        .map_err(|e| e.to_string())
+}
+fn open_store(root: &Path, id: &str) -> Result<(PathBuf, PathBuf)> {
+    let dir = project_dir(root, id)?;
+    let store = dir.join(FOLDER);
+    if !store.join("store.json").is_file() {
+        return Err(format!(
+            "no_store: project {id} has no store. Creating one is a manual step: research store init {id}"
+        ));
+    }
+    Ok((dir, store))
+}
+/// The current catalog's revision and fingerprint (read without a lock: a reader of files).
+fn current(dir: &Path) -> Result<(u64, String)> {
+    #[derive(Deserialize)]
+    struct Revision {
+        revision: u64,
+    }
+    let bytes = fs::read(dir.join("project.json")).map_err(|e| e.to_string())?;
+    let revision: Revision = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    Ok((revision.revision, sha256_hex(&bytes)))
+}
+fn size(paths: impl IntoIterator<Item = PathBuf>) -> u64 {
+    paths
+        .into_iter()
+        .filter_map(|p| fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// Head, lag, segments, gaps and sizes of a project's store.
+pub fn status(root: &Path, id: &str) -> Result<Value> {
+    let (dir, store) = open_store(root, id)?;
+    let (segments, invalid) = segments(&store)?;
+    let head = segments.last().map(Segment::head).transpose()?;
+    let (revision, sha) = current(&dir)?;
+    let gaps: Vec<Value> = segments
+        .iter()
+        .filter(|s| s.start["follows"] == "gap")
+        .map(|s| s.start["gap"].clone())
+        .collect();
+    let commits: usize = segments.iter().map(|s| s.frames.len() - 1).sum();
+    let packs: Vec<PathBuf> = numbered(&store, "texts-", ".pack")
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    let texts = text_index(&store)?;
+    Ok(json!({
+        "backend": "store",
+        "project": id,
+        "head": head.as_ref().map(|(r, s)| json!({"revision": r, "catalog_sha256": s})),
+        "catalog_revision": revision,
+        "current": head.as_ref().is_some_and(|(r, s)| *r == revision && *s == sha),
+        "behind": head.as_ref().map(|(r, _)| revision.saturating_sub(*r)),
+        "history_from": segments.first().map(|s| &s.start["revision"]),
+        "segments": segments.len(),
+        "commits": commits,
+        "gaps": gaps,
+        "texts": texts.at.len(),
+        "log_bytes": size(segments.iter().map(|s| s.log.clone())),
+        "checkpoint_bytes": size(segments.iter().map(|s| s.checkpoint.clone())),
+        "pack_bytes": size(packs),
+        "unfinished": invalid.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "problems": texts.problems,
+    }))
+}
+
+/// Checks every frame, checkpoint, commit chain and text, and the head against the catalog.
+pub fn verify(root: &Path, id: &str) -> Result<Value> {
+    let (dir, store) = open_store(root, id)?;
+    let (segments, invalid) = segments(&store)?;
+    let texts = text_index(&store)?;
+    let mut problems = texts.problems.clone();
+    let mut notes = vec![];
+    for log in &invalid {
+        problems.push(format!(
+            "{}: no valid start entry or checkpoint",
+            log.display()
+        ));
+    }
+    let mut commits = 0usize;
+    let mut referenced = HashSet::new();
+    let mut previous_end: Option<String> = None;
+    for (i, segment) in segments.iter().enumerate() {
+        let name = segment.log.display();
+        match segment.end {
+            End::Clean => {}
+            End::Torn(at) if i + 1 == segments.len() => {
+                notes.push(format!("{name}: the frame at byte {at} is incomplete (a write in progress, or left by an interrupted one and removed by the next sync)"));
+            }
+            End::Torn(at) | End::Damaged(at) => {
+                problems.push(format!("{name}: damaged frame at byte {at}"));
+            }
+        }
+        let catalog = match checkpoint_catalog(segment) {
+            Ok(c) => c,
+            Err(e) => {
+                problems.push(format!("{}: {e}", segment.checkpoint.display()));
+                previous_end = None;
+                continue;
+            }
+        };
+        let sha = sha256_hex(&catalog);
+        if segment.start["catalog_sha256"] != sha.as_str() {
+            problems.push(format!(
+                "{}: checkpoint does not match its fingerprint",
+                segment.checkpoint.display()
+            ));
+        }
+        if segment.start["follows"] == "commit" && previous_end.as_deref() != Some(sha.as_str()) {
+            problems.push(format!("{name}: does not continue the previous segment"));
+        }
+        let mut state: Project = match serde_json::from_slice(&catalog) {
+            Ok(p) => p,
+            Err(e) => {
+                problems.push(format!("{}: {e}", segment.checkpoint.display()));
+                previous_end = None;
+                continue;
+            }
+        };
+        let mut chain = sha;
+        let mut broken = false;
+        for f in 1..segment.frames.len() {
+            let entry = match segment.entry(f) {
+                Ok(e) => e,
+                Err(e) => {
+                    problems.push(format!("{name}: entry {f}: {e}"));
+                    broken = true;
+                    break;
+                }
+            };
+            commits += 1;
+            for side in ["before_sha256", "after_sha256"] {
+                for row in entry["reports"].as_array().into_iter().flatten() {
+                    if let Some(sha) = row[side].as_str() {
+                        referenced.insert(sha.to_string());
+                    }
+                }
+                for row in entry["sidecars"].as_array().into_iter().flatten() {
+                    if row["stored"] == true
+                        && let Some(sha) = row[side].as_str()
+                    {
+                        referenced.insert(sha.to_string());
+                    }
+                }
+            }
+            if entry["before_sha256"] != chain.as_str() {
+                problems.push(format!(
+                    "{name}: revision {} does not follow the one before it",
+                    entry["revision"]
+                ));
+                broken = true;
+                break;
+            }
+            if let Err(e) = step(&mut state, &entry, true) {
+                problems.push(format!("{name}: revision {}: {e}", entry["revision"]));
+                broken = true;
+                break;
+            }
+            chain = entry["after_sha256"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+        }
+        if broken {
+            previous_end = None;
+            continue;
+        }
+        // One fingerprint per segment: the catalog the replay ends with.
+        let end = sha256_hex(&catalog_bytes(&state)?);
+        if end != chain {
+            problems.push(format!(
+                "{name}: replay ends with another catalog than recorded"
+            ));
+        }
+        previous_end = Some(chain);
+    }
+    // Every pack frame is decompressed once and each of its texts checked against its hash.
+    let mut present = HashSet::new();
+    for (_, pack) in numbered(&store, "texts-", ".pack") {
+        let bytes = fs::read(&pack).map_err(|e| e.to_string())?;
+        for range in frames(&bytes).0 {
+            let Some((index, offset)) = pack_parts(&bytes[range.clone()]) else {
+                continue;
+            };
+            let all = match inflate(&bytes[range.start + offset..range.end]) {
+                Ok(all) => all,
+                Err(e) => {
+                    problems.push(format!("{}: {e}", pack.display()));
+                    continue;
+                }
+            };
+            for (sha, text) in index {
+                if all.get(text).is_some_and(|t| sha256_hex(t) == sha) {
+                    present.insert(sha);
+                } else {
+                    problems.push(format!("text {sha} does not match its hash"));
+                }
+            }
+        }
+    }
+    for sha in &referenced {
+        if !present.contains(sha) {
+            problems.push(format!("text {sha} is missing"));
+        }
+    }
+    let checked = present.len();
+    let (revision, sha) = current(&dir)?;
+    let head = segments.last().map(Segment::head).transpose()?;
+    Ok(json!({
+        "backend": "store",
+        "project": id,
+        "ok": problems.is_empty(),
+        "problems": problems,
+        "notes": notes,
+        "segments": segments.len(),
+        "commits": commits,
+        "texts_checked": checked,
+        "head": head.as_ref().map(|(r, s)| json!({"revision": r, "catalog_sha256": s})),
+        "current": head.as_ref().is_some_and(|(r, s)| *r == revision && *s == sha),
+        "catalog_revision": revision,
+    }))
+}

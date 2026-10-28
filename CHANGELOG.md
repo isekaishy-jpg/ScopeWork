@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **The project store, side by side** ([design](docs/design-storage-backend.md), [proposal](docs/proposal-storage-backend.md)). `research store init PROJECT` (the manual migration step) builds the project's whole catalog history from its change receipts into `<project>/store/`: checksummed JSON entries per revision, catalog checkpoints and report texts compressed with zlib, each checkpoint verified against the recorded fingerprint. The store follows the receipts every writer leaves (`store sync`), so it never takes part in a commit and the files stay authoritative. A change without a receipt is recorded as a gap. `store status` shows how far behind it is and `store verify` checks it end to end.
 - **Data items** ([proposal](docs/proposal-storage-backend.md)). A chunk holds data items (globals, tables, strings, vtables) beside its functions, each with an RVA, a length in bytes and its own report in `D<RVA>/`. They are researched like functions: evidence to complete, prerequisites to and from functions, flags, claims and pools. An RVA names one record of either kind. `node create --length`, `"length"` in batches and imports, `node list --kind data`, and `data_items` counts in `status`; the record panel adds **Add data item**. The first data item raises the catalog to format 6, which earlier versions cannot open; projects without data keep format 5.
 
 Fixes from the review of this batch ([proposal](docs/proposal-review-fixes-4.md)):

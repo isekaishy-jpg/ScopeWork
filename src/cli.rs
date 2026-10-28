@@ -100,6 +100,9 @@ pub(crate) enum Command {
         #[arg(long)]
         compact_sidecars: bool,
     },
+    /// The project's store: its whole history beside the authoritative files.
+    #[command(subcommand)]
+    Store(StoreCommand),
     /// Effective progress and records ready for review (not automatic completion).
     Status {
         project: String,
@@ -135,6 +138,27 @@ pub(crate) enum Command {
     /// Run the coordinator for this research home (started automatically by clients).
     #[command(hide = true)]
     Serve,
+}
+#[derive(Subcommand)]
+pub(crate) enum StoreCommand {
+    /// Create the project's store from its receipt history (the manual migration step).
+    Init { project: String },
+    /// Bring the store to the catalog's current revision.
+    Sync { project: String },
+    /// Head, lag, segments, gaps and sizes.
+    Status { project: String },
+    /// Check every frame, checkpoint, commit chain and text, and the head against the catalog.
+    Verify { project: String },
+}
+impl StoreCommand {
+    fn project(&self) -> &str {
+        match self {
+            Self::Init { project }
+            | Self::Sync { project }
+            | Self::Status { project }
+            | Self::Verify { project } => project,
+        }
+    }
 }
 #[derive(Subcommand)]
 pub(crate) enum JobCommand {
@@ -859,6 +883,7 @@ fn project_of(command: &Command) -> Option<&str> {
         Command::Deps(DepsCommand::Get { project, .. } | DepsCommand::Set { project, .. })
         | Command::Journal { project, .. }
         | Command::Status { project, .. } => Some(project.as_str()),
+        Command::Store(command) => Some(command.project()),
         Command::Impl(command) => Some(command.project()),
         Command::Pool(command) => Some(command.project()),
         Command::Wait { project, .. }
@@ -1139,6 +1164,15 @@ fn run(args: Args) -> Result<Value, String> {
     if let Command::History(HistoryCommand::Kinds) = &args.command {
         return Ok(crate::research::history::kinds_value());
     }
+    if let Command::Store(command) = &args.command {
+        use crate::research::store;
+        return match command {
+            StoreCommand::Init { project } => store::sync(&root, project, true),
+            StoreCommand::Sync { project } => store::sync(&root, project, false),
+            StoreCommand::Status { project } => store::status(&root, project),
+            StoreCommand::Verify { project } => store::verify(&root, project),
+        };
+    }
     if let Command::Journal {
         project,
         compact,
@@ -1285,6 +1319,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
         Command::Journal { .. } => {
             unreachable!("journal commands are handled before opening a library")
         }
+        Command::Store(_) => unreachable!("store commands are handled before opening a library"),
         Command::Import(_) => unreachable!("import commands handled before opening a library"),
         Command::Impl(command) => {
             let p = project(lib, command.project())?;
@@ -2401,6 +2436,7 @@ pub(crate) fn route(command: &Command) -> Route {
         | Command::Wait { .. }
         | Command::Session
         | Command::Journal { .. }
+        | Command::Store(_)
         | Command::Coordinator(_)
         | Command::Job(_)
         | Command::Tools(_)
