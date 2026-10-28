@@ -547,7 +547,8 @@ impl Library {
             let id = self.projects[p]
                 .nodes
                 .iter()
-                .find(|n| n.rva == Some(rva))
+                // A bare RVA is in the default space.
+                .find(|n| n.rva == Some(rva) && n.space.is_none())
                 .map(|n| n.id)
                 .ok_or_else(|| format!("No record has RVA {rva:X}"))?;
             if node.is_some_and(|n| n != id) {

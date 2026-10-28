@@ -640,6 +640,7 @@ mod tests {
             length: None,
             revision: 0,
             accepted_hash: None,
+            space: None,
             accepted_prerequisites: Default::default(),
         };
         let mut project: Project = serde_json::from_value(serde_json::json!({

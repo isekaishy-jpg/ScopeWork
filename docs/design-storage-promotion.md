@@ -52,7 +52,8 @@ Node.space?        (absent: the project's default space, as today)
   - `research project artifact add <project> --name N --sha256 H [--size B] [--format F] [--inside ID --path P] [--description D] --expect-revision R`;
   - `research project artifact update <project> <id> [fields] --expect-revision R`, `remove` (only when no space names it and no artifact is inside it);
   - `research project space add|update|remove` likewise (`remove` only when no record is in it);
-  - `node create --space ID`, and `space` in batch `create`; a batch may move a leaf to another space only by deleting and recreating it (identity is per space).
+  - `node create --space ID`, and `space` in batch and import `create`; a batch may move a leaf to another space only by deleting and recreating it (identity is per space);
+  - `deps set` names a prerequisite in another space as `S<n>:<RVA>`; rename citations (which compute a VA from the image base) apply to the default space only;
   - `project show` lists artifacts and spaces.
 - **Commits:** artifact and space changes are header changes committed through `commit_catalog`, so they leave receipts and the store follows them.
 - **Reports:** a leaf's generated header names its space when not the default.

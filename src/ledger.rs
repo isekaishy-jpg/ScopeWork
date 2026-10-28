@@ -22,6 +22,8 @@ impl<'a> Resolver<'a> {
             rvas: project
                 .nodes
                 .iter()
+                // Ledger rows name addresses in the default space.
+                .filter(|n| n.space.is_none())
                 .filter_map(|n| Some((n.rva?, n.id)))
                 .collect(),
             index: catalog_index::Index::new(project),
@@ -262,11 +264,14 @@ mod tests {
             length: None,
             revision: 0,
             accepted_hash: None,
+            space: None,
             accepted_prerequisites: Default::default(),
         }
     }
     fn project() -> Project {
         Project {
+            artifacts: vec![],
+            spaces: vec![],
             layout_version: 5,
             id: "fixture".into(),
             name: "Fixture".into(),

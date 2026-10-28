@@ -39,6 +39,9 @@ pub struct Create {
     /// A data item's size in bytes: given, the record created under a chunk is a data item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<u32>,
+    /// The address space of a function or data item; absent for the default space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<u32>,
     #[serde(default)]
     pub context_only: bool,
 }
@@ -985,7 +988,12 @@ impl Library {
             .enumerate()
             .map(|(i, n)| (n.id, i))
             .collect();
-        let mut rvas: HashSet<_> = after.nodes.iter().filter_map(|n| n.rva).collect();
+        let mut rvas: HashSet<_> = after
+            .nodes
+            .iter()
+            .filter(|n| n.kind.is_leaf())
+            .map(|n| (n.space, n.rva))
+            .collect();
         let mut changed = HashSet::new();
         let mut created = vec![];
         for c in &batch.create {
@@ -1001,8 +1009,15 @@ impl Library {
             }
 
             let name = record_name(&c.name)?;
-            if let Some(rva) = c.rva
-                && (before.binary.trim().is_empty() || !rvas.insert(rva))
+            if let Some(space) = c.space
+                && (c.rva.is_none() || !after.spaces.iter().any(|s| s.id == space))
+            {
+                return Err(format!(
+                    "Batch creation names address space {space}, which the project does not have, or a record without an address"
+                ));
+            }
+            if c.rva.is_some()
+                && (before.binary.trim().is_empty() || !rvas.insert((c.space, c.rva)))
             {
                 return Err(
                     "Empty binary identity or duplicate function or data RVA in batch".into(),
@@ -1022,6 +1037,7 @@ impl Library {
                 status: Status::NotStarted,
                 revision: 0,
                 accepted_hash: None,
+                space: c.space,
                 accepted_prerequisites: Default::default(),
             });
             created.push(id);
@@ -1215,10 +1231,11 @@ impl Library {
                 let name = u.name.as_ref()?.trim();
                 let node = old.nodes.get(&u.id)?;
                 (node.name != name).then(|| {
+                    // Only the default space has the image base a citation's VA counts from.
                     Rename::new(
                         &node.name,
                         name,
-                        base.zip(node.rva)
+                        base.zip(node.rva.filter(|_| node.space.is_none()))
                             .and_then(|(b, r)| b.checked_add(u64::from(r)))
                             .map(|va| format!("{va:08X}")),
                     )

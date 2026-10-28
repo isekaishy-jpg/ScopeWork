@@ -576,6 +576,164 @@ pub(crate) enum ProjectCommand {
         #[arg(long)]
         expect_revision: u64,
     },
+    /// The project's input files: disk images, files extracted from them, ROMs.
+    #[command(subcommand)]
+    Artifact(ArtifactCommand),
+    /// Address spaces besides the default one: other files, other processors.
+    #[command(subcommand)]
+    Space(SpaceCommand),
+}
+#[derive(Subcommand)]
+pub(crate) enum ArtifactCommand {
+    /// Add an input file (needs --name and --sha256).
+    Add {
+        project: String,
+        #[command(flatten)]
+        fields: ArtifactArgs,
+        /// Revision from project show; rejects concurrent project edits.
+        #[arg(long)]
+        expect_revision: u64,
+    },
+    /// Change an artifact's fields; an empty text clears that text.
+    Update {
+        project: String,
+        id: u32,
+        #[command(flatten)]
+        fields: ArtifactArgs,
+        #[arg(long)]
+        expect_revision: u64,
+    },
+    /// Remove an artifact that no space names and no artifact lies inside.
+    Remove {
+        project: String,
+        id: u32,
+        #[arg(long)]
+        expect_revision: u64,
+    },
+}
+#[derive(clap::Args)]
+pub(crate) struct ArtifactArgs {
+    #[arg(long)]
+    name: Option<String>,
+    /// SHA-256 of the file (64 hexadecimal digits).
+    #[arg(long)]
+    sha256: Option<String>,
+    /// Size in bytes.
+    #[arg(long)]
+    size: Option<u64>,
+    #[arg(long)]
+    format: Option<String>,
+    /// The artifact this one is extracted from.
+    #[arg(long)]
+    inside: Option<u32>,
+    /// Its path inside that artifact.
+    #[arg(long)]
+    path: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+}
+impl ArtifactArgs {
+    fn fields(&self) -> crate::research::InputFields<'_> {
+        crate::research::InputFields {
+            name: self.name.as_deref(),
+            sha256: self.sha256.as_deref(),
+            size: self.size,
+            format: self.format.as_deref(),
+            inside: self.inside,
+            path: self.path.as_deref(),
+            description: self.description.as_deref(),
+            ..Default::default()
+        }
+    }
+}
+#[derive(Subcommand)]
+pub(crate) enum SpaceCommand {
+    /// Add an address space (needs --name and --kind).
+    Add {
+        project: String,
+        #[command(flatten)]
+        fields: SpaceArgs,
+        /// Revision from project show; rejects concurrent project edits.
+        #[arg(long)]
+        expect_revision: u64,
+    },
+    /// Change a space's fields; an empty text clears that text.
+    Update {
+        project: String,
+        id: u32,
+        #[command(flatten)]
+        fields: SpaceArgs,
+        #[arg(long)]
+        expect_revision: u64,
+    },
+    /// Remove a space that holds no function or data item.
+    Remove {
+        project: String,
+        id: u32,
+        #[arg(long)]
+        expect_revision: u64,
+    },
+}
+#[derive(clap::Args)]
+pub(crate) struct SpaceArgs {
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long, value_enum)]
+    kind: Option<crate::research::SpaceKind>,
+    /// The artifact the space's addresses are in (required for a file space).
+    #[arg(long)]
+    artifact: Option<u32>,
+    /// The processor, for another processor's address space.
+    #[arg(long)]
+    processor: Option<String>,
+    /// Load address of an image space, hexadecimal.
+    #[arg(long)]
+    base: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+}
+impl SpaceArgs {
+    fn fields(&self) -> Result<crate::research::InputFields<'_>, String> {
+        let base = self
+            .base
+            .as_deref()
+            .map(|b| {
+                let t = b.trim();
+                let t = t
+                    .strip_prefix("0x")
+                    .or_else(|| t.strip_prefix("0X"))
+                    .unwrap_or(t);
+                u64::from_str_radix(t, 16).map_err(|_| format!("Invalid hexadecimal base: {b}"))
+            })
+            .transpose()?;
+        Ok(crate::research::InputFields {
+            name: self.name.as_deref(),
+            kind: self.kind,
+            artifact: self.artifact,
+            processor: self.processor.as_deref(),
+            base,
+            description: self.description.as_deref(),
+            ..Default::default()
+        })
+    }
+}
+impl ArtifactCommand {
+    fn project(&self) -> &str {
+        match self {
+            Self::Add { project, .. }
+            | Self::Update { project, .. }
+            | Self::Remove { project, .. } => project,
+        }
+    }
+}
+impl SpaceCommand {
+    fn project(&self) -> &str {
+        match self {
+            Self::Add { project, .. }
+            | Self::Update { project, .. }
+            | Self::Remove { project, .. } => project,
+        }
+    }
 }
 #[derive(Subcommand)]
 pub(crate) enum NodeCommand {
@@ -655,6 +813,9 @@ pub(crate) enum NodeCommand {
         /// A data item's size in bytes; creates a data item instead of a function.
         #[arg(long)]
         length: Option<u32>,
+        /// The address space the RVA counts in (`project space add`); the default space when absent.
+        #[arg(long)]
+        space: Option<u32>,
         /// The human's instruction, required to create a record in a pooled chunk without being a member.
         #[arg(long)]
         directed_by: Option<String>,
@@ -883,6 +1044,8 @@ fn project_of(command: &Command) -> Option<&str> {
             | ProjectCommand::SetProof { project, .. }
             | ProjectCommand::Tidy { project, .. },
         ) => Some(project.as_str()),
+        Command::Project(ProjectCommand::Artifact(command)) => Some(command.project()),
+        Command::Project(ProjectCommand::Space(command)) => Some(command.project()),
         Command::Node(
             NodeCommand::List { project, .. }
             | NodeCommand::Delete { project, .. }
@@ -1505,6 +1668,62 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                     json!({"project":id,"research_scope":lib.projects[p].research_scope,"revision":lib.projects[p].revision}),
                 )
             }
+            ProjectCommand::Artifact(command) => {
+                let p = project(lib, command.project())?;
+                let id = match &command {
+                    ArtifactCommand::Add {
+                        fields,
+                        expect_revision,
+                        ..
+                    } => Some(lib.add_artifact(p, &fields.fields(), *expect_revision)?),
+                    ArtifactCommand::Update {
+                        id,
+                        fields,
+                        expect_revision,
+                        ..
+                    } => lib
+                        .update_artifact(p, *id, &fields.fields(), *expect_revision)
+                        .map(|_| Some(*id))?,
+                    ArtifactCommand::Remove {
+                        id,
+                        expect_revision,
+                        ..
+                    } => lib
+                        .remove_artifact(p, *id, *expect_revision)
+                        .map(|_| None)?,
+                };
+                let project = &lib.projects[p];
+                Ok(
+                    json!({"project": project.id, "revision": project.revision, "layout_version": project.layout_version, "artifact": id, "artifacts": project.artifacts}),
+                )
+            }
+            ProjectCommand::Space(command) => {
+                let p = project(lib, command.project())?;
+                let id = match &command {
+                    SpaceCommand::Add {
+                        fields,
+                        expect_revision,
+                        ..
+                    } => Some(lib.add_space(p, &fields.fields()?, *expect_revision)?),
+                    SpaceCommand::Update {
+                        id,
+                        fields,
+                        expect_revision,
+                        ..
+                    } => lib
+                        .update_space(p, *id, &fields.fields()?, *expect_revision)
+                        .map(|_| Some(*id))?,
+                    SpaceCommand::Remove {
+                        id,
+                        expect_revision,
+                        ..
+                    } => lib.remove_space(p, *id, *expect_revision).map(|_| None)?,
+                };
+                let project = &lib.projects[p];
+                Ok(
+                    json!({"project": project.id, "revision": project.revision, "layout_version": project.layout_version, "space": id, "spaces": project.spaces}),
+                )
+            }
         },
         Command::Node(command) => {
             match command {
@@ -1601,6 +1820,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                     name,
                     rva,
                     length,
+                    space,
                     directed_by,
                 } => {
                     let p = project(lib, &id)?;
@@ -1613,14 +1833,12 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                     if (parent_kind == Kind::Chunk) != rva.is_some() {
                         return Err("Supply --rva only when creating a function or data item under a chunk.".into());
                     }
-                    let node = lib.add_directed(
-                        p,
-                        parent,
-                        &name,
-                        rva.as_deref().unwrap_or(""),
+                    let place = crate::research::Placement {
+                        rva: rva.as_deref().unwrap_or(""),
                         length,
-                        directed_by.as_deref(),
-                    )?;
+                        space,
+                    };
+                    let node = lib.add_directed(p, parent, &name, place, directed_by.as_deref())?;
 
                     node_view(lib, p, node)
                 }
@@ -2323,6 +2541,23 @@ pub(crate) fn route(command: &Command) -> Route {
         Command::Project(ProjectCommand::SetScope { project, .. }) => {
             write_route(project, "set-scope", vec![], &["scope"], false, 0)
         }
+        Command::Project(ProjectCommand::Artifact(command)) => write_route(
+            command.project(),
+            "inputs",
+            vec![],
+            &["structure"],
+            false,
+            0,
+        ),
+        Command::Project(ProjectCommand::Space(command)) => write_route(
+            command.project(),
+            "inputs",
+            vec![],
+            &["structure"],
+            false,
+            0,
+        ),
+
         // Proof writes touch only their sidecar: record operations that may share a commit.
         Command::Project(ProjectCommand::SetProof { project, .. }) => {
             write_route(project, "proof", vec![], &["proof"], true, 0)

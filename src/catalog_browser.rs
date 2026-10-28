@@ -256,9 +256,10 @@ impl BrowserData {
             .nodes
             .iter()
             .map(|n| {
+                let space = n.space.map(|s| format!("S{s}:")).unwrap_or_default();
                 let address = match (n.rva, n.length) {
-                    (Some(r), Some(length)) => format!(" 0x{r:08X} ({length} bytes)"),
-                    (Some(r), None) => format!(" 0x{r:08X}"),
+                    (Some(r), Some(length)) => format!(" {space}0x{r:08X} ({length} bytes)"),
+                    (Some(r), None) => format!(" {space}0x{r:08X}"),
                     _ => String::new(),
                 };
                 let required = index.required.contains(&n.id);
@@ -371,6 +372,7 @@ mod tests {
             length: None,
             revision: 1,
             accepted_hash: None,
+            space: None,
             accepted_prerequisites: Default::default(),
         }
     }
@@ -378,6 +380,8 @@ mod tests {
     #[test]
     fn review_queue_filter_lists_queued_records_flat() {
         let project = Project {
+            artifacts: vec![],
+            spaces: vec![],
             layout_version: 5,
             id: "fixture".into(),
             name: "Fixture".into(),

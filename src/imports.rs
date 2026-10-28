@@ -135,7 +135,12 @@ fn addition(project: &Project, batch: &Batch, first: u64) -> Result<Vec<Node>> {
         return Err("additive_only: use a creation-only schema-1 batch with exact binary identity; mixed batches retain exclusive publication".into());
     }
     let mut kinds: HashMap<_, _> = project.nodes.iter().map(|n| (n.id, n.kind)).collect();
-    let mut rvas: HashSet<_> = project.nodes.iter().filter_map(|n| n.rva).collect();
+    let mut rvas: HashSet<_> = project
+        .nodes
+        .iter()
+        .filter(|n| n.kind.is_leaf())
+        .map(|n| (n.space, n.rva))
+        .collect();
     let mut nodes = Vec::with_capacity(batch.create.len());
     for (offset, c) in batch.create.iter().enumerate() {
         let id = first
@@ -152,11 +157,15 @@ fn addition(project: &Project, batch: &Batch, first: u64) -> Result<Vec<Node>> {
             return Err("Invalid node name or RVA scope".into());
         }
         let name = record_name(&c.name)?;
-        if let Some(rva) = c.rva
-            && (project.binary.trim().is_empty() || !rvas.insert(rva))
+        if c.space
+            .is_some_and(|space| c.rva.is_none() || !project.spaces.iter().any(|s| s.id == space))
         {
+            return Err("Unknown address space, or a space for a record without an address".into());
+        }
+        if c.rva.is_some() && (project.binary.trim().is_empty() || !rvas.insert((c.space, c.rva))) {
             return Err("Duplicate function or data RVA, or empty binary identity".into());
         }
+
         kinds.insert(id, kind);
         nodes.push(Node {
             id,
@@ -169,6 +178,7 @@ fn addition(project: &Project, batch: &Batch, first: u64) -> Result<Vec<Node>> {
             status: Status::NotStarted,
             revision: 0,
             accepted_hash: None,
+            space: c.space,
             accepted_prerequisites: Default::default(),
         });
     }

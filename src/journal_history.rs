@@ -17,6 +17,8 @@ fn header(p: &Project) -> Result<Value> {
         structural_epoch: p.structural_epoch,
         active_import: p.active_import.clone(),
         last_import: p.last_import.clone(),
+        artifacts: p.artifacts.clone(),
+        spaces: p.spaces.clone(),
     })
     .map_err(|e| e.to_string())?;
     let object = v.as_object_mut().ok_or("Invalid catalog")?;
@@ -350,7 +352,7 @@ impl Library {
         };
         let project: Project = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-        if project.id != id || project.layout_version > DATA_FORMAT {
+        if project.id != id || project.layout_version > SPACE_FORMAT {
             return Err("Unsupported catalog or project identity mismatch".into());
         }
         let mut library = Library {

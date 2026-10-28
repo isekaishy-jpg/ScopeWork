@@ -110,6 +110,7 @@ mod tests {
             length: None,
             revision: 1,
             accepted_hash: (status == Status::Complete).then(|| "accepted".into()),
+            space: None,
             accepted_prerequisites: Default::default(),
         }
     }
@@ -117,6 +118,8 @@ mod tests {
     /// in chunk 2, 6 in chunk 3; function 5 is a prerequisite of 6 and 4 of 5.
     fn project() -> Project {
         Project {
+            artifacts: vec![],
+            spaces: vec![],
             layout_version: 5,
             id: "fixture".into(),
             name: "Fixture".into(),

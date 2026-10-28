@@ -86,6 +86,10 @@ impl<'a> Index<'a> {
         if let Some(rva) = n.rva {
             md += &format!("\nRVA: `0x{rva:08X}`\n");
         }
+        if let Some(space) = n.space {
+            md += &format!("\nSpace: {}\n", super::space_label(project, space));
+        }
+
         if let Some(length) = n.length {
             md += &format!("\nLength: {length} bytes\n");
         }
@@ -272,6 +276,7 @@ mod tests {
             length: None,
             revision: 0,
             accepted_hash: None,
+            space: None,
             accepted_prerequisites: Default::default(),
         }
     }
@@ -279,6 +284,8 @@ mod tests {
     #[test]
     fn the_index_and_the_library_place_reports_alike() {
         let project = Project {
+            artifacts: vec![],
+            spaces: vec![],
             layout_version: 5,
             id: "fixture".into(),
             name: "Fixture".into(),

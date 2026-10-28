@@ -268,6 +268,9 @@ impl ResearchUi {
             if let Some(length) = n.length {
                 facts.push(format!("{length} bytes"));
             }
+            if let Some(space) = n.space {
+                facts.push(format!("Space {}", super::space_label(project, space)));
+            }
             facts.push(if self.browser.required(n.id) {
                 "Required research".into()
             } else {

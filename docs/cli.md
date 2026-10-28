@@ -230,6 +230,26 @@ A chunk holds data items (globals, tables, strings, vtables) beside its function
 - `status` counts them in `data_items` (`total`, `required`, `complete`), apart from the function inventory; `node list --kind data` and `status --kind data` list them.
 - A catalog takes format 6 when its first data item is created. Earlier Scopework versions cannot open a format 6 catalog; projects without data stay at format 5.
 
+## Artifacts and address spaces
+
+```powershell
+research project artifact add PROJECT --name NAME --sha256 HEX [--size BYTES] [--format TEXT] [--inside ID --path PATH] [--description TEXT] --expect-revision N
+research project artifact update|remove PROJECT ID ... --expect-revision N
+research project space add PROJECT --name NAME --kind image|file|processor [--artifact ID] [--processor TEXT] [--base HEX] [--description TEXT] --expect-revision N
+research project space update|remove PROJECT ID ... --expect-revision N
+research node create PROJECT --parent CHUNK --name NAME --rva HEX [--length BYTES] --space ID
+```
+
+A project names its input files once ([design](design-storage-promotion.md)), and the binary identity text stays as their description. An **artifact** has a name and SHA-256 (both unique in the project), optionally a size, a format and a description; a file extracted from another artifact names it with `--inside` and its path there with `--path`.
+
+The project's addresses are in its **default space**, as before: the RVA from the image base in the binary identity. Another **space** counts addresses somewhere else: `file` (offsets in one artifact, such as data on a disk with no program of its own; needs `--artifact`), `image` (another loaded image, with its `--base`) or `processor` (another processor's address space, such as a sound CPU).
+
+- A function or data item is placed in a space with `--space ID`, or `"space"` in a batch or import creation. An address names at most one record **per space**, so the same number can be a function in the image and a table in a file.
+- Its folder carries the space: `S<n>-<RVA>` for a function, `S<n>-D<RVA>` for a data item. Its report header names the space, as do the record panel and the tree (`S1:0x...`).
+- `deps set` names a prerequisite in another space as `S<n>:<RVA>`; a bare RVA is in the default space. Rename citations (`Name` (`VA`)) apply to the default space only, the one whose image base gives a VA.
+- An update changes only the fields given; an empty text clears that text. An artifact a space names or another artifact lies inside cannot be removed, nor a space that holds records. Every change is a journaled catalog transaction (it appears in history and the store follows it).
+- The first artifact or space raises the catalog to format 7, which earlier versions cannot open; projects without them keep their format and bytes. `project show` lists `artifacts` and `spaces`.
+
 ## Required research versus context inventory
 
 Catalog the whole binary even for a smaller research subject. Use coherent semantic chunks for established or provisional ownership. An unresolved queue denotes uncertainty, not subsystem ownership; navigation address pages are not semantic chunks.

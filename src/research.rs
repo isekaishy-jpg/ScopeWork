@@ -99,6 +99,10 @@ pub struct Node {
     /// catalogs without data keep their bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<u32>,
+    /// The address space a function or data item's RVA counts in (one of the project's
+    /// `spaces`); absent for the project's default space, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<u32>,
     pub revision: u64,
     pub accepted_hash: Option<String>,
     #[serde(default)]
@@ -124,6 +128,60 @@ pub struct Project {
     pub nodes: Vec<Node>,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
+    /// The project's input files. Written only when there are any, so catalogs without them
+    /// keep their bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
+    /// Address spaces besides the default one, which records without `space` count in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spaces: Vec<Space>,
+}
+/// An input file of the project: a disk image, a file extracted from one, a ROM.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Artifact {
+    pub id: u32,
+    pub name: String,
+    /// SHA-256 of the file, 64 lowercase hexadecimal digits.
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// The artifact this one is extracted from, and its path there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inside: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+/// What a space's addresses count.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum SpaceKind {
+    /// A loaded image; `base` is its load address.
+    Image,
+    /// Offsets in one artifact (data on a disk with no program of its own).
+    File,
+    /// Another processor's address space.
+    Processor,
+}
+/// An address space besides the project's default one.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Space {
+    pub id: u32,
+    pub name: String,
+    pub kind: SpaceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 fn legacy_layout() -> u32 {
     1
@@ -131,11 +189,117 @@ fn legacy_layout() -> u32 {
 /// The catalog format a catalog with a data item has. Older builds cannot read data items,
 /// so a catalog takes this format only once it holds one; without data it stays at 5.
 pub(crate) const DATA_FORMAT: u32 = 6;
-/// Raises `project` to [`DATA_FORMAT`] when it holds a data item.
+/// The catalog format a catalog with an artifact, an address space or a record in one has.
+pub(crate) const SPACE_FORMAT: u32 = 7;
+/// Whether `project` needs [`SPACE_FORMAT`].
+fn uses_spaces(project: &Project) -> bool {
+    !project.artifacts.is_empty()
+        || !project.spaces.is_empty()
+        || project.nodes.iter().any(|n| n.space.is_some())
+}
+/// Raises `project` to [`DATA_FORMAT`] when it holds a data item, and to [`SPACE_FORMAT`] when
+/// it uses artifacts or spaces.
 pub(crate) fn raise_format(project: &mut Project) {
     if project.nodes.iter().any(|n| n.kind == Kind::Data) {
         project.layout_version = project.layout_version.max(DATA_FORMAT);
     }
+    if uses_spaces(project) {
+        project.layout_version = project.layout_version.max(SPACE_FORMAT);
+    }
+}
+/// Whether a function or data item other than `except` is at `rva` in `space`.
+pub(crate) fn address_taken(
+    project: &Project,
+    space: Option<u32>,
+    rva: u32,
+    except: Option<u64>,
+) -> bool {
+    project
+        .nodes
+        .iter()
+        .any(|n| n.kind.is_leaf() && n.space == space && n.rva == Some(rva) && Some(n.id) != except)
+}
+/// Checks the project's artifacts and spaces: unique identities and names, SHA-256 digests,
+/// existing references, and no artifact inside itself.
+pub(crate) fn validate_inputs(p: &Project) -> Result<()> {
+    use std::collections::HashSet;
+    let (mut ids, mut names, mut digests) = (HashSet::new(), HashSet::new(), HashSet::new());
+    for a in &p.artifacts {
+        if !ids.insert(a.id) || !names.insert(a.name.as_str()) || !digests.insert(&a.sha256) {
+            return Err(format!(
+                "Artifact {} repeats another's identity, name or SHA-256",
+                a.id
+            ));
+        }
+        if a.sha256.len() != 64
+            || !a
+                .sha256
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err("An artifact's SHA-256 is 64 lowercase hexadecimal digits".into());
+        }
+        if a.path.is_some() && a.inside.is_none() {
+            return Err(
+                "An artifact's path is where it lies inside another artifact; give --inside".into(),
+            );
+        }
+    }
+    for a in &p.artifacts {
+        let mut at = a.inside;
+        for _ in 0..=p.artifacts.len() {
+            let Some(id) = at else { break };
+            if id == a.id {
+                return Err(format!("Artifact {} is inside itself", a.id));
+            }
+            at = p
+                .artifacts
+                .iter()
+                .find(|x| x.id == id)
+                .ok_or_else(|| format!("Artifact {} is inside an unknown artifact", a.id))?
+                .inside;
+        }
+    }
+    let (mut ids, mut names) = (HashSet::new(), HashSet::new());
+    for s in &p.spaces {
+        if !ids.insert(s.id) || !names.insert(s.name.as_str()) {
+            return Err(format!("Space {} repeats another's identity or name", s.id));
+        }
+        if s.artifact
+            .is_some_and(|a| !p.artifacts.iter().any(|x| x.id == a))
+        {
+            return Err(format!("Space {} names an unknown artifact", s.id));
+        }
+        if s.kind == SpaceKind::File && s.artifact.is_none() {
+            return Err(format!(
+                "File space {} needs the artifact its offsets count in",
+                s.id
+            ));
+        }
+    }
+    let texts = p
+        .artifacts
+        .iter()
+        .flat_map(|a| {
+            [
+                Some(&a.name),
+                a.format.as_ref(),
+                a.path.as_ref(),
+                a.description.as_ref(),
+            ]
+        })
+        .chain(
+            p.spaces
+                .iter()
+                .flat_map(|s| [Some(&s.name), s.processor.as_ref(), s.description.as_ref()]),
+        )
+        .flatten();
+    for text in texts {
+        if text.trim().is_empty() || text.chars().any(char::is_control) {
+            return Err("Artifact and space names and texts are single lines, not empty".into());
+        }
+    }
+    Ok(())
 }
 #[path = "background.rs"]
 mod background;
@@ -157,6 +321,27 @@ mod history_ui;
 mod implementation;
 #[path = "imports.rs"]
 pub mod imports;
+#[path = "inputs.rs"]
+mod inputs;
+pub use inputs::InputFields;
+/// Where a new record goes: a function or data item's RVA (empty for other kinds), a data
+/// item's length, and its address space (none: the default).
+#[derive(Clone, Copy)]
+pub struct Placement<'a> {
+    pub rva: &'a str,
+    pub length: Option<u32>,
+    pub space: Option<u32>,
+}
+impl<'a> Placement<'a> {
+    pub fn at(rva: &'a str) -> Self {
+        Self {
+            rva,
+            length: None,
+            space: None,
+        }
+    }
+}
+pub(crate) use inputs::space_label;
 #[path = "layout.rs"]
 mod layout;
 #[path = "ledger.rs"]
@@ -325,11 +510,23 @@ pub(crate) fn parse_rva(text: &str) -> Result<u32> {
         .unwrap_or(rva);
     u32::from_str_radix(digits, 16).map_err(|_| format!("Invalid hexadecimal RVA: {rva}"))
 }
-/// A list of hexadecimal RVAs separated by commas or whitespace, each with an optional `0x`.
-pub(crate) fn parse_rvas(text: &str) -> Result<Vec<u32>> {
+/// A list of addresses separated by commas or whitespace: hexadecimal RVAs, each with an
+/// optional `0x`, in the default space, or `S<n>:<RVA>` in space `n`.
+pub(crate) fn parse_rvas(text: &str) -> Result<Vec<(Option<u32>, u32)>> {
     text.split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
-        .map(parse_rva)
+        .map(|address| match address.split_once(':') {
+            Some((space, rva)) => {
+                let space = space
+                    .strip_prefix(['S', 's'])
+                    .and_then(|n| n.parse().ok())
+                    .ok_or_else(|| {
+                        format!("Invalid address space in {address}; write S<n>:<RVA>")
+                    })?;
+                Ok((Some(space), parse_rva(rva)?))
+            }
+            None => Ok((None, parse_rva(address)?)),
+        })
         .collect()
 }
 /// Refuses text that every report header renders ahead of the markers delimiting a report's
@@ -356,16 +553,17 @@ pub(crate) fn record_name(name: &str) -> Result<String> {
 /// A record's report path relative to its project folder, given its parent's report path (none
 /// for the App and architectures). The one rule for report locations: `app.md`,
 /// `architectures/<id>/research.md`, then a folder per chunk (`<id>`), per function (`<RVA>`)
-/// and per data item (`D<RVA>`) inside the parent's folder.
+/// and per data item (`D<RVA>`) inside the parent's folder. A function or data item in space
+/// `n` has `S<n>-` before its folder name.
 pub(crate) fn report_path(n: &Node, parent: Option<&str>) -> String {
     match n.kind {
         Kind::App => "app.md".into(),
         Kind::Architecture => format!("architectures/{:06}/research.md", n.id),
         Kind::Chunk | Kind::Function | Kind::Data => {
+            let space = n.space.map(|s| format!("S{s}-")).unwrap_or_default();
             let folder = match n.kind {
-                Kind::Function => format!("{:08X}", n.rva.unwrap()),
-                Kind::Data => format!("D{:08X}", n.rva.unwrap()),
-
+                Kind::Function => format!("{space}{:08X}", n.rva.unwrap()),
+                Kind::Data => format!("{space}D{:08X}", n.rva.unwrap()),
                 _ => format!("{:06}", n.id),
             };
             format!(
@@ -1224,7 +1422,7 @@ impl Library {
         }
         let mut recovery_blocked = None;
         if let Some(p) = &mut project {
-            if !matches!(p.layout_version, 5 | DATA_FORMAT) {
+            if !matches!(p.layout_version, 5 | DATA_FORMAT | SPACE_FORMAT) {
                 return Err("Unsupported catalog format; upgrade Scopework.".into());
             }
             let pending = dir
@@ -1283,12 +1481,18 @@ impl Library {
         let lookup: HashMap<_, _> = p.nodes.iter().map(|n| (n.id, n)).collect();
         let mut ids = HashSet::new();
         let mut rvas = HashSet::new();
+        validate_inputs(p)?;
         for n in &p.nodes {
             if !ids.insert(n.id) {
                 return Err("Duplicate node identity".into());
             }
-            if n.kind.is_leaf() && (n.rva.is_none() || !rvas.insert(n.rva)) {
+            if n.kind.is_leaf() && (n.rva.is_none() || !rvas.insert((n.space, n.rva))) {
                 return Err("Invalid or duplicate function or data RVA".into());
+            }
+            if let Some(space) = n.space
+                && (!n.kind.is_leaf() || !p.spaces.iter().any(|s| s.id == space))
+            {
+                return Err("A record names an address space the project does not have".into());
             }
             if (n.kind == Kind::Data) != n.length.is_some_and(|length| length > 0) {
                 return Err("A data item needs a length; other records have none".into());
@@ -1308,6 +1512,12 @@ impl Library {
         if p.layout_version < DATA_FORMAT && p.nodes.iter().any(|n| n.kind == Kind::Data) {
             return Err("Invalid catalog: data items need catalog format 6".into());
         }
+        if p.layout_version < SPACE_FORMAT && uses_spaces(p) {
+            return Err(
+                "Invalid catalog: artifacts and address spaces need catalog format 7".into(),
+            );
+        }
+
         if p.nodes.iter().filter(|n| n.kind == Kind::App).count() != 1
             || !p.nodes.iter().any(|n| n.id == 0 && n.kind == Kind::App)
             || p.nodes.iter().any(|n| n.id >= p.next_id)
@@ -1368,6 +1578,8 @@ impl Library {
             binary: binary.into(),
             research_scope: String::new(),
             dependencies: vec![],
+            artifacts: vec![],
+            spaces: vec![],
             next_id: 1,
             revision: 0,
             nodes: vec![Node {
@@ -1381,6 +1593,7 @@ impl Library {
                 length: None,
                 revision: 0,
                 accepted_hash: None,
+                space: None,
                 accepted_prerequisites: Default::default(),
             }],
         };
@@ -1531,7 +1744,7 @@ impl Library {
             .states_with(&self.dir(p), inputs, &|| self.hash_overrides())
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
-        self.add_directed(p, parent, name, rva, None, None)
+        self.add_directed(p, parent, name, Placement::at(rva), None)
     }
     /// Adds a data item of `length` bytes at `rva` to the chunk `parent`.
     pub fn add_data(
@@ -1542,24 +1755,28 @@ impl Library {
         rva: &str,
         length: u32,
     ) -> Result<u64> {
-        self.add_directed(p, parent, name, rva, Some(length), None)
+        let place = Placement {
+            length: Some(length),
+            ..Placement::at(rva)
+        };
+        self.add_directed(p, parent, name, place, None)
     }
-    /// `add` (or with `length`, `add_data`), accepting a pooled parent the caller is not a
-    /// member for when the human directed it.
+    /// `add` (or `add_data`) at `place`, accepting a pooled parent the caller is not a member
+    /// for when the human directed it.
     pub fn add_directed(
         &mut self,
         p: usize,
         parent: u64,
         name: &str,
-        rva: &str,
-        length: Option<u32>,
+        place: Placement,
         directed_by: Option<&str>,
     ) -> Result<u64> {
         if !self.writable(p) {
             return self.write_project(p, |l, p| {
-                l.add_directed(p, parent, name, rva, length, directed_by)
+                l.add_directed(p, parent, name, place, directed_by)
             });
         }
+        let Placement { rva, length, space } = place;
         self.ensure_structural(p)?;
         let name = record_name(name)?;
         let parent_kind = self.projects[p]
@@ -1576,13 +1793,16 @@ impl Library {
                 );
             }
             let x = parse_rva(rva).map_err(|_| "Enter an RVA in hexadecimal, not a VA.")?;
-            if self.projects[p].nodes.iter().any(|n| n.rva == Some(x)) {
+            if address_taken(&self.projects[p], space, x, None) {
                 return Err(
                     "That address already has a function or data item in this project.".into(),
                 );
             }
             Some(x)
         } else {
+            if space.is_some() {
+                return Err("Only functions and data items have an address space.".into());
+            }
             None
         };
         let batch = Batch {
@@ -1594,6 +1814,7 @@ impl Library {
                 name,
                 rva: address,
                 length,
+                space,
                 context_only: false,
             }],
             update: vec![],
@@ -2368,14 +2589,18 @@ impl Library {
             .filter(|e| e.dependent != id)
             .cloned()
             .collect();
-        for address in parse_rvas(rvas)? {
+        for (space, address) in parse_rvas(rvas)? {
             let n = self.projects[p]
                 .nodes
                 .iter()
-                .find(|n| n.rva == Some(address))
+                .find(|n| n.kind.is_leaf() && n.space == space && n.rva == Some(address))
                 .ok_or_else(|| {
-                    format!("RVA 0x{address:08X} has no function or data item in this project.")
+                    let space = space.map(|s| format!("S{s}:")).unwrap_or_default();
+                    format!(
+                        "RVA {space}0x{address:08X} has no function or data item in this project."
+                    )
                 })?;
+
             edges.push(Dependency {
                 dependent: id,
                 prerequisite: n.id,
@@ -2568,6 +2793,8 @@ mod background_ui_tests {
     }
     fn fixture_project(id: &str) -> std::sync::Arc<Project> {
         std::sync::Arc::new(Project {
+            artifacts: vec![],
+            spaces: vec![],
             layout_version: 5,
             id: id.into(),
             name: id.into(),
@@ -2589,6 +2816,7 @@ mod background_ui_tests {
                 length: None,
                 revision: 0,
                 accepted_hash: None,
+                space: None,
                 accepted_prerequisites: Default::default(),
             }],
             dependencies: vec![],
@@ -2831,6 +3059,7 @@ mod dependency_tests {
             length: None,
             revision: 0,
             accepted_hash: None,
+            space: None,
             accepted_prerequisites: Default::default(),
         };
         const FUNCTIONS: u64 = 50_000;
@@ -2848,6 +3077,8 @@ mod dependency_tests {
             })
             .collect();
         lib.projects.push(Project {
+            artifacts: vec![],
+            spaces: vec![],
             layout_version: 5,
             structural_epoch: 0,
             active_import: None,
