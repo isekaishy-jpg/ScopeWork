@@ -9,7 +9,8 @@
 //! - `store.json`: schema, project and codec.
 //! - `segment-<n>.zlib`: the catalog (`project.json` bytes) where segment `n` starts, compressed.
 //! - `segment-<n>.log`: frames following that checkpoint: a start entry, then one commit entry
-//!   per revision.
+//!   per revision. `store compact` compresses a closed segment's log to `segment-<n>.logz`
+//!   (the same frames as one zlib stream).
 //! - `texts-<n>.pack`: report and sidecar texts by SHA-256, compressed in groups.
 //! - `ledger.log`, `ledger-head.zlib`: the annotation ledger followed ([`ledger`]).
 //! - `.lock`: held by the one process writing the store.
@@ -47,6 +48,20 @@ fn segment_bytes() -> usize {
 const PACK_BYTES: usize = 4 << 20;
 /// A pack file longer than this is closed and the next one started.
 const PACK_FILE_BYTES: u64 = 64 << 20;
+/// A sync that leaves more small pack frames than this compacts the store.
+const MAX_SMALL_FRAMES: usize = 64;
+/// [`MAX_SMALL_FRAMES`]; debug builds take `SCOPEWORK_STORE_MAX_SMALL_FRAMES`, so tests reach
+/// compaction with a few syncs.
+fn max_small_frames() -> usize {
+    #[cfg(debug_assertions)]
+    if let Some(frames) = std::env::var("SCOPEWORK_STORE_MAX_SMALL_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        return frames;
+    }
+    MAX_SMALL_FRAMES
+}
 const RECEIPT_FOLDERS: [&str; 2] = [
     "tools/workspaces/catalog-transactions-v4",
     "tools/workspaces/catalog-transactions",
@@ -161,14 +176,38 @@ impl Segment {
         ))
     }
 }
+/// Every segment's log by number: the plain log, else its compressed copy.
+fn segment_logs(store: &Path) -> Vec<(u64, PathBuf)> {
+    let mut logs = numbered(store, "segment-", ".log");
+    let plain: HashSet<u64> = logs.iter().map(|(n, _)| *n).collect();
+    logs.extend(
+        numbered(store, "segment-", ".logz")
+            .into_iter()
+            .filter(|(n, _)| !plain.contains(n)),
+    );
+    logs.sort_by_key(|(n, _)| *n);
+    logs
+}
+fn compressed(path: &Path) -> bool {
+    path.extension().is_some_and(|x| x == "logz")
+}
+/// A log's frames, decompressed when it is a closed log compressed by `store compact`.
+fn read_log(path: &Path) -> Result<Vec<u8>> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    if compressed(path) {
+        inflate(&bytes)
+    } else {
+        Ok(bytes)
+    }
+}
 /// The store's segments in order, and the logs that are not part of it: one without a complete
 /// start entry or without its checkpoint (a segment whose creation was interrupted).
 fn segments(store: &Path) -> Result<(Vec<Segment>, Vec<PathBuf>)> {
     let mut out = vec![];
     let mut invalid = vec![];
-    for (seq, log) in numbered(store, "segment-", ".log") {
+    for (seq, log) in segment_logs(store) {
         let (_, checkpoint) = segment_files(store, seq);
-        let bytes = fs::read(&log).map_err(|e| e.to_string())?;
+        let bytes = read_log(&log)?;
         let (frames, end) = frames(&bytes);
         let start = frames
             .first()
@@ -198,10 +237,14 @@ fn checkpoint_catalog(segment: &Segment) -> Result<Vec<u8>> {
 struct TextIndex {
     at: HashMap<String, (PathBuf, Range<usize>, Range<usize>)>,
     problems: Vec<String>,
+    /// Pack frames holding fewer than [`PACK_BYTES`] of texts: each sync writes one, and
+    /// compaction merges them.
+    small_frames: usize,
 }
 fn text_index(store: &Path) -> Result<TextIndex> {
     let mut at = HashMap::new();
     let mut problems = vec![];
+    let mut small_frames = 0;
     for (_, pack) in numbered(store, "texts-", ".pack") {
         let bytes = fs::read(&pack).map_err(|e| e.to_string())?;
         let (frames, end) = frames(&bytes);
@@ -216,12 +259,19 @@ fn text_index(store: &Path) -> Result<TextIndex> {
                 problems.push(format!("{}: unreadable pack index", pack.display()));
                 continue;
             };
+            if index.iter().map(|(_, t)| t.len()).sum::<usize>() < PACK_BYTES {
+                small_frames += 1;
+            }
             for (sha, texts) in index {
                 at.insert(sha, (pack.clone(), range.clone(), texts));
             }
         }
     }
-    Ok(TextIndex { at, problems })
+    Ok(TextIndex {
+        at,
+        problems,
+        small_frames,
+    })
 }
 /// Each text of a pack frame: its SHA-256 and range in the frame's uncompressed texts.
 type PackIndex = Vec<(String, Range<usize>)>;
@@ -248,6 +298,8 @@ struct Writer {
     pending: Vec<(String, String)>,
     pending_bytes: usize,
     added: usize,
+    /// [`TextIndex::small_frames`], kept current as frames are written.
+    small_frames: usize,
 }
 impl Writer {
     fn open(store: &Path) -> Result<Self> {
@@ -271,6 +323,7 @@ impl Writer {
             pending: vec![],
             pending_bytes: 0,
             added: 0,
+            small_frames: index.small_frames,
         })
     }
     /// Removes what an interrupted writer left: temporaries, segments whose creation did not
@@ -285,10 +338,16 @@ impl Writer {
                 let _ = fs::remove_file(entry.path());
             }
         }
+        // A compressed copy left beside its log by an interrupted compaction.
+        for (n, copy) in numbered(&self.store, "segment-", ".logz") {
+            if segment_files(&self.store, n).0.is_file() {
+                let _ = fs::remove_file(copy);
+            }
+        }
         let (segments, invalid) = segments(&self.store)?;
         let last = segments.last().map_or(0, |s| s.seq);
         for log in invalid {
-            let seq = numbered(&self.store, "segment-", ".log")
+            let seq = segment_logs(&self.store)
                 .into_iter()
                 .find(|(_, path)| *path == log)
                 .map(|(n, _)| n);
@@ -313,6 +372,7 @@ impl Writer {
         let tails = segments
             .last()
             .map(|s| s.log.clone())
+            .filter(|log| !compressed(log))
             .into_iter()
             .chain(
                 numbered(&self.store, "texts-", ".pack")
@@ -368,18 +428,17 @@ impl Writer {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let mut index = vec![];
-        let mut all = Vec::with_capacity(self.pending_bytes);
-        for (sha, text) in self.pending.drain(..) {
-            index.push(json!({"sha256": sha, "offset": all.len(), "length": text.len()}));
-            all.extend_from_slice(text.as_bytes());
+        let pending = std::mem::take(&mut self.pending);
+        self.added += pending.len();
+        if self.pending_bytes < PACK_BYTES {
+            self.small_frames += 1;
         }
-        self.added += index.len();
         self.pending_bytes = 0;
-        let index = serde_json::to_vec(&index).map_err(|e| e.to_string())?;
-        let mut payload = (index.len() as u32).to_le_bytes().to_vec();
-        payload.extend_from_slice(&index);
-        payload.extend_from_slice(&deflate(&all)?);
+        let payload = pack_frame(
+            pending
+                .iter()
+                .map(|(sha, text)| (sha.as_str(), text.as_bytes())),
+        )?;
         let packs = numbered(&self.store, "texts-", ".pack");
         let path = match packs.last() {
             Some((n, path)) => {
@@ -393,6 +452,20 @@ impl Writer {
         };
         append(&path, &frame(&payload)?)
     }
+}
+/// A pack frame's payload: an index of `texts` and their bytes, compressed together.
+fn pack_frame<'a>(texts: impl Iterator<Item = (&'a str, &'a [u8])>) -> Result<Vec<u8>> {
+    let mut index = vec![];
+    let mut all = vec![];
+    for (sha, text) in texts {
+        index.push(json!({"sha256": sha, "offset": all.len(), "length": text.len()}));
+        all.extend_from_slice(text);
+    }
+    let index = serde_json::to_vec(&index).map_err(|e| e.to_string())?;
+    let mut payload = (index.len() as u32).to_le_bytes().to_vec();
+    payload.extend_from_slice(&index);
+    payload.extend_from_slice(&deflate(&all)?);
+    Ok(payload)
 }
 fn append(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = fs::OpenOptions::new()
@@ -814,6 +887,10 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
         write_segment(&marks[0], json!({"follows":"commit"}))?;
     }
     let ledger = with_ledger.then(|| ledger::follow(&mut w, &dir, &store, current_revision));
+    // Frequent syncs each write a small pack frame; past a limit they are merged.
+    let compacted = (w.small_frames > max_small_frames())
+        .then(|| compact_store(&store))
+        .transpose()?;
     if create {
         atomic(&marker, &store_marker(id)?)?;
     }
@@ -829,9 +906,106 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
         "history_from": create.then(|| used.first().map(|m| m.revision)).flatten(),
         "stopped": (!connected).then_some(stopped),
         "texts_added": w.added,
+        "compacted": compacted,
         "took_ms": started.elapsed().as_millis() as u64,
     }))
 }
+
+/// Merges the store's packs into as few as possible and compresses closed segments' logs; the
+/// answers of every read stay the same.
+pub fn compact(root: &Path, id: &str) -> Result<Value> {
+    let (_, store) = open_store(root, id)?;
+    let w = Writer::open(&store)?;
+    w.repair()?;
+    let started = std::time::Instant::now();
+    let mut out = compact_store(&store)?;
+    out["backend"] = "store".into();
+    out["project"] = id.into();
+    out["took_ms"] = (started.elapsed().as_millis() as u64).into();
+    Ok(out)
+}
+/// [`compact`] for a store whose writer lock the caller holds.
+fn compact_store(store: &Path) -> Result<Value> {
+    // Closed logs: every segment's but the last, which is still appended to. The compressed
+    // copy is published before the log is removed; `repair` removes a copy left beside its log.
+    let (segments, _) = segments(store)?;
+    let mut logs = 0;
+    for segment in segments.iter().rev().skip(1) {
+        if !compressed(&segment.log) {
+            atomic(
+                &segment.log.with_extension("logz"),
+                &deflate(&segment.bytes)?,
+            )?;
+            fs::remove_file(&segment.log).map_err(|e| e.to_string())?;
+            logs += 1;
+        }
+    }
+    // Packs: every distinct text once, in groups, into new pack files published by renaming
+    // them into place before the old ones are removed.
+    let old = numbered(store, "texts-", ".pack");
+    let small_before = text_index(store)?.small_frames;
+    let mut next = old.last().map_or(1, |(n, _)| n + 1);
+    let mut written: Vec<PathBuf> = vec![];
+    if small_before > 1 {
+        let mut seen = HashSet::new();
+        let mut group: Vec<(String, Vec<u8>)> = vec![];
+        let mut group_bytes = 0;
+        let mut emit = |group: &mut Vec<(String, Vec<u8>)>,
+                        written: &mut Vec<PathBuf>|
+         -> Result<()> {
+            if group.is_empty() {
+                return Ok(());
+            }
+            let payload = pack_frame(group.iter().map(|(sha, t)| (sha.as_str(), t.as_slice())))?;
+            group.clear();
+            let full = written.last().is_none_or(|p| {
+                fs::metadata(p).map(|m| m.len()).unwrap_or_default() >= PACK_FILE_BYTES
+            });
+            if full {
+                written.push(store.join(format!("texts-{next:06}.pack.pending")));
+                next += 1;
+            }
+            append(written.last().unwrap(), &frame(&payload)?)
+        };
+        for (_, pack) in &old {
+            let bytes = fs::read(pack).map_err(|e| e.to_string())?;
+            for range in frames(&bytes).0 {
+                let Some((index, offset)) = pack_parts(&bytes[range.clone()]) else {
+                    return Err(format!(
+                        "{}: unreadable pack index; run research store verify",
+                        pack.display()
+                    ));
+                };
+                let all = inflate(&bytes[range.start + offset..range.end])?;
+                for (sha, text) in index {
+                    let text = all.get(text).ok_or("Store text outside its pack")?;
+                    if seen.insert(sha.clone()) {
+                        group_bytes += text.len();
+                        group.push((sha, text.to_vec()));
+                        if group_bytes >= PACK_BYTES {
+                            emit(&mut group, &mut written)?;
+                            group_bytes = 0;
+                        }
+                    }
+                }
+            }
+        }
+        emit(&mut group, &mut written)?;
+        for pending in &written {
+            fs::rename(pending, pending.with_extension("")).map_err(|e| e.to_string())?;
+        }
+        for (_, pack) in &old {
+            fs::remove_file(pack).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(json!({
+        "logs_compressed": logs,
+        "small_frames_before": small_before,
+        "small_frames_after": text_index(store)?.small_frames,
+        "pack_files": numbered(store, "texts-", ".pack").len(),
+    }))
+}
+
 fn store_marker(id: &str) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(&json!({"schema": SCHEMA, "project": id, "codec": "zlib"}))
         .map_err(|e| e.to_string())
@@ -896,6 +1070,8 @@ pub fn status(root: &Path, id: &str) -> Result<Value> {
         "log_bytes": size(segments.iter().map(|s| s.log.clone())),
         "checkpoint_bytes": size(segments.iter().map(|s| s.checkpoint.clone())),
         "pack_bytes": size(packs),
+        "small_pack_frames": texts.small_frames,
+
         "unfinished": invalid.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "problems": texts.problems,
         "ledger": ledger::status(&store).unwrap_or_else(|e| json!({"error": e})),

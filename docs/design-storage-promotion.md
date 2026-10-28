@@ -64,7 +64,7 @@ Node.space?        (absent: the project's default space, as today)
 - `research store compact <project>` (writer lock):
   - **Packs:** all packs are rewritten into as few as possible (texts grouped in 4 MB batches, packs capped at 64 MB), written as new files and published before the old ones are deleted.
   - **Closed logs:** a segment's log is closed once a later segment exists. Compaction writes it as `segment-N.logz` (one zlib stream of the same frames) and deletes the `.log`. Readers accept either; the active segment is never compressed.
-- Sync runs compaction by itself when the store holds more than 64 packs.
+- Sync runs compaction by itself when the store holds more than 64 small pack frames (frames with less than 4 MB of texts): syncs append a frame to the last pack file each time, so frames, not files, are what build up and what every reader indexes.
 - `verify` checks compressed logs exactly as plain ones.
 
 ## 4. The backend interface and the promoted commit path
@@ -134,7 +134,7 @@ Before the transaction, promotion copies `project.json` and `annotations.json` t
 - Removing an artifact or space in use is refused.
 
 **Maintenance**
-- After `store compact`, the store holds one pack per 64 MB of texts and compressed closed logs, and `verify`, `history`, `show` and `catalog` answer exactly as before.
+- After `store compact`, the store holds at most one small pack frame and compressed closed logs, and `verify`, `history`, `show` and `catalog` answer exactly as before.
 
 **Promoted commit path**
 - On a promoted fixture, saves, completions, batches, deletes, `deps set`, imports and GUI saves commit through the store: no receipts or pending journals appear, `project.json` hashes to the head's after-fingerprint, and `store verify` passes.

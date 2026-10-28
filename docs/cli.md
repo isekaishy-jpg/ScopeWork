@@ -424,6 +424,7 @@ research store show PROJECT NODE --revision N
 research store catalog PROJECT --revision N [--out FILE]
 research store annotations PROJECT ADDRESS [--kind KIND]
 research store conflicts PROJECT
+research store compact PROJECT
 ```
 
 The store keeps a project's whole catalog history in `<project>/store/`, beside the files, which stay authoritative ([design](design-storage-backend.md)). It follows the change receipts every writer leaves, so it never takes part in a commit: a store problem can never fail or slow a commit, or change a file.
@@ -445,6 +446,8 @@ The store keeps a project's whole catalog history in `<project>/store/`, beside 
 - **`store annotations`** gives the rows at an address now and every change to them through the store's history, newest first (`--kind` narrows to one kind).
 - **`store conflicts`** lists where the catalog and the ledger disagree now: `name` (a `function-name` row unlike its function's name, or a `label` unlike its data item's), `kind` (function rows at a data item, data definitions or types at a function), `report` (a row pinned to another report than the record's at its address) and `unknown` (a row kind this build does not know). Rows at addresses without a record are counted as `unplaced_rows`, not conflicts. Conflicts are resolved before the store is adopted; the store only reports them.
 - **`store status`** shows the ledger's entries, rows, types and last change, and `store verify` replays the ledger's chain.
+
+**Compaction.** Every sync that adds texts writes one small pack frame, and every reader indexes all of them. **`store compact`** merges the texts into frames of about 4 MB (pack files up to 64 MB) and compresses each closed segment's log to `segment-N.logz` (the same frames as one zlib stream; the active log stays plain). Every read answers exactly as before. A sync compacts by itself once more than 64 small frames have built up (`compacted` in its answer); `store status` shows `small_pack_frames`.
 
 Every answer names its source (`"backend":"store"`). Readers take no lock. Files: `store.json`; `segment-N.zlib` (the catalog where segment N starts) and `segment-N.log` (checksummed JSON entries: a start entry, then one commit entry per revision, with report and sidecar texts replaced by their SHA-256); `texts-N.pack` (texts compressed in groups); `ledger.log` (the ledger's entries) and `ledger-head.zlib` (the ledger as of the last entry, so a sync need not replay). A segment closes after 4 MB of log.
 

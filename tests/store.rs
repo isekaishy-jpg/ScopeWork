@@ -45,6 +45,7 @@ impl Fixture {
             .env("SCOPEWORK_COORDINATOR", "off")
             // Small segments, so a short history reaches checkpoints inside it.
             .env("SCOPEWORK_STORE_SEGMENT_BYTES", "1500")
+            .env("SCOPEWORK_STORE_MAX_SMALL_FRAMES", "6")
             .arg("--home")
             .arg(&self.home)
             .args(args)
@@ -454,4 +455,73 @@ fn conflicts_report_where_the_catalog_and_the_ledger_disagree() {
 
     f.ledger(&json!({"schema": 1, "annotations": [row("function-name", "0x00001000", "F1")], "types": []}));
     assert_eq!(f.ok(&["store", "conflicts", "fixture"])["conflicts"], 0);
+}
+
+#[test]
+fn compaction_merges_packs_and_compresses_closed_logs_without_changing_any_answer() {
+    let f = Fixture::new();
+    f.ok(&["store", "init", "fixture"]);
+    // Each sync after a save writes a pack of its own.
+    let mut revisions = vec![];
+    for i in 0..4 {
+        f.save(
+            "3",
+            &format!("Understanding number {i}, with enough words to fill a log segment quickly."),
+        );
+        revisions.push(f.revision());
+        f.ok(&["store", "sync", "fixture"]);
+    }
+    let packs = |f: &Fixture| {
+        f.ok(&["store", "status", "fixture"])["small_pack_frames"]
+            .as_u64()
+            .unwrap()
+    };
+    assert!(packs(&f) > 1);
+    let answers = |f: &Fixture| {
+        let history = f.ok(&["store", "history", "fixture", "3"]);
+        let shown: Vec<Value> = revisions
+            .iter()
+            .map(|r| {
+                f.ok(&[
+                    "store",
+                    "show",
+                    "fixture",
+                    "3",
+                    "--revision",
+                    &r.to_string(),
+                ])
+            })
+            .collect();
+        (history["revisions"].clone(), shown)
+    };
+    let before = answers(&f);
+    let compact = f.ok(&["store", "compact", "fixture"]);
+    assert_eq!(compact["small_frames_after"], 1, "{compact}");
+    assert!(
+        compact["logs_compressed"].as_u64().unwrap() > 0,
+        "{compact}"
+    );
+    assert_eq!(packs(&f), 1);
+    let store = f.project().join("store");
+    let zipped = fs::read_dir(&store)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "logz"))
+        .count();
+    assert!(zipped > 0);
+    assert_eq!(f.logs().len(), 1, "only the active log stays plain");
+    assert_eq!(answers(&f), before);
+    f.verified();
+
+    // Following continues on the active log, and enough small packs compact by themselves.
+    for i in 0..7 {
+        f.save("4", &format!("Second function, round {i}."));
+        let sync = f.ok(&["store", "sync", "fixture"]);
+        if !sync["compacted"].is_null() {
+            assert!(packs(&f) <= 2, "{sync}");
+            f.verified();
+            return;
+        }
+    }
+    panic!("no sync compacted the store");
 }

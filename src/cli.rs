@@ -178,6 +178,8 @@ pub(crate) enum StoreCommand {
     },
     /// Disagreements between the catalog and the annotation ledger, as they are now.
     Conflicts { project: String },
+    /// Merge the store's text packs and compress its closed logs.
+    Compact { project: String },
 }
 impl StoreCommand {
     fn project(&self) -> &str {
@@ -190,7 +192,8 @@ impl StoreCommand {
             | Self::Show { project, .. }
             | Self::Catalog { project, .. }
             | Self::Annotations { project, .. }
-            | Self::Conflicts { project } => project,
+            | Self::Conflicts { project }
+            | Self::Compact { project } => project,
         }
     }
 }
@@ -1383,6 +1386,7 @@ fn run(args: Args) -> Result<Value, String> {
                 store::annotations(&root, project, rva, kind.as_deref())
             }
             StoreCommand::Conflicts { project } => store::conflicts(&root, project),
+            StoreCommand::Compact { project } => store::compact(&root, project),
         };
     }
     if let Command::Journal {
