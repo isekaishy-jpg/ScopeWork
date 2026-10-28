@@ -1025,3 +1025,300 @@ pub fn verify(root: &Path, id: &str) -> Result<Value> {
         "catalog_revision": revision,
     }))
 }
+
+impl TextIndex {
+    fn read(&self, sha: &str) -> Result<Option<String>> {
+        let Some((pack, frame, range)) = self.at.get(sha) else {
+            return Ok(None);
+        };
+        // Only this text's frame is read and decompressed.
+        let mut file = fs::File::open(pack).map_err(|e| e.to_string())?;
+        let mut payload = vec![0; frame.len()];
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(frame.start as u64))
+            .and_then(|_| file.read_exact(&mut payload))
+            .map_err(|e| e.to_string())?;
+        let (_, offset) = pack_parts(&payload).ok_or("Unreadable store pack")?;
+        let texts = inflate(&payload[offset..])?;
+        let text = texts
+            .get(range.clone())
+            .ok_or("Store text outside its pack")?;
+        String::from_utf8(text.to_vec())
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Whether an entry's payload names record `id` as a record, a report, a move or a dependent
+/// (`"id":N` or `"dependent":N`), so only such entries are parsed.
+fn mentions(payload: &[u8], id: u64) -> bool {
+    let id = id.to_string();
+    ["\"id\":", "\"dependent\":"].iter().any(|key| {
+        let key = key.as_bytes();
+        payload.windows(key.len()).enumerate().any(|(at, w)| {
+            if w != key {
+                return false;
+            }
+            let digits = &payload[at + key.len()..];
+            digits.starts_with(id.as_bytes())
+                && !digits.get(id.len()).is_some_and(|b| b.is_ascii_digit())
+        })
+    })
+}
+/// The records on one side of a delta whose `field` is `id`.
+fn rows<'a>(delta: &'a Value, side: &str, field: &str, id: u64) -> Vec<&'a Value> {
+    delta[side]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["record"][field] == id)
+        .map(|row| &row["record"])
+        .collect()
+}
+/// The report change for record `id` in a commit entry.
+fn report_row(entry: &Value, id: u64) -> Option<&Value> {
+    entry["reports"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r["id"] == id)
+}
+
+/// The revisions that changed record `id` or its report, newest first.
+pub fn history(root: &Path, project: &str, id: u64) -> Result<Value> {
+    let (_, store) = open_store(root, project)?;
+    let (segments, _) = segments(&store)?;
+    let mut out = vec![];
+    for segment in &segments {
+        for range in segment.frames.iter().skip(1) {
+            let payload = &segment.bytes[range.clone()];
+            if !mentions(payload, id) {
+                continue;
+            }
+            let entry: Value = serde_json::from_slice(payload).map_err(|e| e.to_string())?;
+            let before = rows(&entry["nodes"], "before", "id", id);
+            let after = rows(&entry["nodes"], "after", "id", id);
+            let mut row = json!({"revision": entry["revision"], "at_unix": entry["at_unix"], "directed_by": entry["directed_by"]});
+            match (before.first(), after.first()) {
+                (None, Some(_)) => row["created"] = true.into(),
+                (Some(_), None) => row["removed"] = true.into(),
+                (Some(Value::Object(a)), Some(Value::Object(b))) => {
+                    let fields: Vec<&String> = a
+                        .keys()
+                        .chain(b.keys().filter(|k| !a.contains_key(*k)))
+                        .filter(|k| a.get(*k) != b.get(*k))
+                        .collect();
+                    if !fields.is_empty() {
+                        row["fields"] = json!(fields);
+                    }
+                    for key in ["name", "status", "parent", "length"] {
+                        if a.get(key) != b.get(key) {
+                            row[key] = json!({"before": a.get(key), "after": b.get(key)});
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if let Some(report) = report_row(&entry, id) {
+                row["report"] = report.clone();
+            }
+            if let Some(m) = entry["moves"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|m| m["id"] == id)
+            {
+                row["moved"] = json!({"from": m["old"], "to": m["new"]});
+            }
+            let prerequisites = |side| -> Vec<Value> {
+                rows(&entry["dependencies"], side, "dependent", id)
+                    .iter()
+                    .map(|r| r["prerequisite"].clone())
+                    .collect()
+            };
+            let (gone, added) = (prerequisites("before"), prerequisites("after"));
+            if gone != added {
+                row["prerequisites"] = json!({
+                    "removed": gone.iter().filter(|p| !added.contains(p)).collect::<Vec<_>>(),
+                    "added": added.iter().filter(|p| !gone.contains(p)).collect::<Vec<_>>(),
+                });
+            }
+            // Revision, time and direction alone: the record was only mentioned.
+            if row.as_object().is_some_and(|o| o.len() > 3) {
+                out.push(row);
+            }
+        }
+    }
+    out.reverse();
+    Ok(json!({
+        "backend": "store",
+        "project": project,
+        "id": id,
+        "history_from": segments.first().map(|s| &s.start["revision"]),
+        "gaps": segments
+            .iter()
+            .filter(|s| s.start["follows"] == "gap")
+            .map(|s| &s.start["gap"])
+            .collect::<Vec<_>>(),
+        "revisions": out,
+    }))
+}
+
+/// The segment holding `revision`: the last one starting at or before it, once the store's
+/// history covers that revision.
+fn segment_at(segments: &[Segment], revision: u64) -> Result<usize> {
+    let first = segments.first().ok_or("The store holds no history yet")?;
+    let from = first.start["revision"].as_u64().unwrap_or_default();
+    if revision < from {
+        return Err(format!(
+            "Revision {revision} is older than the store's history, which starts at {from}."
+        ));
+    }
+    let (head, _) = segments[segments.len() - 1].head()?;
+    if revision > head {
+        return Err(format!(
+            "Revision {revision} is newer than the store's head ({head}); run research store sync."
+        ));
+    }
+    Ok(segments
+        .iter()
+        .rposition(|s| s.start["revision"].as_u64().is_some_and(|r| r <= revision))
+        .unwrap_or(0))
+}
+/// The catalog at `revision`, rebuilt from its segment's checkpoint and checked against the
+/// fingerprint recorded for it.
+fn catalog_at(segment: &Segment, revision: u64) -> Result<(Project, String)> {
+    let checkpoint = checkpoint_catalog(segment)?;
+    let mut state: Project = serde_json::from_slice(&checkpoint).map_err(|e| e.to_string())?;
+    let mut expect = segment.start["catalog_sha256"]
+        .as_str()
+        .ok_or("Store segment without fingerprint")?
+        .to_string();
+    for f in 1..segment.frames.len() {
+        let entry = segment.entry(f)?;
+        if entry["revision"].as_u64().is_none_or(|r| r > revision) {
+            break;
+        }
+        if entry["before_sha256"] != expect.as_str() {
+            return Err(format!(
+                "Store revision {} does not follow the one before it; run research store verify",
+                entry["revision"]
+            ));
+        }
+        step(&mut state, &entry, true)?;
+        expect = entry["after_sha256"].as_str().unwrap_or_default().into();
+    }
+    let sha = sha256_hex(&catalog_bytes(&state)?);
+    if sha != expect {
+        return Err(
+            "The rebuilt catalog does not match its recorded fingerprint; run research store verify"
+                .into(),
+        );
+    }
+    if state.revision != revision {
+        return Err(format!(
+            "The store has no catalog at revision {revision}: it goes from {} to the next recorded revision.",
+            state.revision
+        ));
+    }
+    Ok((state, sha))
+}
+
+/// The whole catalog at `revision`, written to `out` (a new file) when given.
+pub fn catalog(root: &Path, project: &str, revision: u64, out: Option<&Path>) -> Result<Value> {
+    let (_, store) = open_store(root, project)?;
+    let (segments, _) = segments(&store)?;
+    let segment = &segments[segment_at(&segments, revision)?];
+    let (state, sha) = catalog_at(segment, revision)?;
+    let bytes = catalog_bytes(&state)?;
+    if let Some(out) = out {
+        // A new file only, so the authoritative catalog can never be overwritten from here.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(out)
+            .map_err(|e| format!("Cannot create {}: {e}", out.display()))?;
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(json!({
+        "backend": "store",
+        "project": project,
+        "revision": revision,
+        "catalog_sha256": sha,
+        "verified": true,
+        "records": state.nodes.len(),
+        "dependencies": state.dependencies.len(),
+        "bytes": bytes.len(),
+        "written_to": out.map(|p| p.display().to_string()),
+    }))
+}
+
+/// Record `id` and its report as they were at `revision`.
+pub fn show(root: &Path, project: &str, id: u64, revision: u64) -> Result<Value> {
+    let (dir, store) = open_store(root, project)?;
+    let (segments, _) = segments(&store)?;
+    let at = segment_at(&segments, revision)?;
+    let (state, _) = catalog_at(&segments[at], revision)?;
+    let record = state.nodes.iter().find(|n| n.id == id);
+    let path = record.map(|_| catalog_index::Index::new(&state).paths[&id].clone());
+    // The report's text at `revision`: the last change at or before it in this segment, else
+    // the first change after it while later segments continue this one without a gap.
+    let entries = |segment: &Segment| -> Result<Vec<Value>> {
+        segment
+            .frames
+            .iter()
+            .skip(1)
+            .filter(|range| mentions(&segment.bytes[(*range).clone()], id))
+            .map(|range| {
+                serde_json::from_slice(&segment.bytes[range.clone()]).map_err(|e| e.to_string())
+            })
+            .collect()
+    };
+    let earlier = entries(&segments[at])?;
+    let mut sha = earlier
+        .iter()
+        .rev()
+        .filter(|e| e["revision"].as_u64().is_some_and(|r| r <= revision))
+        .find_map(|e| report_row(e, id))
+        .map(|r| r["after_sha256"].clone());
+    if sha.is_none() {
+        for (i, segment) in segments.iter().enumerate().skip(at) {
+            if i > at && segment.start["follows"] != "commit" {
+                break;
+            }
+            let later = if i == at {
+                earlier.clone()
+            } else {
+                entries(segment)?
+            };
+            sha = later
+                .iter()
+                .filter(|e| e["revision"].as_u64().is_some_and(|r| r > revision))
+                .find_map(|e| report_row(e, id))
+                .map(|r| r["before_sha256"].clone());
+            if sha.is_some() {
+                break;
+            }
+        }
+    }
+    let report = match (sha.as_ref().and_then(Value::as_str), &path) {
+        (Some(sha), _) => {
+            json!({"sha256": sha, "text": text_index(&store)?.read(sha)?, "source": "store"})
+        }
+        (None, Some(path)) => {
+            // Unchanged in the store's history from this revision on: the file holds it.
+            let text = fs::read_to_string(dir.join(path)).ok();
+            json!({"sha256": text.as_deref().map(hash), "text": text, "source": "current_file"})
+        }
+        (None, None) => Value::Null,
+    };
+    Ok(json!({
+        "backend": "store",
+        "project": project,
+        "revision": revision,
+        "record": record,
+        "path": path,
+        "report": report,
+    }))
+}

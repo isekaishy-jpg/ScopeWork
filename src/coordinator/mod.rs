@@ -254,6 +254,11 @@ struct ProjectState {
     leases: Mutex<leases::Leases>,
     /// Drift entries recorded per resource since this coordinator started.
     drift: Mutex<std::collections::BTreeMap<String, u64>>,
+    /// The catalog revision the project's store was last brought to (or tried at), so an idle
+    /// writer syncs it once per new revision; `u64::MAX` before the first try.
+    store_revision: AtomicU64,
+    /// Why the last store sync failed, if it did.
+    store_error: Mutex<Option<String>>,
 }
 
 /// How long the writer may reuse its in-memory catalog before re-opening it from disk.
@@ -364,6 +369,8 @@ impl Server {
             commits: Mutex::new(CommitLog::default()),
             leases: Mutex::new(leases::Leases::default()),
             drift: Mutex::new(Default::default()),
+            store_revision: AtomicU64::new(u64::MAX),
+            store_error: Mutex::new(None),
             reads: Mutex::new(ReadLog {
                 day: today(),
                 ..ReadLog::default()
@@ -655,6 +662,15 @@ impl Server {
                             Err(_) => return,
                         };
                     }
+                    // Idle: the project's store follows the revisions committed meanwhile.
+                    if queue.waiting.is_empty() && self.store_behind(state) {
+                        drop(queue);
+                        self.follow_store(state);
+                        queue = match state.queue.lock() {
+                            Ok(q) => q,
+                            Err(_) => return,
+                        };
+                    }
                 }
                 let batch = select(&mut queue.waiting, Instant::now());
                 let now = Instant::now();
@@ -673,6 +689,38 @@ impl Server {
         }
     }
 
+    /// Whether the project has a store that has not yet followed the committed revision.
+    fn store_behind(&self, state: &ProjectState) -> bool {
+        let revision = state
+            .snapshot
+            .read()
+            .map_or(u64::MAX, |s| s.project.revision);
+        !self.home_gone.load(Ordering::Acquire)
+            && state.store_revision.load(Ordering::Acquire) != revision
+            && self
+                .root
+                .join(&state.id)
+                .join(research::store::FOLDER)
+                .join("store.json")
+                .is_file()
+    }
+    /// Brings the project's store to the committed revision on the idle writer thread, so no
+    /// commit of this coordinator overlaps it. The store follows receipts and never takes part
+    /// in a commit (docs/design-storage-backend.md). A failure is kept for `coordinator status`
+    /// and not retried until the next revision.
+    fn follow_store(&self, state: &ProjectState) {
+        let revision = state
+            .snapshot
+            .read()
+            .map_or(u64::MAX, |s| s.project.revision);
+        let result = research::with_lock_wait(Duration::from_secs(10), || {
+            research::store::sync(&self.root, &state.id, false)
+        });
+        state.store_revision.store(revision, Ordering::Release);
+        if let Ok(mut error) = state.store_error.lock() {
+            *error = result.err();
+        }
+    }
     /// Appends the read counts and commit measurements gathered so far to the project's
     /// tooling log (`coordinator-reads`, `coordinator-commits`), then starts afresh.
     fn flush_logs(&self, state: &ProjectState) {
@@ -1222,7 +1270,12 @@ impl Server {
                             "reads": reads, "reads_with_pending": with_pending, "reads_by_class": classes,
                             "commits": state.commits.lock().map(|log| log.view()).unwrap_or_default(),
                             "leases": state.leases.lock().map(|l| l.stats.view()).unwrap_or_default(),
-                            "drift": state.drift.lock().map(|d| json!(*d)).unwrap_or_default()})
+                            "drift": state.drift.lock().map(|d| json!(*d)).unwrap_or_default(),
+                            "store": {
+                                "followed_revision": Some(state.store_revision.load(Ordering::Acquire)).filter(|r| *r != u64::MAX),
+                                "error": state.store_error.lock().ok().and_then(|e| e.clone()),
+                            }})
+
                     })
                     .collect()
             })

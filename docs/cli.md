@@ -399,6 +399,9 @@ research store init PROJECT
 research store sync PROJECT
 research store status PROJECT
 research store verify PROJECT
+research store history PROJECT NODE
+research store show PROJECT NODE --revision N
+research store catalog PROJECT --revision N [--out FILE]
 ```
 
 The store keeps a project's whole catalog history in `<project>/store/`, beside the files, which stay authoritative ([design](design-storage-backend.md)). It follows the change receipts every writer leaves, so it never takes part in a commit: a store problem can never fail or slow a commit, or change a file.
@@ -407,6 +410,11 @@ The store keeps a project's whole catalog history in `<project>/store/`, beside 
 - **`store sync`** brings the store to the current revision: it reads the catalog under the project's shared lock, walks the receipts back to the store's head and appends what is new. A change that leaves no receipt (an import publication, a layout migration) is recorded as a gap, and the store re-anchors on the current catalog; later commits connect again. A frame cut short by an interrupted sync is removed; damage anywhere else is refused (`store_damaged`) and reported by `verify`.
 - **`store status`** gives the head, the catalog revision and how far behind the store is, its segments, gaps, text count and sizes.
 - **`store verify`** checks every frame's checksum, every checkpoint's fingerprint, each segment's commit chain by replaying it, every referenced text against its hash, and the head against the catalog.
+
+- **`store history`** lists the revisions that changed a record or its report, newest first: time, direction, the record's changed fields (name, status, parent and length with both values), creation or removal, the report's path and text hashes before and after, moves and prerequisite changes. Gaps are listed, so an incomplete history says so.
+- **`store show`** gives a record and its report text as they were at revision N. When the report did not change in the stored history from N on, `report.source` is `current_file` and the text is the file's.
+- **`store catalog`** rebuilds the whole catalog at revision N from the nearest checkpoint and checks it against the fingerprint recorded for N; `--out` writes it to a new file (never over an existing one).
+- **The coordinator keeps stores current:** when a project's writer has been idle for a few seconds after a new revision, it syncs that project's store, if it has one. `coordinator status` shows each project's `store.followed_revision` and the last sync `error`. Direct-mode and GUI commits are picked up by the next sync.
 
 Every answer names its source (`"backend":"store"`). Readers take no lock. Files: `store.json`; `segment-N.zlib` (the catalog where segment N starts) and `segment-N.log` (checksummed JSON entries: a start entry, then one commit entry per revision, with report and sidecar texts replaced by their SHA-256); `texts-N.pack` (texts compressed in groups). A segment closes after 4 MB of log.
 

@@ -1142,3 +1142,36 @@ fn a_coordinator_exits_once_its_research_home_is_gone() {
         std::thread::sleep(Duration::from_millis(250));
     }
 }
+
+/// A project's store follows the revisions committed through the coordinator once its writer
+/// is idle, without any store command.
+#[test]
+fn an_idle_coordinator_brings_the_project_store_to_the_committed_revision() {
+    let f = Fixture::new(2);
+    f.direct(&["store", "init", "fixture"]);
+    let token = f.coordinated(&["node", "show", "fixture", "3"])["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let args = f.save_args(3, &token, "Saved through the coordinator.");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    f.coordinated(&args);
+    let revision = f.direct(&["project", "revision", "fixture"])["revision"].clone();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = f.direct(&["store", "status", "fixture"]);
+        if status["current"] == true {
+            assert_eq!(status["head"]["revision"], revision);
+            break;
+        }
+        assert!(Instant::now() < deadline, "store never followed: {status}");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let coordinator = f.coordinated(&["coordinator", "status"]);
+    let project = &coordinator["projects"][0];
+    assert_eq!(
+        project["store"]["followed_revision"], revision,
+        "{coordinator}"
+    );
+    assert!(project["store"]["error"].is_null(), "{coordinator}");
+}

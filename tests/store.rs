@@ -221,3 +221,86 @@ fn a_change_without_a_receipt_is_a_gap_and_the_next_commits_connect_again() {
     assert!(sync["gap"].is_null(), "{sync}");
     f.verified();
 }
+
+#[test]
+fn history_show_and_catalog_answer_for_any_stored_revision() {
+    let f = Fixture::new();
+    f.save("3", "First understanding.");
+    let first = f.revision();
+    let first_catalog = fs::read(f.project().join("project.json")).unwrap();
+    f.save("3", "Second understanding.");
+    let token = f.ok(&["node", "show", "fixture", "3"])["structural_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.ok(&["deps", "set", "fixture", "3", "--expect", &token, "2000"]);
+    let revision = f.revision();
+    f.ok(&["store", "init", "fixture"]);
+
+    let history = f.ok(&["store", "history", "fixture", "3"]);
+    assert_eq!(history["backend"], "store");
+    let revisions = history["revisions"].as_array().unwrap();
+    // Newest first: the prerequisite, the second save, the first save, the creation.
+    assert_eq!(revisions[0]["revision"], revision, "{history}");
+    assert_eq!(revisions[0]["prerequisites"]["added"], json!([4]));
+    assert!(
+        revisions[1]["report"]["after_sha256"].is_string(),
+        "{history}"
+    );
+    assert_eq!(revisions.last().unwrap()["created"], true, "{history}");
+
+    // The record and report as they were after the first save.
+    let shown = f.ok(&[
+        "store",
+        "show",
+        "fixture",
+        "3",
+        "--revision",
+        &first.to_string(),
+    ]);
+    assert_eq!(shown["record"]["status"], "InProgress");
+    assert_eq!(shown["report"]["source"], "store");
+    let text = shown["report"]["text"].as_str().unwrap();
+    assert!(text.contains("First understanding."), "{text}");
+    // Function 4's report never changed: the current file holds it.
+    let unchanged = f.ok(&[
+        "store",
+        "show",
+        "fixture",
+        "4",
+        "--revision",
+        &first.to_string(),
+    ]);
+    assert_eq!(unchanged["report"]["source"], "current_file");
+
+    // The whole catalog at that revision, byte for byte, into a new file only.
+    let out = f.home.join("catalog-at-first.json");
+    let catalog = f.ok(&[
+        "store",
+        "catalog",
+        "fixture",
+        "--revision",
+        &first.to_string(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(catalog["verified"], true);
+    assert_eq!(fs::read(&out).unwrap(), first_catalog);
+    assert!(
+        f.fails(&[
+            "store",
+            "catalog",
+            "fixture",
+            "--revision",
+            &first.to_string(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .contains("Cannot create")
+    );
+    let ahead = (revision + 5).to_string();
+    assert!(
+        f.fails(&["store", "show", "fixture", "3", "--revision", &ahead])
+            .contains("store sync")
+    );
+}

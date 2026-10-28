@@ -149,6 +149,24 @@ pub(crate) enum StoreCommand {
     Status { project: String },
     /// Check every frame, checkpoint, commit chain and text, and the head against the catalog.
     Verify { project: String },
+    /// The revisions that changed a record or its report, newest first.
+    History { project: String, node: u64 },
+    /// A record and its report as they were at a revision.
+    Show {
+        project: String,
+        node: u64,
+        #[arg(long)]
+        revision: u64,
+    },
+    /// The whole catalog at a revision, checked against its recorded fingerprint.
+    Catalog {
+        project: String,
+        #[arg(long)]
+        revision: u64,
+        /// Write it to this new file (an existing file is never overwritten).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 impl StoreCommand {
     fn project(&self) -> &str {
@@ -156,7 +174,10 @@ impl StoreCommand {
             Self::Init { project }
             | Self::Sync { project }
             | Self::Status { project }
-            | Self::Verify { project } => project,
+            | Self::Verify { project }
+            | Self::History { project, .. }
+            | Self::Show { project, .. }
+            | Self::Catalog { project, .. } => project,
         }
     }
 }
@@ -1171,6 +1192,17 @@ fn run(args: Args) -> Result<Value, String> {
             StoreCommand::Sync { project } => store::sync(&root, project, false),
             StoreCommand::Status { project } => store::status(&root, project),
             StoreCommand::Verify { project } => store::verify(&root, project),
+            StoreCommand::History { project, node } => store::history(&root, project, *node),
+            StoreCommand::Show {
+                project,
+                node,
+                revision,
+            } => store::show(&root, project, *node, *revision),
+            StoreCommand::Catalog {
+                project,
+                revision,
+                out,
+            } => store::catalog(&root, project, *revision, out.as_deref()),
         };
     }
     if let Command::Journal {
