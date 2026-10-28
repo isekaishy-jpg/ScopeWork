@@ -23,12 +23,14 @@ Not here: cross-project references (user: they wait), deleting receipts before p
 - **Reads:**
   - `research store annotations <project> <rva> [--kind K]`: the rows at an address, newest first through their history (value, reason, report pin, which sync changed them).
   - `research store conflicts <project>`: disagreements between the catalog and the ledger, computed now:
-    - `name`: a `function-name` row whose value differs from the function's name at that address;
+    - `name`: a `function-name` row whose value differs from the function's name at that address, or a `label` row unlike the data item's name at its address;
     - `kind`: a function row (`function-*`) at a data item's address, or a data row (`data-definition`, `data-type`, `label`) at a function's address that is not the function's entry label;
     - `report`: a row whose `report` is not the current report path of the record at its address;
     - `unknown`: a row kind this build does not know.
     Rows at addresses with no record are counted (`unplaced`), not conflicts: they stay annotations on an address.
 - **Status:** `store status` shows the ledger fingerprint, rows, types and when the last ledger entry was recorded.
+- **Files:** ledger entries go to their own `ledger.log` (so catalog readers are unchanged), and `ledger-head.zlib` keeps the ledger as of the last entry (fast compression; rewritten per change) so a sync diffs without replaying. Fingerprints are of the canonical form (keys sorted, rows ordered by key), which a replay reproduces exactly.
+- **The coordinator** follows the ledger when its stamp (size, modification time) changes, on a thread of its own: comparing the `3-3-5a` ledger takes about 2.7 s (hash 0.4 s, parse 0.7 s, previous state 0.6 s, diff 0.7 s), and no commit may wait behind it. The catalog sync stays on the idle writer thread. A sync with an unchanged ledger only hashes its bytes.
 
 ## 2. Artifacts and address spaces
 

@@ -259,6 +259,11 @@ struct ProjectState {
     store_revision: AtomicU64,
     /// Why the last store sync failed, if it did.
     store_error: Mutex<Option<String>>,
+    /// The annotation ledger's stamp when the store last followed it.
+    store_ledger: Mutex<Option<(u64, std::time::SystemTime)>>,
+    /// A thread is recording the ledger's change into the store.
+    ledger_running: AtomicBool,
+    ledger_error: Mutex<Option<String>>,
 }
 
 /// How long the writer may reuse its in-memory catalog before re-opening it from disk.
@@ -371,6 +376,9 @@ impl Server {
             drift: Mutex::new(Default::default()),
             store_revision: AtomicU64::new(u64::MAX),
             store_error: Mutex::new(None),
+            store_ledger: Mutex::new(None),
+            ledger_running: AtomicBool::new(false),
+            ledger_error: Mutex::new(None),
             reads: Mutex::new(ReadLog {
                 day: today(),
                 ..ReadLog::default()
@@ -689,14 +697,21 @@ impl Server {
         }
     }
 
-    /// Whether the project has a store that has not yet followed the committed revision.
+    /// Whether the project has a store that has not yet followed the committed revision, or
+    /// the annotation ledger as it now is.
     fn store_behind(&self, state: &ProjectState) -> bool {
         let revision = state
             .snapshot
             .read()
             .map_or(u64::MAX, |s| s.project.revision);
+        let dir = self.root.join(&state.id);
+        let ledger_changed = !state.ledger_running.load(Ordering::Acquire)
+            && state
+                .store_ledger
+                .lock()
+                .is_ok_and(|seen| *seen != research::store::ledger_stamp(&dir));
         !self.home_gone.load(Ordering::Acquire)
-            && state.store_revision.load(Ordering::Acquire) != revision
+            && (state.store_revision.load(Ordering::Acquire) != revision || ledger_changed)
             && self
                 .root
                 .join(&state.id)
@@ -707,18 +722,41 @@ impl Server {
     /// Brings the project's store to the committed revision on the idle writer thread, so no
     /// commit of this coordinator overlaps it. The store follows receipts and never takes part
     /// in a commit (docs/design-storage-backend.md). A failure is kept for `coordinator status`
-    /// and not retried until the next revision.
-    fn follow_store(&self, state: &ProjectState) {
+    /// and not retried until the next revision, except a busy store, retried when next idle.
+    ///
+    /// The annotation ledger is followed on a thread of its own: comparing a large ledger takes
+    /// seconds, and no commit should wait for it.
+    fn follow_store(self: &Arc<Self>, state: &Arc<ProjectState>) {
         let revision = state
             .snapshot
             .read()
             .map_or(u64::MAX, |s| s.project.revision);
+        let dir = self.root.join(&state.id);
+        let ledger = research::store::ledger_stamp(&dir);
         let result = research::with_lock_wait(Duration::from_secs(10), || {
-            research::store::sync(&self.root, &state.id, false)
+            research::store::sync_catalog(&self.root, &state.id)
         });
-        state.store_revision.store(revision, Ordering::Release);
-        if let Ok(mut error) = state.store_error.lock() {
-            *error = result.err();
+        if !result.as_ref().is_err_and(|e| e.starts_with("store_busy")) {
+            state.store_revision.store(revision, Ordering::Release);
+            if let Ok(mut error) = state.store_error.lock() {
+                *error = result.err();
+            }
+        }
+        let seen = state.store_ledger.lock().map(|seen| *seen).ok();
+        if seen != Some(ledger) && !state.ledger_running.swap(true, Ordering::AcqRel) {
+            let (server, state) = (Arc::clone(self), Arc::clone(state));
+            std::thread::spawn(move || {
+                let result = research::store::follow_ledger(&server.root, &state.id);
+                if !result.as_ref().is_err_and(|e| e.starts_with("store_busy")) {
+                    if let Ok(mut seen) = state.store_ledger.lock() {
+                        *seen = ledger;
+                    }
+                    if let Ok(mut error) = state.ledger_error.lock() {
+                        *error = result.err();
+                    }
+                }
+                state.ledger_running.store(false, Ordering::Release);
+            });
         }
     }
     /// Appends the read counts and commit measurements gathered so far to the project's
@@ -1274,6 +1312,8 @@ impl Server {
                             "store": {
                                 "followed_revision": Some(state.store_revision.load(Ordering::Acquire)).filter(|r| *r != u64::MAX),
                                 "error": state.store_error.lock().ok().and_then(|e| e.clone()),
+                                "ledger_following": state.ledger_running.load(Ordering::Acquire),
+                                "ledger_error": state.ledger_error.lock().ok().and_then(|e| e.clone()),
                             }})
 
                     })

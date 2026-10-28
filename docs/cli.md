@@ -402,6 +402,8 @@ research store verify PROJECT
 research store history PROJECT NODE
 research store show PROJECT NODE --revision N
 research store catalog PROJECT --revision N [--out FILE]
+research store annotations PROJECT ADDRESS [--kind KIND]
+research store conflicts PROJECT
 ```
 
 The store keeps a project's whole catalog history in `<project>/store/`, beside the files, which stay authoritative ([design](design-storage-backend.md)). It follows the change receipts every writer leaves, so it never takes part in a commit: a store problem can never fail or slow a commit, or change a file.
@@ -416,7 +418,15 @@ The store keeps a project's whole catalog history in `<project>/store/`, beside 
 - **`store catalog`** rebuilds the whole catalog at revision N from the nearest checkpoint and checks it against the fingerprint recorded for N; `--out` writes it to a new file (never over an existing one).
 - **The coordinator keeps stores current:** when a project's writer has been idle for a few seconds after a new revision, it syncs that project's store, if it has one. `coordinator status` shows each project's `store.followed_revision` and the last sync `error`. Direct-mode and GUI commits are picked up by the next sync.
 
-Every answer names its source (`"backend":"store"`). Readers take no lock. Files: `store.json`; `segment-N.zlib` (the catalog where segment N starts) and `segment-N.log` (checksummed JSON entries: a start entry, then one commit entry per revision, with report and sidecar texts replaced by their SHA-256); `texts-N.pack` (texts compressed in groups). A segment closes after 4 MB of log.
+**The annotation ledger** ([design](design-storage-promotion.md)). The project tools' ledger (`tools/profiles/annotations.json`) stays authoritative; the store follows it as well as the catalog.
+
+- **`store sync`** also records the ledger's change since the last sync (`ledger` in its answer): the rows and types added, removed and changed, keyed by address and kind and by type name. The first time, and for a change those keys cannot describe (two rows with one key), the whole ledger is stored once as a text. A rewrite in another order changes nothing (`reordered`). A ledger that does not parse, such as one being written, is skipped (`skipped`) and recorded at a later sync. Several tool writes between syncs become one entry.
+- **The coordinator** follows the ledger when its stamp changes, on a thread of its own (comparing a 50 MB ledger takes a few seconds, and no commit waits for it); `coordinator status` shows `store.ledger_following` and `store.ledger_error`.
+- **`store annotations`** gives the rows at an address now and every change to them through the store's history, newest first (`--kind` narrows to one kind).
+- **`store conflicts`** lists where the catalog and the ledger disagree now: `name` (a `function-name` row unlike its function's name, or a `label` unlike its data item's), `kind` (function rows at a data item, data definitions or types at a function), `report` (a row pinned to another report than the record's at its address) and `unknown` (a row kind this build does not know). Rows at addresses without a record are counted as `unplaced_rows`, not conflicts. Conflicts are resolved before the store is adopted; the store only reports them.
+- **`store status`** shows the ledger's entries, rows, types and last change, and `store verify` replays the ledger's chain.
+
+Every answer names its source (`"backend":"store"`). Readers take no lock. Files: `store.json`; `segment-N.zlib` (the catalog where segment N starts) and `segment-N.log` (checksummed JSON entries: a start entry, then one commit entry per revision, with report and sidecar texts replaced by their SHA-256); `texts-N.pack` (texts compressed in groups); `ledger.log` (the ledger's entries) and `ledger-head.zlib` (the ledger as of the last entry, so a sync need not replay). A segment closes after 4 MB of log.
 
 ## Waiting, small answers and coordination (0.8.0)
 

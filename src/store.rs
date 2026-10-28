@@ -11,6 +11,7 @@
 //! - `segment-<n>.log`: frames following that checkpoint: a start entry, then one commit entry
 //!   per revision.
 //! - `texts-<n>.pack`: report and sidecar texts by SHA-256, compressed in groups.
+//! - `ledger.log`, `ledger-head.zlib`: the annotation ledger followed ([`ledger`]).
 //! - `.lock`: held by the one process writing the store.
 //!
 //! A frame is a 4-byte length, a 4-byte CRC-32 of the payload, then the payload (little-endian).
@@ -20,6 +21,11 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::ops::Range;
+
+#[path = "store_ledger.rs"]
+mod ledger;
+pub(crate) use ledger::stamp as ledger_stamp;
+pub use ledger::{annotations, conflicts};
 
 pub(crate) const FOLDER: &str = "store";
 const SCHEMA: u64 = 1;
@@ -303,11 +309,17 @@ impl Writer {
                 let _ = fs::remove_file(checkpoint);
             }
         }
-        let tails = segments.last().map(|s| s.log.clone()).into_iter().chain(
-            numbered(&self.store, "texts-", ".pack")
-                .pop()
-                .map(|(_, p)| p),
-        );
+        let ledger_log = Some(self.store.join(ledger::LOG)).filter(|p| p.is_file());
+        let tails = segments
+            .last()
+            .map(|s| s.log.clone())
+            .into_iter()
+            .chain(
+                numbered(&self.store, "texts-", ".pack")
+                    .pop()
+                    .map(|(_, p)| p),
+            )
+            .chain(ledger_log);
         for path in tails {
             let bytes = fs::read(&path).map_err(|e| e.to_string())?;
             match frames(&bytes).1 {
@@ -567,9 +579,26 @@ struct Mark {
     compressed: Vec<u8>,
 }
 
-/// Brings the store of project `id` to the catalog's current revision; with `create`, creates
-/// it first (the manual migration step) from as much receipt history as can be verified.
+/// Brings the store of project `id` to the catalog's current revision and records the ledger's
+/// change; with `create`, creates it first (the manual migration step) from as much receipt
+/// history as can be verified.
 pub fn sync(root: &Path, id: &str, create: bool) -> Result<Value> {
+    sync_with(root, id, create, true)
+}
+/// [`sync`] without the ledger, which the coordinator follows beside its writer
+/// ([`follow_ledger`]) because comparing a large ledger takes seconds.
+pub(crate) fn sync_catalog(root: &Path, id: &str) -> Result<Value> {
+    sync_with(root, id, false, false)
+}
+/// Records the ledger's change since the store last followed it.
+pub(crate) fn follow_ledger(root: &Path, id: &str) -> Result<Value> {
+    let (dir, store) = open_store(root, id)?;
+    let mut w = Writer::open(&store)?;
+    w.repair()?;
+    let (revision, _) = current(&dir)?;
+    ledger::follow_inner(&mut w, &dir, &store, revision)
+}
+fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<Value> {
     let started = std::time::Instant::now();
     let dir = project_dir(root, id)?;
     let store = dir.join(FOLDER);
@@ -611,8 +640,9 @@ pub fn sync(root: &Path, id: &str, create: bool) -> Result<Value> {
         if create {
             atomic(&marker, &store_marker(id)?)?;
         }
+        let ledger = with_ledger.then(|| ledger::follow(&mut w, &dir, &store, current_revision));
         return Ok(
-            json!({"backend":"store","project":id,"revision":current_revision,"commits_added":0,"up_to_date":true}),
+            json!({"backend":"store","project":id,"revision":current_revision,"commits_added":0,"up_to_date":true,"ledger":ledger}),
         );
     }
 
@@ -783,12 +813,14 @@ pub fn sync(root: &Path, id: &str, create: bool) -> Result<Value> {
     if long && newer_end > 0 {
         write_segment(&marks[0], json!({"follows":"commit"}))?;
     }
+    let ledger = with_ledger.then(|| ledger::follow(&mut w, &dir, &store, current_revision));
     if create {
         atomic(&marker, &store_marker(id)?)?;
     }
     Ok(json!({
         "backend": "store",
         "project": id,
+        "ledger": ledger,
         "from": head.as_ref().map(|h| h.0),
         "revision": current_revision,
         "commits_added": entries.len(),
@@ -866,6 +898,8 @@ pub fn status(root: &Path, id: &str) -> Result<Value> {
         "pack_bytes": size(packs),
         "unfinished": invalid.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "problems": texts.problems,
+        "ledger": ledger::status(&store).unwrap_or_else(|e| json!({"error": e})),
+        "ledger_bytes": size([store.join(ledger::LOG)]),
     }))
 }
 
@@ -979,6 +1013,7 @@ pub fn verify(root: &Path, id: &str) -> Result<Value> {
         }
         previous_end = Some(chain);
     }
+    ledger::verify(&store, &mut problems, &mut referenced);
     // Every pack frame is decompressed once and each of its texts checked against its hash.
     let mut present = HashSet::new();
     for (_, pack) in numbered(&store, "texts-", ".pack") {

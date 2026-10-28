@@ -104,10 +104,21 @@ impl Fixture {
             .unwrap()
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "log"))
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "log")
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("segment-")
+            })
             .collect();
         logs.sort();
         logs
+    }
+    fn ledger(&self, ledger: &Value) {
+        let path = self.project().join("tools/profiles/annotations.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec_pretty(ledger).unwrap()).unwrap();
     }
     fn verified(&self) -> Value {
         let verify = self.ok(&["store", "verify", "fixture"]);
@@ -303,4 +314,144 @@ fn history_show_and_catalog_answer_for_any_stored_revision() {
         f.fails(&["store", "show", "fixture", "3", "--revision", &ahead])
             .contains("store sync")
     );
+}
+
+fn row(kind: &str, rva: &str, value: &str) -> Value {
+    json!({"kind": kind, "rva": rva, "value": value, "reason": "Fixture.", "reviewed": true})
+}
+
+#[test]
+fn the_store_follows_the_ledger_row_by_row() {
+    let f = Fixture::new();
+    f.ledger(&json!({
+        "schema": 1,
+        "image_base": "0x00400000",
+        "annotations": [row("function-name", "0x00001000", "F1"), row("plate-comment", "0x00001000", "First.")],
+        "types": [{"name": "Thing", "kind": "struct", "size": 4}],
+    }));
+    let init = f.ok(&["store", "init", "fixture"]);
+    assert_eq!(init["ledger"]["full"], true, "{init}");
+    assert_eq!(f.ok(&["store", "status", "fixture"])["ledger"]["rows"], 2);
+
+    // One change, one addition, one removal, a header change, and a reordered list.
+    f.ledger(&json!({
+        "schema": 2,
+        "image_base": "0x00400000",
+        "annotations": [row("label", "0x00002000", "Table"), row("function-name", "0x00001000", "F1Renamed")],
+        "types": [{"name": "Thing", "kind": "struct", "size": 4}],
+    }));
+    let sync = f.ok(&["store", "sync", "fixture"]);
+    assert_eq!(
+        sync["ledger"]["rows"],
+        json!({"removed": 1, "added": 1, "changed": 1}),
+        "{sync}"
+    );
+    assert_eq!(
+        sync["ledger"]["types"],
+        json!({"removed": 0, "added": 0, "changed": 0})
+    );
+    assert_eq!(
+        f.ok(&["store", "sync", "fixture"])["ledger"]["up_to_date"],
+        true
+    );
+
+    // A rewrite in another order changes the file but not the ledger.
+    f.ledger(&json!({
+        "annotations": [row("function-name", "0x00001000", "F1Renamed"), row("label", "0x00002000", "Table")],
+        "image_base": "0x00400000",
+        "schema": 2,
+        "types": [{"name": "Thing", "kind": "struct", "size": 4}],
+    }));
+    assert_eq!(
+        f.ok(&["store", "sync", "fixture"])["ledger"]["reordered"],
+        true
+    );
+
+    // A ledger that does not parse is skipped, and recorded once it does.
+    let path = f.project().join("tools/profiles/annotations.json");
+    fs::write(&path, b"{\"annotations\": [").unwrap();
+    let skipped = f.ok(&["store", "sync", "fixture"]);
+    assert!(skipped["ledger"]["skipped"].is_string(), "{skipped}");
+    f.ledger(&json!({
+        "schema": 2,
+        "image_base": "0x00400000",
+        "annotations": [row("label", "0x00002000", "Table")],
+        "types": [],
+    }));
+    let sync = f.ok(&["store", "sync", "fixture"]);
+    assert_eq!(sync["ledger"]["rows"]["removed"], 1, "{sync}");
+    assert_eq!(sync["ledger"]["types"]["removed"], 1, "{sync}");
+
+    // The address's rows through history, newest first.
+    let at = f.ok(&[
+        "store",
+        "annotations",
+        "fixture",
+        "1000",
+        "--kind",
+        "function-name",
+    ]);
+    let changes = at["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 3, "{at}");
+    assert_eq!(changes[0]["after"], Value::Null);
+    assert_eq!(changes[1]["after"]["value"], "F1Renamed");
+    assert_eq!(changes[2]["before"], Value::Null);
+    assert_eq!(at["current"], json!([]));
+    let status = f.ok(&["store", "status", "fixture"]);
+    assert_eq!(status["ledger"]["entries"], 4, "{status}");
+    assert_eq!(f.verified()["ok"], true);
+
+    // A head copy that is lost or stale is rebuilt from the entries.
+    fs::remove_file(f.project().join("store/ledger-head.zlib")).unwrap();
+    f.ledger(&json!({
+        "schema": 2,
+        "image_base": "0x00400000",
+        "annotations": [row("label", "0x00002000", "Table2")],
+        "types": [],
+    }));
+    let sync = f.ok(&["store", "sync", "fixture"]);
+    assert_eq!(sync["ledger"]["rows"]["changed"], 1, "{sync}");
+    f.verified();
+}
+
+#[test]
+fn conflicts_report_where_the_catalog_and_the_ledger_disagree() {
+    let f = Fixture::new();
+    assert!(
+        f.fails(&["store", "conflicts", "fixture"])
+            .contains("no annotation ledger")
+    );
+    let mut wrong_report = row("plate-comment", "0x00002000", "Note.");
+    wrong_report["report"] = "architectures/000009/research.md".into();
+    f.ledger(&json!({
+        "schema": 1,
+        "annotations": [
+            row("function-name", "0x00001000", "F1"),
+            row("function-name", "0x00002000", "NotF2"),
+            row("data-definition", "0x00001000", "dword"),
+            wrong_report,
+            row("mystery", "0x00001000", "?"),
+            row("label", "0x00009999", "Elsewhere"),
+        ],
+        "types": [],
+    }));
+    let found = f.ok(&["store", "conflicts", "fixture"]);
+    assert_eq!(
+        found["by_kind"],
+        json!({"kind": 1, "name": 1, "report": 1, "unknown": 1}),
+        "{found}"
+    );
+    assert_eq!(found["unplaced_rows"], 1);
+    assert_eq!(found["conflicts"], 4);
+    let name = found["listed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["conflict"] == "name")
+        .unwrap();
+    assert_eq!(name["detail"]["catalog"], "F2");
+    assert_eq!(name["detail"]["ledger"], "NotF2");
+
+    f.ledger(&json!({"schema": 1, "annotations": [row("function-name", "0x00001000", "F1")], "types": []}));
+    assert_eq!(f.ok(&["store", "conflicts", "fixture"])["conflicts"], 0);
 }

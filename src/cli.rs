@@ -167,6 +167,17 @@ pub(crate) enum StoreCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// The annotation ledger's rows at an address through the store's history.
+    Annotations {
+        project: String,
+        /// The address, hexadecimal (`0x0041A2B0`).
+        rva: String,
+        /// Only rows of this kind (`function-name`, `label`, ...).
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Disagreements between the catalog and the annotation ledger, as they are now.
+    Conflicts { project: String },
 }
 impl StoreCommand {
     fn project(&self) -> &str {
@@ -177,7 +188,9 @@ impl StoreCommand {
             | Self::Verify { project }
             | Self::History { project, .. }
             | Self::Show { project, .. }
-            | Self::Catalog { project, .. } => project,
+            | Self::Catalog { project, .. }
+            | Self::Annotations { project, .. }
+            | Self::Conflicts { project } => project,
         }
     }
 }
@@ -1203,6 +1216,10 @@ fn run(args: Args) -> Result<Value, String> {
                 revision,
                 out,
             } => store::catalog(&root, project, *revision, out.as_deref()),
+            StoreCommand::Annotations { project, rva, kind } => {
+                store::annotations(&root, project, rva, kind.as_deref())
+            }
+            StoreCommand::Conflicts { project } => store::conflicts(&root, project),
         };
     }
     if let Command::Journal {

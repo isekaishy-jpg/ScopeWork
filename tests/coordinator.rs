@@ -1174,4 +1174,23 @@ fn an_idle_coordinator_brings_the_project_store_to_the_committed_revision() {
         "{coordinator}"
     );
     assert!(project["store"]["error"].is_null(), "{coordinator}");
+
+    // A ledger write by a tool, with no commit, is followed too.
+    let ledger = f
+        .home
+        .join("projects/fixture/tools/profiles/annotations.json");
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    fs::write(
+        &ledger,
+        br#"{"schema":1,"annotations":[{"kind":"label","rva":"0x00001000","value":"L"}],"types":[]}"#,
+    )
+    .unwrap();
+    loop {
+        let status = f.direct(&["store", "status", "fixture"]);
+        if status["ledger"]["rows"] == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "ledger never followed: {status}");
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
