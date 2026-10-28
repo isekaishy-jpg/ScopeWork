@@ -813,7 +813,8 @@ pub(super) fn recover(root: &Path, project: &mut Project) -> Result<()> {
     if sha256_hex(&bytes) != journal.after_hash {
         return Err("Recovery catalog changed".into());
     }
-    let current = sha256_hex(&fs::read(root.join("project.json")).map_err(|e| e.to_string())?);
+    let current_bytes = fs::read(root.join("project.json")).map_err(|e| e.to_string())?;
+    let current = sha256_hex(&current_bytes);
     if current != journal.before_hash && current != journal.after_hash {
         return Err("recovery_conflict: catalog differs from publication inputs".into());
     }
@@ -830,6 +831,14 @@ pub(super) fn recover(root: &Path, project: &mut Project) -> Result<()> {
     }
     fault("parents_published");
     if current != journal.after_hash {
+        let after: Project = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if promoted(&after) {
+            // A promoted project's history is its store: the publication is appended to it
+            // as a commit before the catalog changes.
+            let before: Project =
+                serde_json::from_slice(&current_bytes).map_err(|e| e.to_string())?;
+            append_publication(root, before, after, &journal, &bytes)?;
+        }
         atomic(&root.join("project.json"), &bytes)?;
     }
     fault("catalog_published");
@@ -851,6 +860,56 @@ pub(super) fn recover(root: &Path, project: &mut Project) -> Result<()> {
     rename_retrying(&pending, &committed)
         .map_err(|e| format!("Cannot replace {}: {e}", committed.display()))?;
     Ok(())
+}
+/// Appends publication `journal` (from `before` to `after`, whose bytes are `bytes`) to a
+/// promoted project's store as a commit with the parents' report edits.
+fn append_publication(
+    root: &Path,
+    before: Project,
+    after: Project,
+    journal: &Publication,
+    bytes: &[u8],
+) -> Result<()> {
+    let index = catalog_index::Index::new(&after);
+    let ids: HashMap<&str, u64> = index
+        .paths
+        .iter()
+        .map(|(id, path)| (path.as_str(), *id))
+        .collect();
+    // Parent reports are report edits; the review queue is a sidecar.
+    let (mut edits, mut sidecars) = (vec![], vec![]);
+    for e in &journal.edits {
+        match ids.get(e.path.as_str()) {
+            Some(id) => edits.push(catalog_batch::Edit {
+                id: *id,
+                old: Some(e.path.clone()),
+                new: e.path.clone(),
+                before: Some(e.before.clone()),
+                after: e.after.clone(),
+            }),
+            None => sidecars.push(catalog_batch::Sidecar {
+                path: e.path.clone(),
+                before: e.before.clone(),
+                after: e.after.clone(),
+            }),
+        }
+    }
+    drop(index);
+    let j = catalog_batch::Journal {
+        changes: vec![],
+        before,
+        after,
+        edits,
+        moves: vec![],
+        dependencies: vec![],
+        sidecars,
+        ledger: false,
+        repin_ledger: false,
+        directed_by: None,
+        repin_ids: vec![],
+    };
+    let (delta, _) = catalog_batch::pending_delta(&j)?;
+    store::append_commit(root, &delta, bytes)
 }
 /// Removes job `id`'s ownership markers from every folder its segments installed. Returns a
 /// warning for each marker that could not be removed; `project tidy` removes them later.

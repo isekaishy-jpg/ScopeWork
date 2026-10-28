@@ -202,7 +202,7 @@ pub(super) fn inside(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 pub(super) fn migrate(root: &Path, project: &mut Project) -> Result<()> {
-    if matches!(project.layout_version, 2..=SPACE_FORMAT) {
+    if matches!(project.layout_version, 2..=STORE_FORMAT) {
         return Ok(());
     }
     if project.layout_version != 1 {

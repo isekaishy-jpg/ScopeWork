@@ -425,6 +425,7 @@ research store catalog PROJECT --revision N [--out FILE]
 research store annotations PROJECT ADDRESS [--kind KIND]
 research store conflicts PROJECT
 research store compact PROJECT
+research store promote PROJECT --expect-revision N
 ```
 
 The store keeps a project's whole catalog history in `<project>/store/`, beside the files, which stay authoritative ([design](design-storage-backend.md)). It follows the change receipts every writer leaves, so it never takes part in a commit: a store problem can never fail or slow a commit, or change a file.
@@ -448,6 +449,13 @@ The store keeps a project's whole catalog history in `<project>/store/`, beside 
 - **`store status`** shows the ledger's entries, rows, types and last change, and `store verify` replays the ledger's chain.
 
 **Compaction.** Every sync that adds texts writes one small pack frame, and every reader indexes all of them. **`store compact`** merges the texts into frames of about 4 MB (pack files up to 64 MB) and compresses each closed segment's log to `segment-N.logz` (the same frames as one zlib stream; the active log stays plain). Every read answers exactly as before. A sync compacts by itself once more than 64 small frames have built up (`compacted` in its answer); `store status` shows `small_pack_frames`.
+
+**Promotion** ([design](design-storage-promotion.md)) is the user's manual step that makes the store authoritative for a project. **`store promote`** first syncs the store, then refuses unless `store verify` passes, the store holds the current catalog exactly, `store conflicts` reports none, and no import is in progress. It keeps the catalog and ledger as they were in `store/promotion/` and commits the change to catalog format 8, which earlier versions cannot open. From then on:
+
+- Every commit (CLI, coordinator, dashboard, import publication) appends its entry to the store before `project.json` is written; `project.json` is the export whose fingerprint the store records, so every reader keeps working. The pending journal is still the roll-forward record: an interrupted commit is finished by the next command, and an entry it already appended is not appended twice.
+- No receipts are written. `history show` and the dashboard's history read the store for revisions since promotion, and the receipts from before it as before.
+- `store sync` has nothing to follow (`up_to_date`); a store whose head differs from the catalog is reported (`store_mismatch`).
+- There is no command back to files: the kept copies and the receipts from before promotion allow a return by hand.
 
 Every answer names its source (`"backend":"store"`). Readers take no lock. Files: `store.json`; `segment-N.zlib` (the catalog where segment N starts) and `segment-N.log` (checksummed JSON entries: a start entry, then one commit entry per revision, with report and sidecar texts replaced by their SHA-256); `texts-N.pack` (texts compressed in groups); `ledger.log` (the ledger's entries) and `ledger-head.zlib` (the ledger as of the last entry, so a sync need not replay). A segment closes after 4 MB of log.
 

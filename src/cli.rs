@@ -180,6 +180,14 @@ pub(crate) enum StoreCommand {
     Conflicts { project: String },
     /// Merge the store's text packs and compress its closed logs.
     Compact { project: String },
+    /// Make the store authoritative for this project (the user's manual migration step). Needs a
+    /// store that holds the current catalog, verifies, and reports no conflicts.
+    Promote {
+        project: String,
+        /// Revision from project show; rejects concurrent project edits.
+        #[arg(long)]
+        expect_revision: u64,
+    },
 }
 impl StoreCommand {
     fn project(&self) -> &str {
@@ -193,7 +201,8 @@ impl StoreCommand {
             | Self::Catalog { project, .. }
             | Self::Annotations { project, .. }
             | Self::Conflicts { project }
-            | Self::Compact { project } => project,
+            | Self::Compact { project }
+            | Self::Promote { project, .. } => project,
         }
     }
 }
@@ -1387,6 +1396,10 @@ fn run(args: Args) -> Result<Value, String> {
             }
             StoreCommand::Conflicts { project } => store::conflicts(&root, project),
             StoreCommand::Compact { project } => store::compact(&root, project),
+            StoreCommand::Promote {
+                project,
+                expect_revision,
+            } => crate::research::promotion::promote(&root, project, *expect_revision),
         };
     }
     if let Command::Journal {

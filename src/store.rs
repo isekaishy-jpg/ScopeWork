@@ -23,6 +23,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::ops::Range;
 
+#[path = "store_commit.rs"]
+mod commit;
+pub(crate) use commit::{append_commit, holds, receipts_after};
 #[path = "store_ledger.rs"]
 mod ledger;
 pub(crate) use ledger::stamp as ledger_stamp;
@@ -325,6 +328,18 @@ impl Writer {
             added: 0,
             small_frames: index.small_frames,
         })
+    }
+    /// [`open`](Self::open), waiting up to `wait` for another process writing the store.
+    fn open_waiting(store: &Path, wait: std::time::Duration) -> Result<Self> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match Self::open(store) {
+                Err(e) if e.starts_with("store_busy") && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                result => return result,
+            }
+        }
     }
     /// Removes what an interrupted writer left: temporaries, segments whose creation did not
     /// finish, and a frame cut short at the end of the last log or pack. Damage anywhere else
@@ -719,8 +734,15 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
         );
     }
 
+    if promoted(&state) {
+        return Err(
+            "store_mismatch: a promoted project's commits write its store, and its head is not the current catalog; run research store verify"
+                .into(),
+        );
+    }
     // Walk back from the current catalog, newest receipt first.
     let receipts = receipts(&dir);
+
     let mut entries: Vec<Vec<u8>> = vec![];
     let mut marks = vec![Mark {
         back: 0,

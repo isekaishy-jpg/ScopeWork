@@ -352,7 +352,7 @@ impl Library {
         };
         let project: Project = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-        if project.id != id || project.layout_version > SPACE_FORMAT {
+        if project.id != id || project.layout_version > STORE_FORMAT {
             return Err("Unsupported catalog or project identity mismatch".into());
         }
         let mut library = Library {

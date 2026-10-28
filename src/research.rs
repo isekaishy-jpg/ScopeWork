@@ -197,6 +197,14 @@ fn uses_spaces(project: &Project) -> bool {
         || !project.spaces.is_empty()
         || project.nodes.iter().any(|n| n.space.is_some())
 }
+/// The catalog format of a project promoted to the store (`research store promote`): its
+/// commits write the store, which holds its history, and no receipts are written. Earlier
+/// versions refuse it, so none can write files the store would never see.
+pub(crate) const STORE_FORMAT: u32 = 8;
+/// Whether `project` has been promoted to the store.
+pub(crate) fn promoted(project: &Project) -> bool {
+    project.layout_version >= STORE_FORMAT
+}
 /// Raises `project` to [`DATA_FORMAT`] when it holds a data item, and to [`SPACE_FORMAT`] when
 /// it uses artifacts or spaces.
 pub(crate) fn raise_format(project: &mut Project) {
@@ -350,6 +358,8 @@ mod ledger;
 pub(crate) mod operations;
 #[path = "pools.rs"]
 pub mod pools;
+#[path = "promotion.rs"]
+pub(crate) mod promotion;
 #[path = "proofs.rs"]
 pub mod proofs;
 #[path = "records_ui.rs"]
@@ -1422,7 +1432,10 @@ impl Library {
         }
         let mut recovery_blocked = None;
         if let Some(p) = &mut project {
-            if !matches!(p.layout_version, 5 | DATA_FORMAT | SPACE_FORMAT) {
+            if !matches!(
+                p.layout_version,
+                5 | DATA_FORMAT | SPACE_FORMAT | STORE_FORMAT
+            ) {
                 return Err("Unsupported catalog format; upgrade Scopework.".into());
             }
             let pending = dir

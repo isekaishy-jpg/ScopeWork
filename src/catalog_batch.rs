@@ -199,6 +199,10 @@ fn fault(_point: &str) {
     }
 }
 
+/// Transaction `j` as a pending catalog delta, and its after-catalog bytes.
+pub(super) fn pending_delta(j: &Journal) -> Result<(serde_json::Value, Vec<u8>)> {
+    journal_history::pending_delta(j)
+}
 /// Completes the pending catalog transaction, if any. Returns how many annotation-ledger
 /// report paths it repathed.
 pub(super) fn resume(root: &Path, project: &mut Project) -> Result<usize> {
@@ -439,9 +443,30 @@ fn finish(
         Some((delta, bytes)) => (Some(delta), bytes),
         None => (None, catalog_bytes(&j.after)?),
     };
+    if promoted(&j.after) {
+        // The store holds a promoted project's history: its entry is appended before the
+        // catalog changes (again harmlessly when an interrupted attempt appended it), and no
+        // receipt is written.
+        let delta = match delta {
+            Some(delta) => delta,
+            None => {
+                let path = folder.join("journal.json");
+                serde_json::from_slice(&fs::read(&path).map_err(|e| at(&path, e))?)
+                    .map_err(|e| e.to_string())?
+            }
+        };
+        store::append_commit(root, &delta, &after_bytes)?;
+        fault("store");
+        atomic(&root.join("project.json"), &after_bytes)?;
+        *project = j.after.clone();
+        fault("catalog");
+        fs::remove_dir_all(&folder).map_err(|e| at(&folder, e))?;
+        return Ok(ledger_rows);
+    }
     atomic(&root.join("project.json"), &after_bytes)?;
     *project = j.after.clone();
     fault("catalog");
+
     let receipt = folder.with_file_name(format!("revision-{}", project.revision));
     if !folder.exists() && receipt.join("journal.json").is_file() {
         // An earlier attempt of this commit already turned the pending folder into its receipt

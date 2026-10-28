@@ -81,22 +81,27 @@ trait Backend {
 
 `Files` is today's code (pending journal, `finish`, receipts). `Store` is used by promoted projects. Every catalog transaction already ends in `catalog_batch::commit`, which dispatches to the project's backend; the domain is unchanged.
 
-**Promoted format.** A promoted catalog has `layout_version` 8 and `"backend":"store"`. Older builds refuse it (they accept 6 at most), which is the gate keeping them from writing files the store would never see.
+As built, the dispatch is a branch in `finish` on the after-catalog's format rather than a trait: the two backends differ only in where history goes, so a trait would wrap one `if`.
 
-**Commit (Store backend):**
-1. Build the delta as today (catalog before and after, edits, moves, sidecars, annotation changes).
-2. Write the texts it references to a pack (flushed).
-3. Append the commit entry to the active log and flush. **This is the commit point.**
-4. Apply the files as `finish` does: reports and sidecars (each checked against its before or after text), folder moves, views, the ledger export, and `project.json` last. No pending journal and no receipt are written.
-5. A new segment starts at 4 MB of log, as now.
+**Promoted format.** A promoted catalog has `layout_version` 8 (`STORE_FORMAT`; no separate field). Older builds refuse it (they accept 7 at most), which is the gate keeping them from writing files the store would never see.
 
-**Recovery.** On open, if the store's head is ahead of `project.json` (head revision greater, or the catalog's hash is the head's before-fingerprint), the head entry is applied to the files again (every text resolves from the packs). If `project.json` matches neither the head's before nor its after state, the project is blocked with a message, as a mismatched pending journal is today.
+**Commit (Store backend), as built.** The pending journal stays the commit point and roll-forward record, exactly as for files projects, so every recovery path already tested applies unchanged:
+1. Build the delta and write the pending journal (as today). **This is the commit point.**
+2. Apply reports, moves and sidecars as `finish` does.
+3. Append the commit entry to the store (texts first, then the entry, flushed), waiting up to 30 s for another process writing the store. An entry already appended by an interrupted attempt is recognised by its after-fingerprint; a store whose head is neither the commit's before nor its after state stops the commit (`store_mismatch`) with the journal kept.
+4. Write `project.json`, then remove the pending folder. No receipt is written.
+5. A new segment starts at 4 MB of log, its checkpoint the catalog after the commit.
+
+The first design made the store entry the commit point and recovered from the store. Keeping the journal costs one 4–5 ms write per commit and keeps one recovery mechanism instead of two; the store still holds the whole history and receipts still stop.
+
+**Recovery.** On open, a pending journal is rolled forward through the same `finish`: the store append is skipped when already done, and the files are applied as today.
 
 **Readers** keep loading `project.json`: it is the export whose hash the head records, so the coordinator and the GUI read it as now. `store status` reports any difference.
 
 **History.** For promoted projects `history show`, the GUI history view and `store history` read the store's entries. The rows keep today's shape (`revision`, time, operation, records, reports).
 
-**Other writers.** Import publication commits its result through the backend (its own publication record stays in the job folder). Layout migration refuses promoted projects (they are current by construction). `project tidy` and journal maintenance refuse them (nothing to tidy: no receipts are written).
+**Other writers.** Import publication appends its result to the store as a commit (parent reports as report edits, the review queue as a sidecar) before it writes `project.json`; its own publication record stays in the job folder, and history lists it once. Layout migration leaves a promoted catalog as it is (format 8 is current). `project tidy` and journal maintenance keep working: they only touch empty files and the receipts from before promotion.
+
 
 ## 5. Promotion
 

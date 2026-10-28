@@ -587,7 +587,28 @@ impl Library {
         }
         if filter.catalog && filter.kind.as_deref().is_none_or(|k| k == "catalog") {
             let mut found = 0usize;
-            for (rev, path, modified) in receipts(&root) {
+            let receipts = receipts(&root);
+            // A promoted project's commits since promotion are in its store, newer than every
+            // receipt; import publications among them are not listed twice.
+            let mut stored = std::collections::HashSet::new();
+            if promoted(&self.projects[p]) {
+                let newest = receipts.first().map_or(0, |(rev, _, _)| *rev);
+                let since = store::receipts_after(&root, newest)?;
+                stored.extend(since.iter().map(|(rev, _)| *rev));
+                for (rev, receipt) in since {
+                    if found >= limit {
+                        break;
+                    }
+                    if !in_range(rev) || !in_time(receipt["at_unix"].as_u64()) {
+                        continue;
+                    }
+                    if let Some(summary) = summarize(rev, &receipt, filter) {
+                        entries.push(summary);
+                        found += 1;
+                    }
+                }
+            }
+            for (rev, path, modified) in receipts {
                 if !in_range(rev) {
                     continue;
                 }
@@ -624,7 +645,8 @@ impl Library {
             }
             entries.extend(publications(&root).into_iter().filter(|entry| {
                 let created = &entry["created"];
-                in_range(entry["revision"].as_u64().unwrap_or(0))
+                !stored.contains(&entry["revision"].as_u64().unwrap_or(0))
+                    && in_range(entry["revision"].as_u64().unwrap_or(0))
                     && in_time(entry["at_unix"].as_u64())
                     && filter.node.is_none_or(|n| {
                         created["first"].as_u64().is_some_and(|first| n >= first)
