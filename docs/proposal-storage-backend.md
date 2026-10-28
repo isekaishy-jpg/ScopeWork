@@ -1,6 +1,6 @@
 # Proposal: data records and the storage backend's first stage
 
-Status: proposed 2026-10-27. Design: [design-storage-backend.md](design-storage-backend.md). Research: [research-storage-backend.md](research-storage-backend.md) §10–12, [research-data-records.md](research-data-records.md).
+Status: implemented 2026-10-27 (`07fdbc3`, `bc1d9d6`, `6121dc2`). Design: [design-storage-backend.md](design-storage-backend.md). Research: [research-storage-backend.md](research-storage-backend.md) §10–12, [research-data-records.md](research-data-records.md).
 
 ## Approach
 
@@ -37,3 +37,21 @@ As in the design's acceptance criteria. In particular:
   - the commit-path interface and promotion;
   - exporting `project.json` from the store.
 - **If increment 2 or 3 stalls**, increment 1 stands on its own.
+
+## Validation (2026-10-27)
+
+- Tests: `tests/data_records.rs`, `tests/store.rs`, and the coordinator's idle sync in `tests/coordinator.rs`. The full suite, Clippy (`-D warnings`) and fmt are clean.
+- **A copy of `3-3-5a`** (catalog and receipts copied from the live home, read only), release build:
+
+  | Check | Result |
+  |---|---|
+  | `store init` | Revisions 6 to 37,440 in 30 s: 37,434 commits, 20 segments with checkpoints verified against their recorded fingerprints, 18,333 distinct texts |
+  | Size | 97 MB (log 78 MB, checkpoints 17 MB, texts 5.6 MB) against 277 MB of receipts |
+  | `store verify` | Passes in 5.6 s |
+  | `store catalog --revision 20000` | Rebuilt and verified in 0.4 s |
+  | `store history` / `store show` | Under 1 s |
+
+- **A finding from the first copy:** the catalog was copied while a live commit was between writing `project.json` and finishing its receipt. Init then found no receipt for the head revision and anchored there with no history, as designed. Syncs read the catalog under the project's shared lock, so they cannot see that state.
+- **Differences from the design:**
+  - A data item's length changes through a batch `update`.
+  - The dashboard's totals stay function counts, with data counts in `status`, so the approved layout is unchanged.
