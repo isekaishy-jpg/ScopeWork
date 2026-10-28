@@ -455,7 +455,20 @@ The store keeps a project's whole catalog history in `<project>/store/`, beside 
 - Every commit (CLI, coordinator, dashboard, import publication) appends its entry to the store before `project.json` is written; `project.json` is the export whose fingerprint the store records, so every reader keeps working. The pending journal is still the roll-forward record: an interrupted commit is finished by the next command, and an entry it already appended is not appended twice.
 - No receipts are written. `history show` and the dashboard's history read the store for revisions since promotion, and the receipts from before it as before.
 - `store sync` has nothing to follow (`up_to_date`); a store whose head differs from the catalog is reported (`store_mismatch`).
+- **Acceptance covers the research body and evidence**, not the generated header (the user's decision). Promotion converts every acceptance, prerequisite stamp and ledger pin whose hash still matches its report's current file to the hash of the text from `<!-- research-content -->` on, in the same transaction; anything already stale stays stale, and every old and new hash is kept in `store/promotion/acceptance.json`. Afterwards renames, moves and binary amendments leave completion and pins alone.
+- **Annotations** belong to the store from then on, and `tools/profiles/annotations.json` stays their working copy for the tools. Scopework's own changes are recorded in the store as they are written; a tool's rewrite is recorded at the next sync. The project tools' staleness checks, which hash whole files, must move to `annotate stale` (or body hashes) before a project they work on is promoted.
 - There is no command back to files: the kept copies and the receipts from before promotion allow a return by hand.
+
+### Annotations: `research annotate`
+
+```powershell
+research annotate set PROJECT --kind KIND --rva HEX --value TEXT --report PATH --reason TEXT [--classification observed|specification-defined|inferred]
+research annotate remove PROJECT --kind KIND --rva HEX
+research annotate stale PROJECT
+```
+
+- **`set`** sets the row of a kind at an address (adding or replacing it), pinned to the current acceptance hash of `--report`, which must be a record's report. **`remove`** removes one. Both run under the project's lock, apply again to a ledger a tool rewrote meanwhile, and answer the store's record of the change (`store`). They refuse a project that is not promoted: until then the tools' ledger is authoritative and changes only through them.
+- **`stale`** lists rows and types whose pin no longer matches their report, by the project's acceptance (`whole_file` before promotion, `body` after).
 
 Every answer names its source (`"backend":"store"`). Readers take no lock. Files: `store.json`; `segment-N.zlib` (the catalog where segment N starts) and `segment-N.log` (checksummed JSON entries: a start entry, then one commit entry per revision, with report and sidecar texts replaced by their SHA-256); `texts-N.pack` (texts compressed in groups); `ledger.log` (the ledger's entries) and `ledger-head.zlib` (the ledger as of the last entry, so a sync need not replay). A segment closes after 4 MB of log.
 

@@ -160,13 +160,16 @@ impl Library {
             }
         }
         let states = index.states_with(&self.dir(p), seen.iter().copied(), &|| {
-            self.hash_overrides()
+            self.hash_overrides(p)
         });
         let mut inputs = vec![];
         for id in seen {
             let n = index.nodes[&id];
             let actual = if n.status == Status::Complete {
-                Some(hash(&self.text(p, &index.paths[&id])?))
+                Some(acceptance_hash(
+                    &self.projects[p],
+                    &self.text(p, &index.paths[&id])?,
+                ))
             } else {
                 None
             };
@@ -230,7 +233,7 @@ impl Library {
         let completion_token = self.completion(p, &index, id, &token)?;
         let structural_token = prerequisites(project, &index, id)?;
         let effective_status =
-            index.states_with(&self.dir(p), [id], &|| self.hash_overrides())[&id];
+            index.states_with(&self.dir(p), [id], &|| self.hash_overrides(p))[&id];
         let proofs = self.proofs(p);
         let (pool, may_write) = self.pool_access(p, id);
         let unproven = proofs.required && self.unproven(p, id, &proofs);

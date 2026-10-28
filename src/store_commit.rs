@@ -17,11 +17,7 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 pub(crate) fn append_commit(dir: &Path, delta: &Value, after_bytes: &[u8]) -> Result<()> {
     let store = dir.join(FOLDER);
     let mut w = Writer::open_waiting(&store, WAIT)?;
-    w.repair()?;
-    let (segments, _) = segments(&store)?;
-    let last = segments.last().ok_or(
-        "store_mismatch: the promoted project's store has no segment; run research store verify",
-    )?;
+    let last = &w.active()?;
     let (head_revision, head_sha) = last.head()?;
     if delta["after_hash"] == head_sha.as_str() {
         return Ok(());

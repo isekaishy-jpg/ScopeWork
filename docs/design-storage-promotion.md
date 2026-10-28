@@ -102,7 +102,6 @@ The first design made the store entry the commit point and recovered from the st
 
 **Other writers.** Import publication appends its result to the store as a commit (parent reports as report edits, the review queue as a sidecar) before it writes `project.json`; its own publication record stays in the job folder, and history lists it once. Layout migration leaves a promoted catalog as it is (format 8 is current). `project tidy` and journal maintenance keep working: they only touch empty files and the receipts from before promotion.
 
-
 ## 5. Promotion
 
 `research store promote <project> --expect-revision R` runs under the project's exclusive lock and refuses unless:
@@ -119,11 +118,17 @@ The first design made the store entry the commit point and recovered from the st
 
 Before the transaction, promotion copies `project.json` and `annotations.json` to `store/promotion/` (with their hashes), and receipts stay on disk; returning a project to files is a manual recovery from those copies, not a command, in this stage.
 
+**As built.**
+- The acceptance mapping is every report's current whole-file hash to its body hash (text from the `<!-- research-content -->` marker on). The catalog changes (accepted hashes, stamps, format 8) are one commit; the ledger pins convert in the same journaled transaction through the journal's `repin_pairs`, applied with the files and harmless to apply again. Every old and new hash is kept in `store/promotion/acceptance.json`.
+- The ledger file stays the annotations' working copy, as the tools need it: after promotion Scopework writes it (`annotate`, re-paths) and records each of its own changes in the store at once, naming the caller; a tool's rewrite is recorded at the next sync, as before promotion. The store's ledger history is therefore complete from the first sync on, and the file is never overwritten from the store, so a tool's write is never lost.
+- A ledger change that rewrites most of a large ledger (the pin conversion rewrites nearly every row) is stored as one whole compressed copy rather than a diff of every row (3.3 MB against about 90 MB for `3-3-5a`).
+- Rehearsed on a copy of `3-3-5a` (31,514 records, 79,591 pinned ledger rows) after resolving its 7 name conflicts in the copy: 5,466 acceptances converted and none stale, every record's effective status unchanged, the same 38 ledger pins stale before and after, `store verify` passing; promotion took 25 s. A commit afterwards takes about as long as a read (about 1 s with process start on that machine) and writes no receipt.
+
 **After promotion**
 - **Acceptance** is the body-and-evidence hash: renames, moves and binary amendments no longer change it, so re-pinning becomes a no-op. The report hash cache keeps a body hash per file beside the whole-file hash, by the same stamp rule.
-- **Annotations** are store state, exported to `annotations.json` after each change:
-  - `research annotate set <project> --kind K --rva A --value V --report PATH --reason R [--classification C]`, which pins the report's current body hash; `research annotate remove <project> --kind K --rva A`; `research annotate stale <project>` lists rows whose pin no longer matches.
-  - **Outside writes** (a tool rewriting `annotations.json`): the next commit or sync finds the file's hash differing from the last export and imports the difference as an annotation change (`directed_by: "outside write"`) before anything else. Tool writes keep working and are recorded; pins they write are taken as given.
+- **Annotations** belong to the store, with `annotations.json` as their working copy:
+  - `research annotate set <project> --kind K --rva A --value V --report PATH --reason R [--classification C]`, which pins the report's current body hash; `research annotate remove <project> --kind K --rva A`; `research annotate stale <project>` lists rows whose pin no longer matches (it also works before promotion, by whole-file hashes). `set` and `remove` refuse an unpromoted project, whose ledger the tools own.
+  - **Outside writes** (a tool rewriting `annotations.json`) keep working and are recorded at the next sync; pins they write are taken as given.
   - The tools' own staleness checks hash whole files, so after promotion they disagree with the converted pins until they use `annotate stale` or body hashes. The user directs that tool change before promoting `3-3-5a`.
 
 ## Acceptance criteria

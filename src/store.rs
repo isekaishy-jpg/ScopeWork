@@ -329,6 +329,60 @@ impl Writer {
             small_frames: index.small_frames,
         })
     }
+    /// The segment commits append to, after the repairs an append needs: temporaries removed,
+    /// an unfinished new segment removed, and frames cut short at the end of the active log, the
+    /// last pack and the ledger log truncated. Unlike [`repair`](Self::repair) it reads only the
+    /// active log, so a commit's cost does not grow with the history.
+    fn active(&self) -> Result<Segment> {
+        for entry in fs::read_dir(&self.store)
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
+            if entry.file_name().to_string_lossy().ends_with(".pending") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        let tails = numbered(&self.store, "texts-", ".pack")
+            .pop()
+            .map(|(_, p)| p)
+            .into_iter()
+            .chain(Some(self.store.join(ledger::LOG)).filter(|p| p.is_file()));
+        for path in tails {
+            truncate_torn(&path)?;
+        }
+        let mut logs = segment_logs(&self.store);
+        while let Some((seq, log)) = logs.pop() {
+            let (_, checkpoint) = segment_files(&self.store, seq);
+            if !compressed(&log) {
+                truncate_torn(&log)?;
+            }
+            let bytes = read_log(&log)?;
+            let (frames, end) = frames(&bytes);
+            let start = frames
+                .first()
+                .and_then(|r| serde_json::from_slice::<Value>(&bytes[r.clone()]).ok())
+                .filter(|v| v["type"] == "start");
+            match start {
+                Some(start) if checkpoint.is_file() => {
+                    return Ok(Segment {
+                        seq,
+                        log,
+                        checkpoint,
+                        bytes,
+                        frames,
+                        end,
+                        start,
+                    });
+                }
+                // A new segment whose creation was interrupted, as `repair` removes it.
+                _ => {
+                    let _ = fs::remove_file(&log);
+                    let _ = fs::remove_file(&checkpoint);
+                }
+            }
+        }
+        Err("store_mismatch: the store has no segment; run research store verify".into())
+    }
     /// [`open`](Self::open), waiting up to `wait` for another process writing the store.
     fn open_waiting(store: &Path, wait: std::time::Duration) -> Result<Self> {
         let deadline = std::time::Instant::now() + wait;
@@ -396,24 +450,7 @@ impl Writer {
             )
             .chain(ledger_log);
         for path in tails {
-            let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-            match frames(&bytes).1 {
-                End::Clean => {}
-                End::Torn(at) => {
-                    let file = fs::OpenOptions::new()
-                        .write(true)
-                        .open(&path)
-                        .map_err(|e| e.to_string())?;
-                    file.set_len(at as u64).map_err(|e| e.to_string())?;
-                    file.sync_all().map_err(|e| e.to_string())?;
-                }
-                End::Damaged(at) => {
-                    return Err(format!(
-                        "store_damaged: {} has a damaged frame at byte {at}; run research store verify",
-                        path.display()
-                    ));
-                }
-            }
+            truncate_torn(&path)?;
         }
         // Earlier segments must be whole: only the last log is ever appended to.
         for segment in segments.iter().rev().skip(1) {
@@ -481,6 +518,26 @@ fn pack_frame<'a>(texts: impl Iterator<Item = (&'a str, &'a [u8])>) -> Result<Ve
     payload.extend_from_slice(&index);
     payload.extend_from_slice(&deflate(&all)?);
     Ok(payload)
+}
+/// Cuts a frame left incomplete at the end of `path` by an interrupted append. A complete frame
+/// with a wrong checksum is damage, which is refused: `store verify` reports it.
+fn truncate_torn(path: &Path) -> Result<()> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    match frames(&bytes).1 {
+        End::Clean => Ok(()),
+        End::Torn(at) => {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .map_err(|e| e.to_string())?;
+            file.set_len(at as u64).map_err(|e| e.to_string())?;
+            file.sync_all().map_err(|e| e.to_string())
+        }
+        End::Damaged(at) => Err(format!(
+            "store_damaged: {} has a damaged frame at byte {at}; run research store verify",
+            path.display()
+        )),
+    }
 }
 fn append(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = fs::OpenOptions::new()
@@ -616,35 +673,22 @@ fn commit_entry(receipt: &Value, revision: u64, at: Option<u64>, w: &mut Writer)
     }))
 }
 
-/// Receipts by revision: journal path and file time.
-fn receipts(dir: &Path) -> HashMap<u64, (PathBuf, Option<u64>)> {
-    let mut out = HashMap::new();
-    for folder in RECEIPT_FOLDERS {
-        for entry in fs::read_dir(dir.join(folder))
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(revision) = name
-                .strip_prefix("revision-")
-                .and_then(|r| r.parse::<u64>().ok())
-            else {
-                continue;
-            };
-            let journal = entry.path().join("journal.json");
-            let Ok(meta) = fs::metadata(&journal) else {
-                continue;
-            };
-            let at = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            out.entry(revision).or_insert((journal, at));
-        }
-    }
-    out
+/// The receipt of `revision`: its journal and file time. Looked up by name, so a sync that
+/// steps back over a few revisions touches only those receipts, not every receipt there is.
+fn receipt(dir: &Path, revision: u64) -> Option<(PathBuf, Option<u64>)> {
+    RECEIPT_FOLDERS.iter().find_map(|folder| {
+        let journal = dir
+            .join(folder)
+            .join(format!("revision-{revision}"))
+            .join("journal.json");
+        let meta = fs::metadata(&journal).ok().filter(|m| m.is_file())?;
+        let at = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        Some((journal, at))
+    })
 }
 fn project_dir(root: &Path, id: &str) -> Result<PathBuf> {
     if !valid_id(id) {
@@ -684,7 +728,15 @@ pub(crate) fn follow_ledger(root: &Path, id: &str) -> Result<Value> {
     let mut w = Writer::open(&store)?;
     w.repair()?;
     let (revision, _) = current(&dir)?;
-    ledger::follow_inner(&mut w, &dir, &store, revision)
+    ledger::follow_inner(&mut w, &dir, &store, revision, None)
+}
+/// Records a change Scopework just made to the ledger, naming who made it.
+pub(crate) fn record_ledger(root: &Path, id: &str, by: &str) -> Result<Value> {
+    let (dir, store) = open_store(root, id)?;
+    let mut w = Writer::open_waiting(&store, std::time::Duration::from_secs(30))?;
+    w.repair()?;
+    let (revision, _) = current(&dir)?;
+    ledger::follow_inner(&mut w, &dir, &store, revision, Some(by))
 }
 fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<Value> {
     let started = std::time::Instant::now();
@@ -741,7 +793,6 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
         );
     }
     // Walk back from the current catalog, newest receipt first.
-    let receipts = receipts(&dir);
 
     let mut entries: Vec<Vec<u8>> = vec![];
     let mut marks = vec![Mark {
@@ -767,7 +818,7 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
                 );
             }
         }
-        let Some((path, at)) = receipts.get(&revision) else {
+        let Some((path, at)) = receipt(&dir, revision) else {
             break format!("no receipt for revision {revision}");
         };
         let receipt: Value = match fs::read(path)
@@ -790,7 +841,7 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
         if let Err(e) = step(&mut state, &receipt, false) {
             break format!("receipt for revision {revision}: {e}");
         }
-        let entry = commit_entry(&receipt, revision, *at, &mut w)?;
+        let entry = commit_entry(&receipt, revision, at, &mut w)?;
         let entry = serde_json::to_vec(&entry).map_err(|e| e.to_string())?;
         since_mark += entry.len();
         entries.push(entry);

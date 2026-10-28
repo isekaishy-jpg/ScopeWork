@@ -205,6 +205,22 @@ pub(crate) const STORE_FORMAT: u32 = 8;
 pub(crate) fn promoted(project: &Project) -> bool {
     project.layout_version >= STORE_FORMAT
 }
+/// The part of a report acceptance covers once a project is promoted: from the research-content
+/// marker on (the research body and evidence), not the generated header. A text without the
+/// marker is covered whole.
+pub(crate) fn acceptance_text(text: &str) -> &str {
+    text.find(catalog_index::CONTENT_MARKER)
+        .map_or(text, |at| &text[at..])
+}
+/// The hash a report's acceptance compares in `project`: of its research body and evidence once
+/// promoted (so renames, moves and identity amendments leave it alone), of the whole file before.
+pub(crate) fn acceptance_hash(project: &Project, text: &str) -> String {
+    if promoted(project) {
+        hash(acceptance_text(text))
+    } else {
+        hash(text)
+    }
+}
 /// Raises `project` to [`DATA_FORMAT`] when it holds a data item, and to [`SPACE_FORMAT`] when
 /// it uses artifacts or spaces.
 pub(crate) fn raise_format(project: &mut Project) {
@@ -309,6 +325,8 @@ pub(crate) fn validate_inputs(p: &Project) -> Result<()> {
     }
     Ok(())
 }
+#[path = "annotate.rs"]
+pub(crate) mod annotate;
 #[path = "background.rs"]
 mod background;
 #[path = "catalog_batch.rs"]
@@ -1237,7 +1255,15 @@ impl Library {
             // Only the generated header changed: carry every acceptance over to the new text.
             let hashes: std::collections::HashMap<u64, (String, String)> = reports
                 .iter()
-                .map(|(id, original, rendered)| (*id, (hash(original), hash(rendered))))
+                .map(|(id, original, rendered)| {
+                    (
+                        *id,
+                        (
+                            acceptance_hash(&before, original),
+                            acceptance_hash(&before, rendered),
+                        ),
+                    )
+                })
                 .collect();
             let revisions: std::collections::HashMap<u64, u64> =
                 before.nodes.iter().map(|n| (n.id, n.revision)).collect();
@@ -1655,7 +1681,7 @@ impl Library {
     }
     pub fn effective_all(&self, p: usize) -> std::collections::HashMap<u64, Status> {
         catalog_index::Index::new(&self.projects[p])
-            .states_all_with(&self.dir(p), &|| self.hash_overrides())
+            .states_all_with(&self.dir(p), &|| self.hash_overrides(p))
     }
     pub fn required_nodes(&self, p: usize) -> std::collections::HashSet<u64> {
         catalog_index::Index::new(&self.projects[p]).required
@@ -1675,7 +1701,7 @@ impl Library {
             return n.status;
         }
         catalog_index::Index::new(&self.projects[p])
-            .states_with(&self.dir(p), [id], &|| self.hash_overrides())
+            .states_with(&self.dir(p), [id], &|| self.hash_overrides(p))
             .get(&id)
             .copied()
             .unwrap_or(Status::NotStarted)
@@ -1754,7 +1780,7 @@ impl Library {
             )
             .chain([id]);
         catalog_index::Index::new(project)
-            .states_with(&self.dir(p), inputs, &|| self.hash_overrides())
+            .states_with(&self.dir(p), inputs, &|| self.hash_overrides(p))
     }
     pub fn add(&mut self, p: usize, parent: u64, name: &str, rva: &str) -> Result<u64> {
         self.add_directed(p, parent, name, Placement::at(rva), None)
@@ -1927,7 +1953,7 @@ impl Library {
             .find(|n| n.id == id)
             .unwrap();
         n.status = Status::Complete;
-        n.accepted_hash = Some(hash(&report));
+        n.accepted_hash = Some(acceptance_hash(&before, &report));
         n.accepted_prerequisites = stamps;
         n.revision += 1;
         self.reopen_affected(p, id);
@@ -2567,7 +2593,14 @@ impl Library {
                     .ok()
                     .and_then(|rel| self.text(p, &rel).ok())
                     .unwrap_or_default();
-                (n.id, format!("{}:{}", n.revision, hash(&content)))
+                (
+                    n.id,
+                    format!(
+                        "{}:{}",
+                        n.revision,
+                        acceptance_hash(&self.projects[p], &content)
+                    ),
+                )
             })
             .collect()
     }

@@ -107,13 +107,14 @@ fn delta_with_after(j: &Journal) -> Result<(Value, Vec<u8>)> {
             (d.dependent, d.prerequisite)
         })?,
     );
-    Ok((
-        json!({"schema":1,"kind":"completed-catalog-delta","before":header(&j.before)?,"after":header(&j.after)?,"changes":changes,
+    let mut delta = json!({"schema":1,"kind":"completed-catalog-delta","before":header(&j.before)?,"after":header(&j.after)?,"changes":changes,
         "before_hash":before_hash,
         "after_hash":after_hash,
-        "edits":j.edits,"moves":j.moves,"dependencies":j.dependencies,"sidecars":j.sidecars,"ledger":j.ledger,"repin_ledger":j.repin_ledger,"directed_by":j.directed_by,"repin_ids":j.repin_ids}),
-        after_bytes,
-    ))
+        "edits":j.edits,"moves":j.moves,"dependencies":j.dependencies,"sidecars":j.sidecars,"ledger":j.ledger,"repin_ledger":j.repin_ledger,"directed_by":j.directed_by,"repin_ids":j.repin_ids});
+    if !j.repin_pairs.is_empty() {
+        delta["repin_pairs"] = json!(j.repin_pairs);
+    }
+    Ok((delta, after_bytes))
 }
 
 pub(super) fn pending_bytes(j: &Journal) -> Result<Vec<u8>> {
@@ -228,6 +229,7 @@ pub(super) fn read_pending(bytes: &[u8], current: &Project) -> Result<Journal> {
         repin_ledger: value["repin_ledger"].as_bool().unwrap_or(false),
         directed_by: value["directed_by"].as_str().map(str::to_string),
         repin_ids: serde_json::from_value(value["repin_ids"].clone()).unwrap_or_default(),
+        repin_pairs: serde_json::from_value(value["repin_pairs"].clone()).unwrap_or_default(),
     })
 }
 

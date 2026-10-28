@@ -602,6 +602,7 @@ impl Library {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         self.commit_or_stage(p, journal)?;
         Ok(moved)

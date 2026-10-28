@@ -108,7 +108,7 @@ impl Library {
     }
     /// Report hashes that differ from the files on disk for this view. Taken after the disk
     /// hashes, for the same reason as in `text_opt` (see `Index::states_with`).
-    pub(crate) fn hash_overrides(&self) -> HashMap<String, Option<String>> {
+    pub(crate) fn hash_overrides(&self, p: usize) -> HashMap<String, Option<String>> {
         let Some(overlay) = &self.overlay else {
             return HashMap::new();
         };
@@ -116,12 +116,17 @@ impl Library {
             Ok(guard) => guard,
             Err(_) => return HashMap::new(),
         };
+        let project = &self.projects[p];
         guard
             .iter()
             .filter(|(rel, _)| rel.ends_with(".md"))
-            .map(|(rel, text)| (rel.clone(), text.as_deref().map(hash)))
+            .map(|(rel, text)| {
+                let hash = text.as_deref().map(|t| acceptance_hash(project, t));
+                (rel.clone(), hash)
+            })
             .collect()
     }
+
     /// Starts collecting operations on project `p` into one commit.
     pub(crate) fn begin_staging(&mut self, p: usize) {
         self.staging = Some(Staged {
@@ -230,6 +235,7 @@ impl Library {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         if let Err(e) = catalog_batch::commit(&root, &mut self.projects[p], &j) {
             // Nothing staged may outlive a failed commit in memory.

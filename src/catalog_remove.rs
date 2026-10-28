@@ -447,6 +447,7 @@ impl Library {
             repin_ledger: false,
             directed_by: directed_by.map(str::to_string),
             repin_ids: vec![],
+            repin_pairs: vec![],
             moves,
             dependencies,
             sidecars,

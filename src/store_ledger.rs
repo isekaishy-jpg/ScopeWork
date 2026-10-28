@@ -242,16 +242,19 @@ fn last_state(store: &Path, entries: &[Value]) -> Result<Value> {
 /// catalog, with the writer's texts flushed. Problems are answered, never raised: the catalog's
 /// sync has already succeeded.
 pub(super) fn follow(w: &mut Writer, dir: &Path, store: &Path, revision: u64) -> Value {
-    match follow_inner(w, dir, store, revision) {
+    match follow_inner(w, dir, store, revision, None) {
         Ok(v) => v,
         Err(e) => json!({"error": e}),
     }
 }
+/// [`follow`], answering problems as errors; `by` names who made the change when Scopework
+/// made it (`research annotate`).
 pub(super) fn follow_inner(
     w: &mut Writer,
     dir: &Path,
     store: &Path,
     revision: u64,
+    by: Option<&str>,
 ) -> Result<Value> {
     let Some((bytes, file_sha)) = read_bytes(dir) else {
         return Ok(Value::Null);
@@ -277,6 +280,9 @@ pub(super) fn follow_inner(
         "rows_total": now.count("annotations"),
         "types_total": now.count("types"),
     });
+    if let Some(by) = by {
+        entry["by"] = by.into();
+    }
     let mut summary =
         json!({"rows_total": now.count("annotations"), "types_total": now.count("types")});
     let previous = match last {
@@ -284,11 +290,14 @@ pub(super) fn follow_inner(
         Some(_) => Some(last_state(store, &entries)?),
         None => None,
     };
+    // A change that rewrites most of a large ledger (a pin conversion) is smaller stored whole.
     let diffs = previous.as_ref().and_then(|p| {
         let rows = diff(&p["annotations"], &now.value["annotations"], row_key)?;
         let types = diff(&p["types"], &now.value["types"], type_key)?;
-        Some((p, rows, types))
+        let size = rows.to_string().len() + types.to_string().len();
+        (now.text.len() < 1 << 20 || size <= now.text.len() / 2).then_some((p, rows, types))
     });
+
     match diffs {
         Some((p, rows, types)) => {
             for (name, changes) in [("rows", &rows), ("types", &types)] {

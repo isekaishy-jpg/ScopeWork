@@ -103,6 +103,10 @@ pub(crate) enum Command {
     /// The project's store: its whole history beside the authoritative files.
     #[command(subcommand)]
     Store(StoreCommand),
+    /// Annotation rows (names, signatures, labels, data definitions) once a project is
+    /// promoted; before that the project tools' ledger is authoritative.
+    #[command(subcommand)]
+    Annotate(AnnotateCommand),
     /// Effective progress and records ready for review (not automatic completion).
     Status {
         project: String,
@@ -188,6 +192,47 @@ pub(crate) enum StoreCommand {
         #[arg(long)]
         expect_revision: u64,
     },
+}
+#[derive(Subcommand)]
+pub(crate) enum AnnotateCommand {
+    /// Set the row of a kind at an address, pinned to its report's current acceptance hash.
+    Set {
+        project: String,
+        #[arg(long)]
+        kind: String,
+        /// The address, hexadecimal.
+        #[arg(long)]
+        rva: String,
+        #[arg(long)]
+        value: String,
+        /// The report the row rests on (its path in the project).
+        #[arg(long)]
+        report: String,
+        #[arg(long)]
+        reason: String,
+        /// observed, specification-defined or inferred.
+        #[arg(long, default_value = "inferred")]
+        classification: String,
+    },
+    /// Remove the row of a kind at an address.
+    Remove {
+        project: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        rva: String,
+    },
+    /// Rows and types whose report pin no longer matches their report.
+    Stale { project: String },
+}
+impl AnnotateCommand {
+    fn project(&self) -> &str {
+        match self {
+            Self::Set { project, .. } | Self::Remove { project, .. } | Self::Stale { project } => {
+                project
+            }
+        }
+    }
 }
 impl StoreCommand {
     fn project(&self) -> &str {
@@ -1093,6 +1138,7 @@ fn project_of(command: &Command) -> Option<&str> {
         | Command::Journal { project, .. }
         | Command::Status { project, .. } => Some(project.as_str()),
         Command::Store(command) => Some(command.project()),
+        Command::Annotate(command) => Some(command.project()),
         Command::Impl(command) => Some(command.project()),
         Command::Pool(command) => Some(command.project()),
         Command::Wait { project, .. }
@@ -1373,6 +1419,35 @@ fn run(args: Args) -> Result<Value, String> {
     if let Command::History(HistoryCommand::Kinds) = &args.command {
         return Ok(crate::research::history::kinds_value());
     }
+    if let Command::Annotate(command) = &args.command {
+        use crate::research::annotate;
+        return match command {
+            AnnotateCommand::Set {
+                project,
+                kind,
+                rva,
+                value,
+                report,
+                reason,
+                classification,
+            } => annotate::set(
+                &root,
+                project,
+                &annotate::RowFields {
+                    kind,
+                    rva,
+                    value,
+                    report,
+                    reason,
+                    classification,
+                },
+            ),
+            AnnotateCommand::Remove { project, kind, rva } => {
+                annotate::remove(&root, project, kind, rva)
+            }
+            AnnotateCommand::Stale { project } => annotate::stale(&root, project),
+        };
+    }
     if let Command::Store(command) = &args.command {
         use crate::research::store;
         return match command {
@@ -1549,6 +1624,9 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
             unreachable!("journal commands are handled before opening a library")
         }
         Command::Store(_) => unreachable!("store commands are handled before opening a library"),
+        Command::Annotate(_) => {
+            unreachable!("annotate commands are handled before opening a library")
+        }
         Command::Import(_) => unreachable!("import commands handled before opening a library"),
         Command::Impl(command) => {
             let p = project(lib, command.project())?;
@@ -2738,6 +2816,7 @@ pub(crate) fn route(command: &Command) -> Route {
         | Command::Session
         | Command::Journal { .. }
         | Command::Store(_)
+        | Command::Annotate(_)
         | Command::Coordinator(_)
         | Command::Job(_)
         | Command::Tools(_)

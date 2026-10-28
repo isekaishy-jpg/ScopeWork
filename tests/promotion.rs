@@ -103,6 +103,29 @@ impl Fixture {
         let args = self.save_args(id, text);
         self.ok(&args.iter().map(String::as_str).collect::<Vec<_>>());
     }
+    fn complete(&self, id: &str) {
+        let token = self.ok(&["node", "show", "fixture", id])["completion_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        self.ok(&[
+            "node",
+            "complete",
+            "fixture",
+            id,
+            "--expect",
+            &token,
+            "--reviewed",
+        ]);
+    }
+    fn effective(&self, id: &str) -> Value {
+        self.ok(&["node", "show", "fixture", id])["effective_status"].clone()
+    }
+    fn ledger_rows(&self) -> Vec<Value> {
+        let path = self.project().join("tools/profiles/annotations.json");
+        let ledger: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        ledger["annotations"].as_array().unwrap().clone()
+    }
     fn receipts(&self) -> usize {
         fs::read_dir(
             self.project()
@@ -295,4 +318,160 @@ fn an_interrupted_promoted_commit_is_finished_by_the_next_open() {
         assert_eq!(f.revision().parse::<u64>().unwrap(), before + 1, "{point}");
         f.consistent();
     }
+}
+
+fn sha(text: &str) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(text.as_bytes()))
+}
+const F1: &str = "architectures/000001/000002/00001000/research.md";
+const F2: &str = "architectures/000001/000002/00002000/research.md";
+
+#[test]
+fn promotion_converts_acceptance_to_the_research_body_and_its_ledger_pins() {
+    let f = Fixture::new();
+    f.save("3", "Researched.");
+    f.complete("3");
+    f.save("4", "Also researched.");
+    f.complete("4");
+    // Function 4's report is edited outside Scopework: its acceptance is stale.
+    let f2 = f.project().join(F2);
+    let edited = fs::read_to_string(&f2)
+        .unwrap()
+        .replace("Also researched.", "Edited outside.");
+    fs::write(&f2, edited).unwrap();
+    assert_eq!(f.effective("3"), "Complete");
+    assert_ne!(f.effective("4"), "Complete");
+    let f1_text = fs::read_to_string(f.project().join(F1)).unwrap();
+    let marker = f1_text.find("<!-- research-content -->").unwrap();
+    f.ledger(json!([
+        {"kind": "function-name", "rva": "0x00001000", "value": "F1", "report": F1, "report_sha256": sha(&f1_text), "reason": "r"},
+        {"kind": "plate-comment", "rva": "0x00002000", "value": "Note", "report": F2, "report_sha256": "0".repeat(64), "reason": "r"},
+    ]));
+
+    let promoted = f.promote();
+    assert_eq!(promoted["acceptances_converted"], 1, "{promoted}");
+    assert_eq!(promoted["acceptances_stale"], 1, "{promoted}");
+    assert_eq!(f.effective("3"), "Complete");
+    assert_ne!(f.effective("4"), "Complete");
+    let rows = f.ledger_rows();
+    assert_eq!(
+        rows[0]["report_sha256"],
+        sha(&f1_text[marker..]),
+        "the pin follows the mapping"
+    );
+    assert_eq!(
+        rows[1]["report_sha256"],
+        "0".repeat(64),
+        "a stale pin stays stale"
+    );
+    let kept: Value = serde_json::from_slice(
+        &fs::read(f.project().join("store/promotion/acceptance.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(kept["reports"].as_array().unwrap().len() >= 5, "{kept}");
+
+    // A rename rewrites function 3's header, not its research: it stays complete, and its pin
+    // still matches.
+    let r: u64 = f.revision().parse().unwrap();
+    let batch = f.file(
+        "rename.json",
+        &json!({"schema": 1, "binary": "synthetic", "expect_revision": r,
+                "update": [{"id": 3, "name": "F1Renamed"}]})
+        .to_string(),
+    );
+    f.ok(&["node", "batch", "fixture", "--file", &batch]);
+    assert!(
+        fs::read_to_string(f.project().join(F1))
+            .unwrap()
+            .contains("# F1Renamed")
+    );
+    assert_eq!(f.effective("3"), "Complete");
+    let stale = f.ok(&["annotate", "stale", "fixture"]);
+    assert_eq!(stale["acceptance"], "body");
+    assert_eq!(stale["stale"], 1, "{stale}");
+    assert_eq!(stale["listed"][0]["report"], F2);
+
+    // Annotations change through Scopework, each change recorded in the store with its author.
+    let set = f.ok(&[
+        "annotate",
+        "set",
+        "fixture",
+        "--kind",
+        "label",
+        "--rva",
+        "2000",
+        "--value",
+        "Table",
+        "--report",
+        F2,
+        "--reason",
+        "Seen in the dump.",
+    ]);
+    assert_eq!(set["change"]["set"]["rva"], "0x00002000", "{set}");
+    assert_eq!(set["store"]["rows"]["added"], 1, "{set}");
+    let history = f.ok(&["store", "annotations", "fixture", "2000", "--kind", "label"]);
+    assert_eq!(history["current"][0]["value"], "Table", "{history}");
+    f.ok(&[
+        "annotate",
+        "remove",
+        "fixture",
+        "--kind",
+        "plate-comment",
+        "--rva",
+        "0x2000",
+    ]);
+    assert!(
+        f.fails(&[
+            "annotate",
+            "remove",
+            "fixture",
+            "--kind",
+            "plate-comment",
+            "--rva",
+            "2000"
+        ])
+        .contains("No plate-comment row")
+    );
+    assert!(
+        f.fails(&[
+            "annotate",
+            "set",
+            "fixture",
+            "--kind",
+            "label",
+            "--rva",
+            "2000",
+            "--value",
+            "X",
+            "--report",
+            "nowhere.md",
+            "--reason",
+            "r",
+        ])
+        .contains("not a record's report")
+    );
+    assert_eq!(f.ok(&["annotate", "stale", "fixture"])["stale"], 0);
+
+    // A tool's own rewrite is recorded at the next sync.
+    let mut rows = f.ledger_rows();
+    rows.push(json!({"kind": "label", "rva": "0x00003000", "value": "ByTool", "reason": "tool"}));
+    f.ledger(json!(rows));
+    let sync = f.ok(&["store", "sync", "fixture"]);
+    assert_eq!(sync["ledger"]["rows"]["added"], 1, "{sync}");
+    f.consistent();
+}
+
+#[test]
+fn annotations_change_through_the_project_tools_until_promotion() {
+    let f = Fixture::new();
+    let refused = f.fails(&[
+        "annotate", "set", "fixture", "--kind", "label", "--rva", "1000", "--value", "X",
+        "--report", F1, "--reason", "r",
+    ]);
+    assert!(refused.contains("not_promoted"), "{refused}");
+    f.ledger(json!([{"kind": "function-name", "rva": "0x00001000", "value": "F1", "report": F1, "report_sha256": "0".repeat(64), "reason": "r"}]));
+    let stale = f.ok(&["annotate", "stale", "fixture"]);
+    assert_eq!(stale["acceptance"], "whole_file");
+    assert_eq!(stale["stale"], 1);
 }

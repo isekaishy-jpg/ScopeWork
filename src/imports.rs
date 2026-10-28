@@ -907,6 +907,7 @@ fn append_publication(
         repin_ledger: false,
         directed_by: None,
         repin_ids: vec![],
+        repin_pairs: vec![],
     };
     let (delta, _) = catalog_batch::pending_delta(&j)?;
     store::append_commit(root, &delta, bytes)

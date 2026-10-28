@@ -9,6 +9,8 @@ pub(super) const MARKER_PREFIX: &str = "<!-- research-";
 
 /// A per-operation index. The serialized vector remains the explicit sibling order.
 pub(super) struct Index<'a> {
+    /// Acceptance covers the research body and evidence (a promoted project), not whole files.
+    promoted: bool,
     pub nodes: HashMap<u64, &'a Node>,
     pub children: HashMap<u64, Vec<u64>>,
     pub paths: HashMap<u64, String>,
@@ -65,6 +67,7 @@ impl<'a> Index<'a> {
             }
         }
         Self {
+            promoted: promoted(project),
             nodes,
             children,
             paths,
@@ -146,7 +149,8 @@ impl<'a> Index<'a> {
         }
         let ids: Vec<u64> = wanted.into_iter().collect();
         let rels: Vec<&str> = ids.iter().map(|id| self.paths[id].as_str()).collect();
-        let hashes = report_hashes::hashes(dir, &rels);
+        let hashes = report_hashes::hashes(dir, &rels, self.promoted);
+
         // Read after hashing: a text replaced meanwhile is already in the caller's overrides.
         let overrides = overrides();
         ids.into_iter()

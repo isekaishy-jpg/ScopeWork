@@ -166,6 +166,10 @@ pub(super) struct Journal {
     /// With `repin_ledger`: re-pin only these records' edits (mechanical ones); empty means all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) repin_ids: Vec<u64>,
+    /// Ledger pins to replace, old hash with new, when the catalog commits (promotion's
+    /// acceptance conversion).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) repin_pairs: Vec<(String, String)>,
 }
 
 use super::edit_tokens::parts;
@@ -424,10 +428,21 @@ fn finish(
             .edits
             .iter()
             .filter(|e| j.repin_ids.is_empty() || j.repin_ids.contains(&e.id))
-            .filter_map(|e| Some((hash(e.before.as_ref()?), hash(&e.after))))
+            .filter_map(|e| {
+                let before = e.before.as_ref()?;
+                Some((
+                    acceptance_hash(&j.after, before),
+                    acceptance_hash(&j.after, &e.after),
+                ))
+            })
             .collect();
         ledger::repin(root, &pairs)?;
     }
+    if !j.repin_pairs.is_empty() {
+        // Replaced pins are not found again, so applying this twice changes nothing more.
+        ledger::repin(root, &j.repin_pairs)?;
+    }
+
     let ledger_rows = if repath_ledger {
         let moved: Vec<(String, String)> = j
             .moves
@@ -645,6 +660,7 @@ impl Library {
             repin_ledger: false,
             directed_by: directed_by.map(str::to_string),
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -718,6 +734,8 @@ pub(super) struct MetadataCommit {
     pub(super) repin_ledger: bool,
     /// The human's instruction, for a change to pooled records.
     pub(super) directed_by: Option<String>,
+    /// Ledger pins to replace (see `Journal::repin_pairs`).
+    pub(super) repin_pairs: Vec<(String, String)>,
 }
 impl Library {
     pub(super) fn commit_report(
@@ -775,6 +793,7 @@ impl Library {
             changes,
             repin_ledger,
             directed_by,
+            repin_pairs,
         } = commit;
         let index = catalog_index::Index::new(&before);
         let edits = reports
@@ -802,6 +821,7 @@ impl Library {
             repin_ledger,
             directed_by,
             repin_ids: vec![],
+            repin_pairs,
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -924,6 +944,7 @@ impl Library {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         self.commit_or_stage(p, journal)?;
         Ok(changed)
@@ -1438,7 +1459,16 @@ impl Library {
         let accepted: HashMap<u64, (String, String)> = edits
             .iter()
             .filter(|e| mechanical.contains(&e.id))
-            .filter_map(|e| Some((e.id, (hash(e.before.as_ref()?), hash(&e.after)))))
+            .filter_map(|e| {
+                let before_text = e.before.as_ref()?;
+                Some((
+                    e.id,
+                    (
+                        acceptance_hash(&before, before_text),
+                        acceptance_hash(&before, &e.after),
+                    ),
+                ))
+            })
             .collect();
         let old_revisions: HashMap<u64, u64> =
             before.nodes.iter().map(|n| (n.id, n.revision)).collect();
@@ -1528,6 +1558,7 @@ impl Library {
                 ids.sort_unstable();
                 ids
             },
+            repin_pairs: vec![],
             moves,
             dependencies: dependencies.into_iter().collect(),
             sidecars,
@@ -2037,6 +2068,7 @@ mod tests {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         atomic(
             &receipt.join("journal.json"),
@@ -2096,6 +2128,7 @@ mod tests {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         let bytes = journal_history::pending_bytes(&j).unwrap();
         assert!(
@@ -2124,6 +2157,7 @@ mod tests {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         let bytes = journal_history::pending_bytes(&deletion).unwrap();
         assert!(
@@ -2154,6 +2188,7 @@ mod tests {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         let bytes = journal_history::pending_bytes(&rearranged).unwrap();
         for current in [&rearranged.before, &rearranged.after] {
@@ -2183,6 +2218,7 @@ mod tests {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         let (delta, bytes) = journal_history::pending_delta(&j).unwrap();
         assert_eq!(bytes, catalog_bytes(&after).unwrap());
@@ -2222,6 +2258,7 @@ mod tests {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         let (a, _) = journal_history::pending_delta(&journal(&first, &second)).unwrap();
         journal_history::committed(&second, a["after_hash"].as_str().unwrap());
@@ -2252,6 +2289,7 @@ mod tests {
             repin_ledger: false,
             directed_by: None,
             repin_ids: vec![],
+            repin_pairs: vec![],
         };
         let receipt = lib.dir(0).join(format!(
             "tools/workspaces/catalog-transactions-v4/revision-{}/journal.json",

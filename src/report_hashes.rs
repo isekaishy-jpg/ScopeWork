@@ -20,6 +20,8 @@ use std::{
 };
 
 const PERSISTED: &str = "tools/workspaces/scopework-cache/report-hashes.json";
+/// The same for body hashes ([`acceptance_text`]), which promoted projects accept by.
+const PERSISTED_BODY: &str = "tools/workspaces/scopework-cache/report-body-hashes.json";
 /// A modification time this close to (or after) the hashing moment is not trusted.
 const RACY_NS: u64 = 2_000_000_000;
 /// Evaluations smaller than this skip the persisted copy and the worker pool.
@@ -121,11 +123,15 @@ fn metadata(path: &Path) -> Option<(u64, u64)> {
         .map_or(0, |d| d.as_nanos() as u64);
     Some((meta.len(), mtime))
 }
-fn hash_file(path: &Path) -> Option<String> {
+fn hash_file(path: &Path, body: bool) -> Option<String> {
     let bytes = fs::read(path).ok()?;
     // Status hashes the report as text; a non-UTF-8 file is never a valid accepted report.
-    std::str::from_utf8(&bytes).ok()?;
-    Some(sha256_hex(&bytes))
+    let text = std::str::from_utf8(&bytes).ok()?;
+    Some(if body {
+        hash(acceptance_text(text))
+    } else {
+        sha256_hex(&bytes)
+    })
 }
 
 /// The shared runtime's Low workers for bulk passes, or `None` (serial) if it cannot start.
@@ -172,10 +178,13 @@ fn store_persisted<T: serde::Serialize>(path: &Path, value: &HashMap<String, T>)
     }
 }
 
-/// SHA-256 of each report (relative to `dir`), or `None` when missing or not UTF-8.
-pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<String>> {
+/// SHA-256 of each report (relative to `dir`), or `None` when missing or not UTF-8; with
+/// `body`, of its research body and evidence ([`acceptance_text`]).
+pub(super) fn hashes(dir: &Path, reports: &[&str], body: bool) -> HashMap<String, Option<String>> {
     let bulk = reports.len() >= BULK;
-    let persisted_path = dir.join(PERSISTED);
+    let persisted_path = dir.join(if body { PERSISTED_BODY } else { PERSISTED });
+    // Body hashes are remembered under their own key, beside the whole file's.
+    let key = |path: PathBuf| if body { path.join("#body") } else { path };
     let persisted: HashMap<String, Stamp> = if bulk {
         load_persisted(&persisted_path)
     } else {
@@ -190,7 +199,7 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
         entry.1 = metadata(&dir.join(entry.0))
     });
     for (rel, meta) in stats {
-        let path = dir.join(rel);
+        let path = key(dir.join(rel));
         let Some((size, mtime)) = meta else {
             out.insert(rel.to_string(), None);
             continue;
@@ -215,7 +224,7 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
     let hashed_ns = now_ns();
     let parallel = runtime.filter(|_| misses.len() >= BULK);
     for_each(&mut misses, parallel, 32, |miss| {
-        miss.3 = hash_file(&dir.join(&miss.0))
+        miss.3 = hash_file(&dir.join(&miss.0), body)
     });
     let mut updated = persisted;
     for (rel, size, mtime, hash) in misses {
@@ -225,7 +234,8 @@ pub(super) fn hashes(dir: &Path, reports: &[&str]) -> HashMap<String, Option<Str
             hashed_ns,
             hash: hash.clone(),
         };
-        remember(dir.join(&rel), stamp.clone());
+        remember(key(dir.join(&rel)), stamp.clone());
+
         if bulk {
             updated.insert(rel.clone(), stamp);
         }
@@ -368,14 +378,14 @@ mod tests {
         fs::write(dir.join("bad.md"), [0xffu8, 0xfe]).unwrap();
         let mut rels: Vec<&str> = names.iter().map(String::as_str).collect();
         rels.extend(["bad.md", "missing.md"]);
-        let first = hashes(&dir, &rels);
+        let first = hashes(&dir, &rels, false);
         for (i, name) in names.iter().enumerate() {
             assert_eq!(first[name], Some(sha(&format!("report {i}"))));
         }
         assert_eq!(first["bad.md"], None, "non-UTF-8 reports never hash");
         assert_eq!(first["missing.md"], None);
         assert!(dir.join(PERSISTED).is_file(), "bulk evaluations persist");
-        assert_eq!(hashes(&dir, &rels), first);
+        assert_eq!(hashes(&dir, &rels, false), first);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -386,11 +396,11 @@ mod tests {
         fs::write(&path, "aaaa").unwrap();
         let mtime = SystemTime::now();
         set_mtime(&path, mtime);
-        assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("aaaa")));
+        assert_eq!(hashes(&dir, &["r.md"], false)["r.md"], Some(sha("aaaa")));
         // Same size and the same modification time, but modified within the racy window.
         fs::write(&path, "bbbb").unwrap();
         set_mtime(&path, mtime);
-        assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("bbbb")));
+        assert_eq!(hashes(&dir, &["r.md"], false)["r.md"], Some(sha("bbbb")));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -451,14 +461,14 @@ mod tests {
         fs::write(&path, "aaaa").unwrap();
         let old = SystemTime::now() - Duration::from_secs(60);
         set_mtime(&path, old);
-        assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("aaaa")));
+        assert_eq!(hashes(&dir, &["r.md"], false)["r.md"], Some(sha("aaaa")));
         // Identical size and time well before the hash was taken: the stamp is trusted,
         // which is the point of the cache (a content change always moves size or time).
         fs::write(&path, "bbbb").unwrap();
         set_mtime(&path, old);
-        assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("aaaa")));
+        assert_eq!(hashes(&dir, &["r.md"], false)["r.md"], Some(sha("aaaa")));
         fs::write(&path, "bbbbb").unwrap();
-        assert_eq!(hashes(&dir, &["r.md"])["r.md"], Some(sha("bbbbb")));
+        assert_eq!(hashes(&dir, &["r.md"], false)["r.md"], Some(sha("bbbbb")));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -482,8 +492,8 @@ mod tests {
         let dir_for_thread = dir.clone();
         let kept = std::thread::spawn(move || {
             let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            assert_eq!(hashes(&dir_for_thread, &refs).len(), refs.len());
-            assert_eq!(hashes(&dir_for_thread, &refs).len(), refs.len());
+            assert_eq!(hashes(&dir_for_thread, &refs, false).len(), refs.len());
+            assert_eq!(hashes(&dir_for_thread, &refs, false).len(), refs.len());
             MEMORY.with(|cell| cell.borrow().is_some())
         })
         .join()
@@ -501,11 +511,11 @@ mod tests {
             retain_on_this_thread();
             let refs: Vec<&str> = names.iter().map(String::as_str).collect();
             for _ in 0..5 {
-                hashes(&dir_for_thread, &refs);
+                hashes(&dir_for_thread, &refs, false);
             }
             // A changed report replaces its entry.
             fs::write(dir_for_thread.join(&names[0]), "changed").unwrap();
-            hashes(&dir_for_thread, &refs);
+            hashes(&dir_for_thread, &refs, false);
             MEMORY
                 .with(|cell| {
                     let slot = cell.borrow();
@@ -528,7 +538,7 @@ mod tests {
         let (cached, pending) = std::thread::spawn(move || {
             retain_on_this_thread();
             let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            hashes(&dir_for_thread, &refs);
+            hashes(&dir_for_thread, &refs, false);
             let (cleanup, cached) = MEMORY
                 .with(|cell| {
                     let slot = cell.borrow();
@@ -543,5 +553,40 @@ mod tests {
         assert_eq!(cached, 8);
         assert_eq!((pending.pending_records, pending.in_flight_records), (0, 0));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn body_hashes_ignore_the_generated_header() {
+        let dir = workspace();
+        let body = "<!-- research-content -->
+Understanding.
+<!-- research-evidence -->
+Evidence.";
+        fs::write(
+            dir.join("a.md"),
+            format!(
+                "# Old name
+
+{body}"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("b.md"),
+            format!(
+                "# New name
+
+{body}"
+            ),
+        )
+        .unwrap();
+        let whole = hashes(&dir, &["a.md", "b.md"], false);
+        assert_ne!(whole["a.md"], whole["b.md"]);
+        let bodies = hashes(&dir, &["a.md", "b.md"], true);
+        assert_eq!(bodies["a.md"], Some(sha(body)));
+        assert_eq!(bodies["a.md"], bodies["b.md"]);
+        // Each scope keeps its own stamp: asking for one does not answer the other.
+        assert_eq!(hashes(&dir, &["a.md"], false)["a.md"], whole["a.md"]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

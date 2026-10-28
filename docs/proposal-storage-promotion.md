@@ -1,6 +1,6 @@
 # Proposal: the storage backend's remaining stages
 
-Status: proposed 2026-10-28. Design: [design-storage-promotion.md](design-storage-promotion.md). Research: [research-storage-stage2.md](research-storage-stage2.md).
+Status: implemented 2026-10-28 (`b135e11`, `56f779a`, `c59176f`, `c9f823e`, and the promotion commit). Design: [design-storage-promotion.md](design-storage-promotion.md). Research: [research-storage-stage2.md](research-storage-stage2.md).
 
 ## Approach
 
@@ -35,3 +35,18 @@ As in the design's acceptance criteria. In particular:
 - **Before promoting `3-3-5a`:** the agents' tools move their staleness check to `research annotate stale` or body hashes (user-directed), and `store conflicts` reports none.
 - **Later stages, each with its own proposal:** readers loading the store instead of `project.json`, deleting receipts the store has absorbed after promotion, cross-project references, and the GUI entering artifacts and spaces.
 - **If an increment stalls,** the earlier ones stand on their own: 1–3 change nothing on the commit path, and 4 is inert until a project is promoted by 5.
+
+## Validation (2026-10-28)
+
+- Tests: `tests/store.rs` (ledger follower, conflicts, compaction), `tests/spaces.rs`, `tests/promotion.rs`, the coordinator's ledger follow in `tests/coordinator.rs`, and a body-hash unit test. The full suite, Clippy (`-D warnings`) and fmt are clean; three tests with timing assumptions fail now and then under disk load and pass alone (recorded in TODO.md).
+- **Copies of `3-3-5a`** (copied from the live home, read only), release build:
+
+  | Check | Result |
+  |---|---|
+  | Ledger follower | First sync stores the 53.8 MB ledger once (3.3 MB compressed); a change records only its rows; `verify` replays the chain; 10 name conflicts and 24,652 rows at addresses without a record found |
+  | Compaction | Logs 79 MB to 7.9 MB, store 106 MB to 38 MB; history, show and catalog answers byte for byte unchanged; verify passes over 37,910 commits |
+  | Incremental sync | A one-commit sync took 12.8 s because every receipt's metadata was read; receipts are now looked up by revision: 1 s |
+  | Promotion rehearsal | After resolving 7 name conflicts in the copy: 5,466 acceptances converted, none stale; all 31,514 records keep their effective status; the same 38 ledger pins stale before and after; verify passes; 25 s |
+  | Commits after promotion | About 1 s with process start (as long as a read on that machine) once the append reads only the active segment (it read every log first: 2.8 s); no receipt written; history answers from the store |
+
+- **Differences from the design** are recorded in it under "as built": the pending journal stays the commit point for promoted projects; the dispatch is a branch, not a trait; the ledger file stays the annotations' working copy, with Scopework's changes recorded at once and tools' changes at the next sync; large ledger rewrites are stored whole; compaction counts small pack frames, not files; tidy and journal maintenance keep working on promoted projects.
