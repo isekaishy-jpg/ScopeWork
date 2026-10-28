@@ -347,6 +347,19 @@ fn an_address_is_unique_per_space_and_spaced_records_get_their_own_folders() {
         .to_string();
     let deps = f.ok(&["deps", "set", "fixture", "3", "--expect", &token, "S1:1000"]);
     assert!(deps.to_string().contains(&table_id), "{deps}");
+    // Ledger rows name default-space addresses: the function at 0x1000, not the table there.
+    let ledger = f.project().join("tools/profiles/annotations.json");
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    fs::write(
+        &ledger,
+        json!({"schema": 1, "types": [], "annotations": [
+            {"kind": "function-name", "rva": "0x00001000", "value": "F", "reason": "r"},
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let conflicts = f.ok(&["store", "conflicts", "fixture"]);
+    assert_eq!(conflicts["conflicts"], 0, "{conflicts}");
     // A space with records cannot go.
     let r = f.revision();
     assert!(

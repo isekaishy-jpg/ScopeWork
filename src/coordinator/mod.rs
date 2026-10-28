@@ -733,9 +733,18 @@ impl Server {
             .map_or(u64::MAX, |s| s.project.revision);
         let dir = self.root.join(&state.id);
         let ledger = research::store::ledger_stamp(&dir);
-        let result = research::with_lock_wait(Duration::from_secs(10), || {
-            research::store::sync_catalog(&self.root, &state.id)
-        });
+        // A promoted project's commits write its store themselves: only the ledger is followed.
+        let promoted = state
+            .snapshot
+            .read()
+            .is_ok_and(|s| research::promoted(&s.project));
+        let result = if promoted {
+            Ok(Value::Null)
+        } else {
+            research::with_lock_wait(Duration::from_secs(10), || {
+                research::store::sync_catalog(&self.root, &state.id)
+            })
+        };
         if !result.as_ref().is_err_and(|e| e.starts_with("store_busy")) {
             state.store_revision.store(revision, Ordering::Release);
             if let Ok(mut error) = state.store_error.lock() {

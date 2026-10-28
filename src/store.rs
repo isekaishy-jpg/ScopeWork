@@ -51,6 +51,8 @@ fn segment_bytes() -> usize {
 const PACK_BYTES: usize = 4 << 20;
 /// A pack file longer than this is closed and the next one started.
 const PACK_FILE_BYTES: u64 = 64 << 20;
+/// Closed segment logs found whole, by size and modification time (see `Writer::check_closed`).
+const CLOSED: &str = "closed.json";
 /// A sync that leaves more small pack frames than this compacts the store.
 const MAX_SMALL_FRAMES: usize = 64;
 /// [`MAX_SMALL_FRAMES`]; debug builds take `SCOPEWORK_STORE_MAX_SMALL_FRAMES`, so tests reach
@@ -334,6 +336,12 @@ impl Writer {
     /// last pack and the ledger log truncated. Unlike [`repair`](Self::repair) it reads only the
     /// active log, so a commit's cost does not grow with the history.
     fn active(&self) -> Result<Segment> {
+        self.active_or_none()?.ok_or_else(|| {
+            "store_mismatch: the store has no segment; run research store verify".into()
+        })
+    }
+    /// [`active`](Self::active), or none for a store with no segment yet (at `init`).
+    fn active_or_none(&self) -> Result<Option<Segment>> {
         for entry in fs::read_dir(&self.store)
             .map_err(|e| e.to_string())?
             .flatten()
@@ -364,7 +372,8 @@ impl Writer {
                 .filter(|v| v["type"] == "start");
             match start {
                 Some(start) if checkpoint.is_file() => {
-                    return Ok(Segment {
+                    self.check_closed(seq)?;
+                    return Ok(Some(Segment {
                         seq,
                         log,
                         checkpoint,
@@ -372,7 +381,7 @@ impl Writer {
                         frames,
                         end,
                         start,
-                    });
+                    }));
                 }
                 // A new segment whose creation was interrupted, as `repair` removes it.
                 _ => {
@@ -381,7 +390,58 @@ impl Writer {
                 }
             }
         }
-        Err("store_mismatch: the store has no segment; run research store verify".into())
+        Ok(None)
+    }
+    /// Refuses a store whose closed segments (those before `active`) are damaged, as `repair`
+    /// does, without reading them all each time: a log found whole is remembered by its size
+    /// and modification time in `closed.json`, and read again only when they change. Damage
+    /// that leaves both unchanged is found by `store verify`.
+    fn check_closed(&self, active: u64) -> Result<()> {
+        let path = self.store.join(CLOSED);
+        let mut known: HashMap<String, (u64, u128)> = fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        let mut changed = false;
+        for (seq, log) in segment_logs(&self.store) {
+            if seq >= active {
+                continue;
+            }
+            let meta = fs::metadata(&log).map_err(|e| e.to_string())?;
+            let stamp = (
+                meta.len(),
+                meta.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos()),
+            );
+            let name = log.file_name().unwrap().to_string_lossy().into_owned();
+            if known.get(&name) == Some(&stamp) {
+                continue;
+            }
+            let bytes = read_log(&log)?;
+            let (frames, end) = frames(&bytes);
+            let started = frames
+                .first()
+                .and_then(|r| serde_json::from_slice::<Value>(&bytes[r.clone()]).ok())
+                .is_some_and(|v| v["type"] == "start");
+            if end != End::Clean || !started || !segment_files(&self.store, seq).1.is_file() {
+                return Err(format!(
+                    "store_damaged: {} is not whole; run research store verify",
+                    log.display()
+                ));
+            }
+            known.insert(name, stamp);
+            changed = true;
+        }
+        if changed {
+            known.retain(|name, _| self.store.join(name).is_file());
+            // Best effort: losing it only means reading the closed logs again.
+            if let Ok(bytes) = serde_json::to_vec(&known) {
+                let _ = atomic(&path, &bytes);
+            }
+        }
+        Ok(())
     }
     /// [`open`](Self::open), waiting up to `wait` for another process writing the store.
     fn open_waiting(store: &Path, wait: std::time::Duration) -> Result<Self> {
@@ -726,7 +786,7 @@ pub(crate) fn sync_catalog(root: &Path, id: &str) -> Result<Value> {
 pub(crate) fn follow_ledger(root: &Path, id: &str) -> Result<Value> {
     let (dir, store) = open_store(root, id)?;
     let mut w = Writer::open(&store)?;
-    w.repair()?;
+    w.active_or_none()?;
     let (revision, _) = current(&dir)?;
     ledger::follow_inner(&mut w, &dir, &store, revision, None)
 }
@@ -734,7 +794,7 @@ pub(crate) fn follow_ledger(root: &Path, id: &str) -> Result<Value> {
 pub(crate) fn record_ledger(root: &Path, id: &str, by: &str) -> Result<Value> {
     let (dir, store) = open_store(root, id)?;
     let mut w = Writer::open_waiting(&store, std::time::Duration::from_secs(30))?;
-    w.repair()?;
+    w.active_or_none()?;
     let (revision, _) = current(&dir)?;
     ledger::follow_inner(&mut w, &dir, &store, revision, Some(by))
 }
@@ -752,12 +812,10 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
         ));
     }
     let mut w = Writer::open(&store)?;
-    w.repair()?;
-    let (existing, _) = segments(&store)?;
-    let head = match existing.last() {
-        Some(segment) => Some(segment.head()?),
-        None => None,
-    };
+    // Only the active segment is read, so a sync's cost does not grow with the history;
+    // `store verify` checks the closed segments.
+    let last = w.active_or_none()?;
+    let head = last.as_ref().map(Segment::head).transpose()?;
 
     // The current catalog, read under the project's shared lock so no commit is half written.
     let bytes = {
@@ -890,7 +948,7 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
     // Texts first, so every entry written below finds its texts.
     w.flush_texts()?;
 
-    let mut next_seq = existing.last().map_or(1, |s| s.seq + 1);
+    let mut next_seq = last.as_ref().map_or(1, |s| s.seq + 1);
     let mut started_segments = vec![];
     let mut write_segment = |mark: &Mark, follows: Value| -> Result<PathBuf> {
         let (log, checkpoint) = segment_files(&store, next_seq);
@@ -931,7 +989,7 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
         used.push(&marks[0]);
     }
     let mut log = if connected {
-        existing.last().map(|s| s.log.clone())
+        last.as_ref().map(|s| s.log.clone())
     } else {
         None
     };

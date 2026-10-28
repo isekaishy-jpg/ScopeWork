@@ -481,7 +481,8 @@ pub fn conflicts(root: &Path, project: &str) -> Result<Value> {
     let leaves: HashMap<u64, &Node> = catalog
         .nodes
         .iter()
-        .filter(|n| n.kind.is_leaf())
+        // Ledger rows name addresses in the default space.
+        .filter(|n| n.kind.is_leaf() && n.space.is_none())
         .filter_map(|n| Some((u64::from(n.rva?), n)))
         .collect();
     let mut found = vec![];

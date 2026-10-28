@@ -66,6 +66,7 @@ Node.space?        (absent: the project's default space, as today)
   - **Closed logs:** a segment's log is closed once a later segment exists. Compaction writes it as `segment-N.logz` (one zlib stream of the same frames) and deletes the `.log`. Readers accept either; the active segment is never compressed.
 - Sync runs compaction by itself when the store holds more than 64 small pack frames (frames with less than 4 MB of texts): syncs append a frame to the last pack file each time, so frames, not files, are what build up and what every reader indexes.
 - `verify` checks compressed logs exactly as plain ones.
+- **Reads per sync and commit (found in review).** A sync, a promoted commit and a ledger record read only the active segment's log, so their cost does not grow with the history. Closed logs are still refused when damaged, as in the first stage, by size and modification time: a log found whole is remembered in `closed.json` and read again only when either changes.
 
 ## 4. The backend interface and the promoted commit path
 

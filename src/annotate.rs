@@ -63,7 +63,10 @@ fn change(
             &path,
             &serde_json::to_vec_pretty(&ledger).map_err(|e| e.to_string())?,
         )?;
-        let recorded = store::record_ledger(root, id, &caller())?;
+        // The change is written; a store that cannot record it now records it at the next
+        // sync, without the author.
+        let recorded =
+            store::record_ledger(root, id, &caller()).unwrap_or_else(|e| json!({"error": e}));
         return Ok(json!({"project": id, "change": answer, "store": recorded}));
     }
     Err("busy: the ledger kept changing while it was edited; retry".into())
