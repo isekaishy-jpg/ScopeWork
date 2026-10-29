@@ -14,9 +14,9 @@ Each project owns a complete hierarchy:
     research.md
     <chunk-id>/
       research.md
-      <RVA>/
+      <RVA>/                        # a function; a data item's folder is D<RVA>, and S<n>- prefixes either in another address space
         research.md
-        data/                       # created when used: this function's captures, exports and raw evidence
+        data/                       # created when used: this record's captures, exports and raw evidence
   tools/
     README.md
     profiles/
@@ -28,7 +28,11 @@ Each project owns a complete hierarchy:
     scratch/                    # shared temporary working data
 ```
 
-Select a parent and create its child: App -> Architecture -> Chunk -> Function. Architectures are categories such as Asset Loading or Models. Enter the exact binary build/hash and image base before adding functions. Function identity is an RVA within that project's binary. A function cannot be duplicated elsewhere in the same project. Different binaries require separate projects.
+Select a parent and create its child: App -> Architecture -> Chunk -> Function or data item. Architectures are categories such as Asset Loading or Models. Enter the exact binary build/hash and image base before adding functions. Function identity is an RVA within that project's binary. A function cannot be duplicated elsewhere in the same project. Different binaries require separate projects.
+
+**Data items** (globals, tables, strings, vtables) sit in a chunk beside its functions, with a start RVA and a length in bytes, and are researched like functions: their own report, evidence to complete, prerequisites to and from functions, flags, claims and pools. An address names at most one record of either kind. Use **Add data item** on a chunk's Organize tab, or `node create --length`.
+
+**Artifacts and address spaces.** A project can name its input files (disk images, files extracted from them, ROMs) with their SHA-256, and add address spaces besides the default one: offsets in one file (for data disks with no program of their own), another loaded image, or another processor. A record placed in a space is unique by its address within that space. These are entered with the [CLI](cli.md#artifacts-and-address-spaces).
 
 The editor updates each canonical Markdown file in place. Parent reports link their direct source reports: architecture to chunks, chunks to function files. Function evidence remains in the function file instead of being copied into parallel reports. Parent synthesis is authored in the parent's own report; linking children alone does not complete it.
 
@@ -43,6 +47,7 @@ The inventory covers the whole binary even when the label describes a selected r
 Research uses fixed assignments within expanding levels of understanding:
 
 - **Function:** Establish its behavior, inputs, outputs, side effects, boundaries and connections with evidence.
+- **Data item:** Explain its layout, values, meaning and users, supported by evidence.
 - **Chunk:** Synthesize completed function reports to explain the chunk's behavior, control flow, data flow and external interactions.
 - **Architecture/category:** Synthesize completed chunk reports to explain subsystem behavior and interfaces.
 - **App:** Synthesize completed architecture reports to fulfill the project's declared research scope and explain relevant subsystem interactions.
@@ -106,3 +111,9 @@ For large catalogs, use the [batch CLI](cli.md#whole-binary-inventory-and-batch-
 ## Research pools
 
 A chunk or function can be put in a research pool: after an agent hits a safety stop on it, or at the human's request. Only the pool's registered members may change it; every other agent may read it and build on it as a prerequisite, and never sees it as open work. Its status is its own, so it counts as open work until it is researched, and a completed record stays in its pool. The human directs which agents join which pool, and the dashboard is never refused. Pools replace 0.14's quarantine. The GUI marks pooled records ⊘. Details are in the [CLI guide](cli.md#research-pools).
+
+## The project store and promotion
+
+`research store init` (a manual step) keeps a project's whole history in a compressed store beside its files: every catalog revision, every report text, and the project tools' annotation ledger row by row. It follows the files, which stay authoritative, and answers questions the files cannot, such as a record and its report at any past revision. The coordinator keeps it current.
+
+`research store promote` (the owner's decision) makes the store authoritative: commits write it directly, no receipts are written, and acceptance moves from the whole report file to its research body and evidence, so renames, moves and identity amendments no longer touch completion. Promotion converts every acceptance that still verifies and keeps the old values. See the [CLI guide](cli.md#the-project-store-side-by-side).

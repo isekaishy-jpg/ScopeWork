@@ -50,6 +50,15 @@ Re-running the same-version MSI offers Repair or Uninstall. Uninstall removes ap
 
 Setup uses Windows Installer's embedded cabinet rather than a separate app-owned extraction/updater cache. Windows manages its installation scratch and repair cache; Scopework does not delete that cache or your downloaded MSI. Empty application, documentation, asset and shortcut directories are removed on uninstall/upgrade. Unknown files in those directories are preserved. Package-build temporary files are cleaned on success or failure.
 
+## Version 0.15.0a formats
+
+Nothing changes on upgrade. A project's catalog moves to a newer format only when it uses something new, and earlier versions then refuse to open it:
+- format 6 when its first data item is created;
+- format 7 when it gains an artifact, an address space or a record in one;
+- format 8 when its owner promotes it to the store (`research store promote`), which is one-way.
+
+Projects that use none of these keep format 5 and open in earlier versions. A project's store (`research store init`) is optional and lives in its `store/` folder; earlier versions ignore it.
+
 ## Version 0.6.0 journal upgrade
 
 Finish or cancel active imports with the previous version, then close all old GUI/CLI processes. The first project open upgrades its compatibility marker to format 5 under an exclusive library gate, retaining one pre-upgrade catalog in `tools/workspaces/layout-migration-v5`. Reports and supporting evidence do not change. Older executables reject format 5 because they cannot recover the new delta journals.

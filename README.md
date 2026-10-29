@@ -36,7 +36,8 @@ The same records are available to AI agents through a JSON command line, so seve
 App               what the project set out to understand
 └─ Architecture   a subsystem, such as Rendering or Audio
    └─ Chunk       a group of related functions
-      └─ Function one routine at one address, with its evidence
+      ├─ Function one routine at one address, with its evidence
+      └─ Data     a table, string or global at one address, with its length
 ```
 
 - **Fixed scopes.** A function report explains that function: its behaviour, inputs, outputs, side effects and connections, with evidence. A chunk synthesises its completed functions, an architecture its chunks, and the app its architectures.
@@ -53,6 +54,8 @@ App               what the project set out to understand
 - **Whole-binary inventories.** Enrol tens of thousands of functions with resumable batch imports and keep context-only code in the inventory without making it required work.
 - **Implementation tracker.** Record a recreation alongside the research: a free-form tree of its crates, modules or files, the researched functions placed where they are implemented, implementation-only items and their completion. The dashboard switches between **Research** and **Implementation** for each project.
 - **Research pools.** After a safety stop, or at the human's request, put a chunk or function in a pool. Only the pool's registered members may change it; every other agent may read it and build on it. It stays open work until a member researches it.
+- **Data items.** Globals, tables, strings and vtables are records too, researched beside the functions that use them, with prerequisites in either direction. Projects can also name their input files and address spaces, so data on a disk with no program of its own has somewhere to go.
+- **History at any revision.** An optional project store keeps every revision and report text compressed beside the files (a few tens of MB for 38,000 commits) and answers what a record and its report were at any past revision. It also follows the analysis tools' annotation ledger and lists where it disagrees with the catalog. The owner can later promote the store to be authoritative.
 - **Renames that follow through.** Renaming a record rewrites its citations in every report, without reopening the completed work they appear in.
 - **Built for several agents at once:**
   - A coordinator answers reads without waiting for writes, and merges queued saves into one commit.
@@ -80,14 +83,14 @@ research node show lumen 3                      # report, evidence, tokens and s
 research node save lumen 3 --body-file body.md --evidence-file evidence.md --expect <token>
 research node complete lumen 3 --expect <completion_token> --reviewed
 research status lumen --summary
-research --version                              # Scopework 0.14.0a (Build <number>)
+research --version                              # Scopework 0.15.0a (Build <number>)
 ```
 
-Tokens make every write conditional on what the writer last read, so concurrent agents cannot silently overwrite each other. The [CLI guide](docs/cli.md) covers batches, prerequisites, claims, the review queue, quarantine, history, dashboard groups, the implementation tracker, the coordinator and tool leases.
+Tokens make every write conditional on what the writer last read, so concurrent agents cannot silently overwrite each other. The [CLI guide](docs/cli.md) covers batches, prerequisites, data items, claims, the review queue, research pools, history, the project store, dashboard groups, the implementation tracker, the coordinator and tool leases.
 
 ## Status
 
-Scopework is **alpha** software (0.14.0a) under active development. Its formats and interfaces may still change between versions, and every change is recorded in the [changelog](CHANGELOG.md). The installers are not code-signed. Completion records are attestations of understanding made by people or agents, not an automatic judgement of research quality.
+Scopework is **alpha** software (0.15.0a) under active development. Its formats and interfaces may still change between versions, and every change is recorded in the [changelog](CHANGELOG.md). The installers are not code-signed. Completion records are attestations of understanding made by people or agents, not an automatic judgement of research quality.
 
 ## Documentation
 
@@ -97,8 +100,9 @@ Scopework is **alpha** software (0.14.0a) under active development. Its formats 
 | [Research model](docs/research-model.md) | The hierarchy, evidence, completion and prerequisites |
 | [Agent CLI](docs/cli.md) | Every command, batches, concurrency, the coordinator and tool leases |
 | [Build guide](docs/building.md) | Building from source, packaging, versions and build numbers |
-| [Changelog](CHANGELOG.md) and [release notes](docs/releases/0.14.0a.md) | What changed in each version |
+| [Changelog](CHANGELOG.md) and [release notes](docs/releases/0.15.0a.md) | What changed in each version |
 | [Coordinator design](docs/proposal-coordinator.md) | How reads, queued writes and tool work are coordinated, with measurements |
+| [Storage design](docs/design-storage-backend.md) and [promotion](docs/design-storage-promotion.md) | The project store, data items, address spaces and promotion |
 
 ## Contributing
 
