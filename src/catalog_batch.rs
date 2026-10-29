@@ -59,6 +59,25 @@ pub struct Update {
     #[serde(default)]
     pub expect_node_revision: Option<u64>,
 }
+impl Create {
+    /// The new, unresearched record this creation makes, as `id` of `kind` named `name`.
+    pub(super) fn node(&self, id: u64, kind: Kind, name: String) -> Node {
+        Node {
+            id,
+            parent: Some(self.parent),
+            kind,
+            name,
+            rva: self.rva,
+            length: self.length,
+            space: self.space,
+            context_only: self.context_only,
+            status: Status::NotStarted,
+            revision: 0,
+            accepted_hash: None,
+            accepted_prerequisites: Default::default(),
+        }
+    }
+}
 impl Batch {
     /// A creation-only schema-1 batch: it runs as a background import, outside any queue.
     pub fn is_import(&self) -> bool {
@@ -137,7 +156,9 @@ pub(super) struct Sidecar {
     pub(super) before: String,
     pub(super) after: String,
 }
-#[derive(Serialize, Deserialize)]
+/// A catalog transaction. Fields an operation does not use keep their defaults:
+/// `Journal { before, after, edits, ..Default::default() }`.
+#[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Journal {
     /// The records this operation changes on purpose, checked against research pools before
@@ -648,19 +669,13 @@ impl Library {
             changes,
             before,
             after,
-            edits: vec![],
-            moves: vec![],
-            dependencies: vec![],
             sidecars: vec![Sidecar {
                 path: name.into(),
                 before: before_text,
                 after: after_text,
             }],
-            ledger: false,
-            repin_ledger: false,
             directed_by: directed_by.map(str::to_string),
-            repin_ids: vec![],
-            repin_pairs: vec![],
+            ..Default::default()
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -814,14 +829,11 @@ impl Library {
             before,
             after,
             edits,
-            moves: vec![],
             dependencies,
-            sidecars: vec![],
-            ledger: false,
             repin_ledger,
             directed_by,
-            repin_ids: vec![],
             repin_pairs,
+            ..Default::default()
         };
         self.commit_or_stage(p, journal).map(|_| ())
     }
@@ -937,14 +949,7 @@ impl Library {
             before,
             after,
             edits,
-            moves: vec![],
-            dependencies: vec![],
-            sidecars: vec![],
-            ledger: false,
-            repin_ledger: false,
-            directed_by: None,
-            repin_ids: vec![],
-            repin_pairs: vec![],
+            ..Default::default()
         };
         self.commit_or_stage(p, journal)?;
         Ok(changed)
@@ -1072,20 +1077,7 @@ impl Library {
             let id = after.next_id;
             after.next_id = id.checked_add(1).ok_or("Node ID exhausted")?;
             positions.insert(id, after.nodes.len());
-            after.nodes.push(Node {
-                id,
-                parent: Some(c.parent),
-                kind,
-                name,
-                rva: c.rva,
-                length: c.length,
-                context_only: c.context_only,
-                status: Status::NotStarted,
-                revision: 0,
-                accepted_hash: None,
-                space: c.space,
-                accepted_prerequisites: Default::default(),
-            });
+            after.nodes.push(c.node(id, kind, name));
             created.push(id);
             changed.insert(id);
             changed.insert(c.parent);

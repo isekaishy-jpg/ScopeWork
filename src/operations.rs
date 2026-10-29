@@ -206,7 +206,6 @@ impl Library {
         }
         let root = self.dir(p);
         let j = catalog_batch::Journal {
-            changes: vec![],
             before: staged.before,
             after: self.projects[p].clone(),
             edits: staged
@@ -220,8 +219,6 @@ impl Library {
                     after,
                 })
                 .collect(),
-            moves: vec![],
-            dependencies: vec![],
             sidecars: staged
                 .sidecars
                 .into_iter()
@@ -231,11 +228,7 @@ impl Library {
                     after,
                 })
                 .collect(),
-            ledger: false,
-            repin_ledger: false,
-            directed_by: None,
-            repin_ids: vec![],
-            repin_pairs: vec![],
+            ..Default::default()
         };
         if let Err(e) = catalog_batch::commit(&root, &mut self.projects[p], &j) {
             // Nothing staged may outlive a failed commit in memory.

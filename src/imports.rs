@@ -167,20 +167,7 @@ fn addition(project: &Project, batch: &Batch, first: u64) -> Result<Vec<Node>> {
         }
 
         kinds.insert(id, kind);
-        nodes.push(Node {
-            id,
-            parent: Some(c.parent),
-            kind,
-            name,
-            rva: c.rva,
-            length: c.length,
-            context_only: c.context_only,
-            status: Status::NotStarted,
-            revision: 0,
-            accepted_hash: None,
-            space: c.space,
-            accepted_prerequisites: Default::default(),
-        });
+        nodes.push(c.node(id, kind, name));
     }
     first
         .checked_add(nodes.len() as u64)
@@ -896,18 +883,11 @@ fn append_publication(
     }
     drop(index);
     let j = catalog_batch::Journal {
-        changes: vec![],
         before,
         after,
         edits,
-        moves: vec![],
-        dependencies: vec![],
         sidecars,
-        ledger: false,
-        repin_ledger: false,
-        directed_by: None,
-        repin_ids: vec![],
-        repin_pairs: vec![],
+        ..Default::default()
     };
     let (delta, _) = catalog_batch::pending_delta(&j)?;
     store::append_commit(root, &delta, bytes)

@@ -108,7 +108,7 @@ pub struct Node {
     #[serde(default)]
     pub accepted_prerequisites: std::collections::BTreeMap<u64, String>,
 }
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Project {
     #[serde(default = "legacy_layout")]
     pub layout_version: u32,

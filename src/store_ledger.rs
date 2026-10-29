@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 pub(super) const LOG: &str = "ledger.log";
 const HEAD: &str = "ledger-head.zlib";
-const FILE: &str = "tools/profiles/annotations.json";
+use super::super::ledger::LEDGER as FILE;
 /// Row kinds the ledger holds today; any other is reported by `store conflicts`.
 const KNOWN: [&str; 8] = [
     "function-name",
@@ -87,12 +87,6 @@ fn parse(bytes: &[u8], file_sha: String) -> std::result::Result<Ledger, String> 
     serde_json::from_slice(bytes)
         .map_err(|e| format!("the ledger does not parse ({e}); recorded at a later sync"))
         .and_then(|value| Ledger::new(file_sha, value))
-}
-/// Compressed for speed: the head copy is rewritten on every ledger change.
-fn deflate_fast(bytes: &[u8]) -> Result<Vec<u8>> {
-    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(bytes).map_err(|e| e.to_string())?;
-    encoder.finish().map_err(|e| e.to_string())
 }
 /// The ledger's fields other than its lists.
 fn header(value: &Value) -> Value {
@@ -327,7 +321,11 @@ pub(super) fn follow_inner(
         &store.join(LOG),
         &frame(&serde_json::to_vec(&entry).map_err(|e| e.to_string())?)?,
     )?;
-    atomic(&store.join(HEAD), &deflate_fast(now.text.as_bytes())?)?;
+    // Compressed for speed: the head copy is rewritten on every ledger change.
+    atomic(
+        &store.join(HEAD),
+        &deflate_at(now.text.as_bytes(), flate2::Compression::fast())?,
+    )?;
     Ok(summary)
 }
 
@@ -382,14 +380,9 @@ pub(super) fn verify(store: &Path, problems: &mut Vec<String>, referenced: &mut 
     }
 }
 
-/// `0x`-prefixed or bare hexadecimal.
+/// An address as `parse_rva` reads it (hexadecimal, `0x` optional).
 fn parse_address(text: &str) -> Option<u64> {
-    let t = text.trim();
-    let t = t
-        .strip_prefix("0x")
-        .or_else(|| t.strip_prefix("0X"))
-        .unwrap_or(t);
-    u64::from_str_radix(t, 16).ok()
+    parse_rva(text).ok().map(u64::from)
 }
 /// The ledger rows at an address through the store's history, newest first.
 pub fn annotations(root: &Path, project: &str, address: &str, kind: Option<&str>) -> Result<Value> {

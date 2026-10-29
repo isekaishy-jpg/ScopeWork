@@ -579,12 +579,8 @@ impl Library {
         let mut after = before.clone();
         after.revision += 1;
         let journal = Journal {
-            changes: vec![],
             before,
             after,
-            edits: vec![],
-            moves: vec![],
-            dependencies: vec![],
             sidecars: vec![
                 Sidecar {
                     path: POOLS.into(),
@@ -598,11 +594,7 @@ impl Library {
                     after: String::new(),
                 },
             ],
-            ledger: false,
-            repin_ledger: false,
-            directed_by: None,
-            repin_ids: vec![],
-            repin_pairs: vec![],
+            ..Default::default()
         };
         self.commit_or_stage(p, journal)?;
         Ok(moved)

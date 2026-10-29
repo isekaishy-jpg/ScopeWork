@@ -3,7 +3,7 @@
 //! it leaves a receipt like any other; the first one raises the catalog to format 7.
 use super::*;
 
-/// The space named `name` or numbered `id` in `project`, for messages.
+/// Space `id` of `project` as messages and report headers name it: `Land (S1)`, or `S1` alone.
 pub(crate) fn space_label(project: &Project, id: u32) -> String {
     project
         .spaces

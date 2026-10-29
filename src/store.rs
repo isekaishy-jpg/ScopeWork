@@ -1,9 +1,12 @@
 //! The project store (docs/design-storage-backend.md): the catalog's whole history beside the
 //! files, in checksummed frames, kept by following the change receipts every writer leaves.
 //!
-//! The files stay authoritative. Nothing here takes part in a commit: `sync` reads the current
-//! catalog under the project's shared lock, walks the receipts back from it to the store's head,
-//! and appends what is new. A store fault therefore never changes the files or fails a commit.
+//! Until a project is promoted the files stay authoritative and nothing here takes part in a
+//! commit: `sync` reads the current catalog under the project's shared lock, walks the receipts
+//! back from it to the store's head, and appends what is new, so a store fault never changes the
+//! files or fails a commit. A promoted project's commits append to the store themselves
+//! ([`commit`]), and its history is here rather than in receipts
+//! (docs/design-storage-promotion.md).
 //!
 //! Layout of `<project>/store/`:
 //! - `store.json`: schema, project and codec.
@@ -35,17 +38,19 @@ pub(crate) const FOLDER: &str = "store";
 const SCHEMA: u64 = 1;
 /// A log longer than this is closed and a new segment, with a checkpoint, started.
 const SEGMENT_BYTES: usize = 4 << 20;
-/// [`SEGMENT_BYTES`]; debug builds take `SCOPEWORK_STORE_SEGMENT_BYTES`, so tests reach
-/// checkpoints with a small history.
-fn segment_bytes() -> usize {
+/// `default`, or in debug builds the value of environment variable `name` when set, so tests
+/// reach segment and compaction limits with a small history.
+fn tunable(name: &str, default: usize) -> usize {
     #[cfg(debug_assertions)]
-    if let Some(bytes) = std::env::var("SCOPEWORK_STORE_SEGMENT_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        return bytes;
+    if let Some(value) = std::env::var(name).ok().and_then(|v| v.parse().ok()) {
+        return value;
     }
-    SEGMENT_BYTES
+    let _ = name;
+    default
+}
+/// [`SEGMENT_BYTES`], or `SCOPEWORK_STORE_SEGMENT_BYTES` in debug builds.
+fn segment_bytes() -> usize {
+    tunable("SCOPEWORK_STORE_SEGMENT_BYTES", SEGMENT_BYTES)
 }
 /// Texts are compressed together in groups of about this many bytes.
 const PACK_BYTES: usize = 4 << 20;
@@ -55,17 +60,9 @@ const PACK_FILE_BYTES: u64 = 64 << 20;
 const CLOSED: &str = "closed.json";
 /// A sync that leaves more small pack frames than this compacts the store.
 const MAX_SMALL_FRAMES: usize = 64;
-/// [`MAX_SMALL_FRAMES`]; debug builds take `SCOPEWORK_STORE_MAX_SMALL_FRAMES`, so tests reach
-/// compaction with a few syncs.
+/// [`MAX_SMALL_FRAMES`], or `SCOPEWORK_STORE_MAX_SMALL_FRAMES` in debug builds.
 fn max_small_frames() -> usize {
-    #[cfg(debug_assertions)]
-    if let Some(frames) = std::env::var("SCOPEWORK_STORE_MAX_SMALL_FRAMES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        return frames;
-    }
-    MAX_SMALL_FRAMES
+    tunable("SCOPEWORK_STORE_MAX_SMALL_FRAMES", MAX_SMALL_FRAMES)
 }
 const RECEIPT_FOLDERS: [&str; 2] = [
     "tools/workspaces/catalog-transactions-v4",
@@ -114,7 +111,10 @@ fn frames(bytes: &[u8]) -> (Vec<Range<usize>>, End) {
     }
 }
 fn deflate(bytes: &[u8]) -> Result<Vec<u8>> {
-    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    deflate_at(bytes, flate2::Compression::default())
+}
+fn deflate_at(bytes: &[u8], level: flate2::Compression) -> Result<Vec<u8>> {
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), level);
     encoder.write_all(bytes).map_err(|e| e.to_string())?;
     encoder.finish().map_err(|e| e.to_string())
 }
@@ -205,30 +205,37 @@ fn read_log(path: &Path) -> Result<Vec<u8>> {
         Ok(bytes)
     }
 }
-/// The store's segments in order, and the logs that are not part of it: one without a complete
-/// start entry or without its checkpoint (a segment whose creation was interrupted).
+/// Segment `seq` read from `log`, or none when it has no complete start entry or no checkpoint
+/// (a segment whose creation was interrupted).
+fn load_segment(store: &Path, seq: u64, log: PathBuf) -> Result<Option<Segment>> {
+    let (_, checkpoint) = segment_files(store, seq);
+    let bytes = read_log(&log)?;
+    let (frames, end) = frames(&bytes);
+    let start = frames
+        .first()
+        .and_then(|r| serde_json::from_slice::<Value>(&bytes[r.clone()]).ok())
+        .filter(|v| v["type"] == "start");
+    Ok(match start {
+        Some(start) if checkpoint.is_file() => Some(Segment {
+            seq,
+            log,
+            checkpoint,
+            bytes,
+            frames,
+            end,
+            start,
+        }),
+        _ => None,
+    })
+}
+/// The store's segments in order, and the logs that are not part of it (see [`load_segment`]).
 fn segments(store: &Path) -> Result<(Vec<Segment>, Vec<PathBuf>)> {
     let mut out = vec![];
     let mut invalid = vec![];
     for (seq, log) in segment_logs(store) {
-        let (_, checkpoint) = segment_files(store, seq);
-        let bytes = read_log(&log)?;
-        let (frames, end) = frames(&bytes);
-        let start = frames
-            .first()
-            .and_then(|r| serde_json::from_slice::<Value>(&bytes[r.clone()]).ok())
-            .filter(|v| v["type"] == "start");
-        match start {
-            Some(start) if checkpoint.is_file() => out.push(Segment {
-                seq,
-                log,
-                checkpoint,
-                bytes,
-                frames,
-                end,
-                start,
-            }),
-            _ => invalid.push(log),
+        match load_segment(store, seq, log.clone())? {
+            Some(segment) => out.push(segment),
+            None => invalid.push(log),
         }
     }
     Ok((out, invalid))
@@ -360,33 +367,18 @@ impl Writer {
         }
         let mut logs = segment_logs(&self.store);
         while let Some((seq, log)) = logs.pop() {
-            let (_, checkpoint) = segment_files(&self.store, seq);
             if !compressed(&log) {
                 truncate_torn(&log)?;
             }
-            let bytes = read_log(&log)?;
-            let (frames, end) = frames(&bytes);
-            let start = frames
-                .first()
-                .and_then(|r| serde_json::from_slice::<Value>(&bytes[r.clone()]).ok())
-                .filter(|v| v["type"] == "start");
-            match start {
-                Some(start) if checkpoint.is_file() => {
+            match load_segment(&self.store, seq, log.clone())? {
+                Some(segment) => {
                     self.check_closed(seq)?;
-                    return Ok(Some(Segment {
-                        seq,
-                        log,
-                        checkpoint,
-                        bytes,
-                        frames,
-                        end,
-                        start,
-                    }));
+                    return Ok(Some(segment));
                 }
                 // A new segment whose creation was interrupted, as `repair` removes it.
-                _ => {
+                None => {
                     let _ = fs::remove_file(&log);
-                    let _ = fs::remove_file(&checkpoint);
+                    let _ = fs::remove_file(segment_files(&self.store, seq).1);
                 }
             }
         }
@@ -419,13 +411,8 @@ impl Writer {
             if known.get(&name) == Some(&stamp) {
                 continue;
             }
-            let bytes = read_log(&log)?;
-            let (frames, end) = frames(&bytes);
-            let started = frames
-                .first()
-                .and_then(|r| serde_json::from_slice::<Value>(&bytes[r.clone()]).ok())
-                .is_some_and(|v| v["type"] == "start");
-            if end != End::Clean || !started || !segment_files(&self.store, seq).1.is_file() {
+            let whole = load_segment(&self.store, seq, log.clone())?;
+            if whole.is_none_or(|s| s.end != End::Clean) {
                 return Err(format!(
                     "store_damaged: {} is not whole; run research store verify",
                     log.display()
