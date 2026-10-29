@@ -28,7 +28,7 @@ use std::ops::Range;
 
 #[path = "store_commit.rs"]
 mod commit;
-pub(crate) use commit::{append_commit, holds, receipts_after};
+pub(crate) use commit::{append_commit, begin_commit, holds, receipts_after};
 #[path = "store_ledger.rs"]
 mod ledger;
 pub(crate) use ledger::stamp as ledger_stamp;
@@ -334,15 +334,19 @@ impl Writer {
             "store_busy: another process is writing this project's store. Retry shortly."
                 .to_string()
         })?;
-        let index = text_index(store)?;
+        let mut known = HashSet::new();
+        let mut small_frames = 0;
+        for (_, pack) in numbered(store, "texts-", ".pack") {
+            small_frames += pack_texts(&pack, &mut known)?;
+        }
         Ok(Self {
             store: store.into(),
             _lock: lock,
-            known: index.at.into_keys().collect(),
+            known,
             pending: vec![],
             pending_bytes: 0,
             added: 0,
-            small_frames: index.small_frames,
+            small_frames,
         })
     }
     /// The segment commits append to, after the repairs an append needs: temporaries removed,
@@ -565,6 +569,43 @@ impl Writer {
         };
         append(&path, &frame(&payload)?)
     }
+}
+/// Adds the texts pack file `path` holds to `known` and answers how many of its frames are
+/// small (see [`TextIndex::small_frames`]). Only each frame's header and index are read; the
+/// compressed texts are skipped, so opening the writer does not read the texts themselves.
+/// Checksums are `store verify`'s to check; a frame cut short at the end is ignored, as readers
+/// ignore it.
+fn pack_texts(path: &Path, known: &mut HashSet<String>) -> Result<usize> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let end = file.metadata().map_err(|e| e.to_string())?.len();
+    let mut small = 0;
+    let mut at = 0u64;
+    let mut header = [0u8; 12];
+    while at + 12 <= end {
+        file.seek(SeekFrom::Start(at))
+            .and_then(|_| file.read_exact(&mut header))
+            .map_err(|e| e.to_string())?;
+        let payload = u64::from(u32::from_le_bytes(header[..4].try_into().unwrap()));
+        let index_len = u32::from_le_bytes(header[8..].try_into().unwrap()) as u64;
+        if at + 8 + payload > end || index_len + 4 > payload {
+            break;
+        }
+        let mut index = vec![0; index_len as usize];
+        file.read_exact(&mut index).map_err(|e| e.to_string())?;
+        let rows: Vec<Value> = serde_json::from_slice(&index)
+            .map_err(|e| format!("{}: unreadable pack index: {e}", path.display()))?;
+        let bytes: u64 = rows.iter().filter_map(|r| r["length"].as_u64()).sum();
+        if bytes < PACK_BYTES as u64 {
+            small += 1;
+        }
+        known.extend(
+            rows.iter()
+                .filter_map(|r| r["sha256"].as_str().map(str::to_string)),
+        );
+        at += 8 + payload;
+    }
+    Ok(small)
 }
 /// A pack frame's payload: an index of `texts` and their bytes, compressed together.
 fn pack_frame<'a>(texts: impl Iterator<Item = (&'a str, &'a [u8])>) -> Result<Vec<u8>> {
@@ -791,13 +832,28 @@ pub(crate) fn follow_ledger(root: &Path, id: &str) -> Result<Value> {
     let (revision, _) = current(&dir)?;
     ledger::follow_inner(&mut w, &dir, &store, revision, None)
 }
-/// Records a change Scopework just made to the ledger, naming who made it.
-pub(crate) fn record_ledger(root: &Path, id: &str, by: &str) -> Result<Value> {
+/// Runs `change`, which writes the ledger, holding the store's writer lock, then records the
+/// ledger's change naming `by`. The coordinator's follower only tries that lock, so it cannot
+/// record the change first and lose its author.
+pub(crate) fn ledger_change<T>(
+    root: &Path,
+    id: &str,
+    by: &str,
+    change: impl FnOnce() -> Result<T>,
+) -> Result<(T, Value)> {
     let (dir, store) = open_store(root, id)?;
     let mut w = Writer::open_waiting(&store, std::time::Duration::from_secs(30))?;
     w.active_or_none()?;
+    let out = change()?;
     let (revision, _) = current(&dir)?;
-    ledger::follow_inner(&mut w, &dir, &store, revision, Some(by))
+    // The change is written; a problem recording it is answered, and the next sync records it.
+    let recorded = ledger::follow_inner(&mut w, &dir, &store, revision, Some(by))
+        .unwrap_or_else(|e| json!({"error": e}));
+    Ok((out, recorded))
+}
+/// The ledger file hash the store recorded last, if it has recorded the ledger at all.
+pub(crate) fn ledger_recorded(dir: &Path) -> Result<Option<String>> {
+    ledger::last_file_sha(&dir.join(FOLDER))
 }
 fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<Value> {
     let started = std::time::Instant::now();
@@ -812,23 +868,23 @@ fn sync_with(root: &Path, id: &str, create: bool, with_ledger: bool) -> Result<V
             "no_store: project {id} has no store. Creating one is a manual step: research store init {id}"
         ));
     }
+    // The current catalog, read under the project's shared lock so no commit is half written.
+    // Every store writer takes the project's lock before the store's, and the store's lock is
+    // only ever tried while holding it, so a sync never waits for a commit that waits for it.
+    let locks = acquire_locks(root, id, false, false)?;
+    let pending = RECEIPT_FOLDERS
+        .iter()
+        .any(|f| dir.join(f).join("pending/journal.json").is_file());
+    if pending {
+        return Err("recovery_required: a catalog transaction is pending. Open the project to recover it, then sync.".into());
+    }
+    let bytes = fs::read(dir.join("project.json")).map_err(|e| e.to_string())?;
     let mut w = Writer::open(&store)?;
+    drop(locks);
     // Only the active segment is read, so a sync's cost does not grow with the history;
     // `store verify` checks the closed segments.
     let last = w.active_or_none()?;
     let head = last.as_ref().map(Segment::head).transpose()?;
-
-    // The current catalog, read under the project's shared lock so no commit is half written.
-    let bytes = {
-        let _locks = acquire_locks(root, id, false, false)?;
-        let pending = RECEIPT_FOLDERS
-            .iter()
-            .any(|f| dir.join(f).join("pending/journal.json").is_file());
-        if pending {
-            return Err("recovery_required: a catalog transaction is pending. Open the project to recover it, then sync.".into());
-        }
-        fs::read(dir.join("project.json")).map_err(|e| e.to_string())?
-    };
     let current_sha = sha256_hex(&bytes);
     let mut state: Project = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let current_revision = state.revision;

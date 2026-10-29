@@ -379,6 +379,12 @@ impl Library {
             .copied()
             .filter(|id| file.covering(&self.projects[p], *id).is_some())
             .collect();
+        // Naming only records already in the pool, a new reason amends the pool's own reason
+        // too (decided before anything changes, so records added now do not count).
+        let amends = pool.as_ref().is_some_and(|pool| {
+            ids.iter()
+                .all(|id| file.records.get(id).is_some_and(|r| &r.pool == pool))
+        });
         let revision = self.projects[p].revision + 1;
         let by = caller();
         let mut changed = vec![];
@@ -463,7 +469,27 @@ impl Library {
             }
             changed.push(*id);
         }
-        if changed.is_empty() {
+        // Amending the pool's reason changes its pooled records, so the journal guard applies
+        // as for them.
+        let mut amended = false;
+        if amends
+            && let Some(pool) = &pool
+            && let Some(entry) = file.pools.get_mut(pool)
+            && entry.reason != reason
+        {
+            entry.reason = reason.into();
+            file.log.push(LogEntry {
+                event: "reason".into(),
+                pool: pool.clone(),
+                node: None,
+                agent: String::new(),
+                reason: reason.into(),
+                by: by.clone(),
+                at_revision: revision,
+            });
+            amended = true;
+        }
+        if changed.is_empty() && !amended {
             return Ok(changed);
         }
         self.write_pools(p, &file, guarded, directed_by)?;

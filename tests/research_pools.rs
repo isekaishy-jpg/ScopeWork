@@ -649,3 +649,58 @@ fn an_import_into_a_chunk_pooled_after_its_reservation_needs_a_member_or_directi
     assert_eq!(done["state"], "Committed", "{done}");
     assert!(created("a000"));
 }
+
+#[test]
+fn adding_a_pools_records_again_amends_its_reason_for_members_only() {
+    let f = Fixture::new();
+    let reason = |f: &Fixture| {
+        f.ok("lead", &["pool", "list", "fixture"])["pools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["pool"] == "voice")
+            .unwrap()["reason"]
+            .clone()
+    };
+    let amend = [
+        "pool",
+        "add",
+        "fixture",
+        "voice",
+        "2",
+        "--origin",
+        "safety-stop",
+        "--reason",
+    ];
+    // A non-member cannot amend it: the records it names are pooled.
+    let mut args = amend.to_vec();
+    args.push("Wrong");
+    f.refused("sol", &args, "pooled");
+    assert_eq!(reason(&f), "Voice chat stops agents");
+    // A member re-adds the same records with a corrected reason: the pool's own reason follows,
+    // also when the records already carry it.
+    let mut args = amend.to_vec();
+    args.push("Voice chat: shared by astra and sol");
+    let added = f.ok("astra", &args);
+    assert_eq!(
+        added["pool_reason"], "Voice chat: shared by astra and sol",
+        "{added}"
+    );
+    assert_eq!(reason(&f), "Voice chat: shared by astra and sol");
+    // Adding a new record with another reason leaves the pool's reason as it is.
+    f.ok(
+        "astra",
+        &[
+            "pool",
+            "add",
+            "fixture",
+            "voice",
+            "4",
+            "--origin",
+            "human",
+            "--reason",
+            "Also this",
+        ],
+    );
+    assert_eq!(reason(&f), "Voice chat: shared by astra and sol");
+}

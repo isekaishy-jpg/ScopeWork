@@ -58,11 +58,22 @@ impl Library {
                     .into(),
             );
         }
+        // The ledger must be the one the store recorded last, or the promotion's pin conversion
+        // would be recorded together with a tool's change nobody has seen.
+        let ledger = dir.join(ledger::LEDGER);
+        if ledger.is_file() {
+            let sha = sha256_hex(&fs::read(&ledger).map_err(|e| e.to_string())?);
+            if store::ledger_recorded(&dir)?.as_deref() != Some(sha.as_str()) {
+                return Err(
+                    "ledger_changed: the annotation ledger changed since the store last recorded it; run research store sync and promote again"
+                        .into(),
+                );
+            }
+        }
         // The files as they were, kept before anything changes.
         let kept = dir.join(KEPT);
         fs::create_dir_all(&kept).map_err(|e| e.to_string())?;
         atomic(&kept.join("project.json"), &bytes)?;
-        let ledger = dir.join(ledger::LEDGER);
         if ledger.is_file() {
             atomic(
                 &kept.join("annotations.json"),

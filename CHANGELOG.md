@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+Fixes from a review of 0.15.0a by Claude Fable, and one complaint ([proposal](docs/proposal-review-fixes-6.md)):
+
+- `store sync` takes the project's lock before the store's, as every store writer does. Run during a promoted project's commit, it stalled that commit for about a minute and made it answer `commit_pending`.
+- A promoted commit takes the store before any file changes. A store that does not match (one restored from an older copy) refuses with `store_mismatch` and nothing committed or left pending, instead of rewriting the reports and promising `commit_pending`.
+- `annotate stale` reads only records' reports; a ledger row naming any other path is listed, not read.
+- Opening the store's writer reads only the text packs' indexes, so promoted commits no longer read every stored text.
+- Promotion refuses when the annotation ledger changed since the store last recorded it (`ledger_changed`).
+- Scopework's own ledger changes on a promoted project (`annotate`, and a commit's re-paths and re-pins) are recorded in the store at once with their author, which the coordinator could otherwise record first without one; `store annotations` shows the author.
+- `pool add` naming only records already in the pool amends the pool's own reason, which nothing could change before ([complaint](docs/proposal-review-fixes-6.md#7-a-pools-reason-cannot-be-amended-complaint)).
+
 ## 0.15.0a - 2026-10-29
 
 Release notes, validation and the commit ledger: [docs/releases/0.15.0a.md](docs/releases/0.15.0a.md). A minor release: data items, the project store and promotion, research pools and proofs are new since 0.14.0a, listed below with the fixes from the reviews of each batch.

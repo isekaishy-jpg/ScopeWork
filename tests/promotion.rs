@@ -475,3 +475,134 @@ fn annotations_change_through_the_project_tools_until_promotion() {
     assert_eq!(stale["acceptance"], "whole_file");
     assert_eq!(stale["stale"], 1);
 }
+
+#[test]
+fn a_sync_waiting_for_the_project_holds_no_store_lock() {
+    let f = Fixture::new();
+    let locks = f.home.join("projects/.project-locks/fixture.lock");
+    let project_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&locks)
+        .unwrap();
+    project_lock.lock().unwrap();
+    let sync = f
+        .command(&["--wait", "20", "store", "sync", "fixture"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    // While the sync waits for the project, a commit could still take the store.
+    let store_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(f.project().join("store/.lock"))
+        .unwrap();
+    assert!(
+        store_lock.try_lock().is_ok(),
+        "the waiting sync holds the store"
+    );
+    store_lock.unlock().unwrap();
+    project_lock.unlock().unwrap();
+    let out = sync.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_store_that_does_not_match_stops_a_promoted_commit_before_any_file_changes() {
+    let f = Fixture::new();
+    f.promote();
+    // A store restored from an older copy: its head is behind the catalog.
+    let store = f.project().join("store");
+    let old = f.home.join("store-copy");
+    copy_dir(&store, &old);
+    f.save("3", "After the copy.");
+    fs::remove_dir_all(&store).unwrap();
+    copy_dir(&old, &store);
+    let report = f.project().join(F1);
+    let before = fs::read(&report).unwrap();
+    let revision = f.revision();
+    let args = f.save_args("3", "Refused.");
+    let refused = f.fails(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(refused.contains("store_mismatch"), "{refused}");
+    assert!(refused.contains("Nothing was committed"), "{refused}");
+    assert!(!refused.contains("commit_pending"), "{refused}");
+    assert_eq!(
+        fs::read(&report).unwrap(),
+        before,
+        "the report is untouched"
+    );
+    assert_eq!(f.revision(), revision);
+    assert!(
+        !f.project()
+            .join("tools/workspaces/catalog-transactions-v4/pending")
+            .exists()
+    );
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            copy_dir(&path, &to.join(entry.file_name()));
+        } else {
+            fs::copy(&path, to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+#[test]
+fn scopeworks_own_ledger_changes_are_recorded_with_their_author_and_stale_reads_only_reports() {
+    let f = Fixture::new();
+    f.ledger(json!([
+        {"kind": "function-name", "rva": "0x00002000", "value": "F2", "report": F2, "report_sha256": "0".repeat(64), "reason": "r"},
+    ]));
+    f.promote();
+    // A move re-paths the row pinned to function 4's report, inside the commit.
+    f.ok(&[
+        "node", "create", "fixture", "--parent", "1", "--name", "Other",
+    ]);
+    let r: u64 = f.revision().parse().unwrap();
+    let batch = f.file(
+        "move.json",
+        &json!({"schema": 1, "binary": "synthetic", "expect_revision": r,
+                "update": [{"id": 4, "parent": 5}]})
+        .to_string(),
+    );
+    f.ok(&["node", "batch", "fixture", "--file", &batch]);
+    let history = f.ok(&["store", "annotations", "fixture", "2000"]);
+    let newest = &history["changes"][0];
+    assert!(newest["by"].is_string(), "{history}");
+    assert_ne!(
+        newest["before"]["report"], newest["after"]["report"],
+        "{history}"
+    );
+    // `annotate set` names its author too.
+    let set = f.ok(&[
+        "annotate", "set", "fixture", "--kind", "label", "--rva", "2000", "--value", "L",
+        "--report", F1, "--reason", "r",
+    ]);
+    assert_eq!(set["store"]["rows"]["added"], 1, "{set}");
+    let history = f.ok(&["store", "annotations", "fixture", "2000", "--kind", "label"]);
+    assert!(history["changes"][0]["by"].is_string(), "{history}");
+
+    // A row naming a path outside the records' reports is listed, not read.
+    let mut rows = f.ledger_rows();
+    rows.push(json!({"kind": "label", "rva": "0x00003000", "value": "X", "report": "../../outside.md", "report_sha256": "1".repeat(64), "reason": "r"}));
+    f.ledger(json!(rows));
+    let stale = f.ok(&["annotate", "stale", "fixture"]);
+    let outside = stale["listed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["report"] == "../../outside.md")
+        .unwrap();
+    assert_eq!(outside["note"], "not a record's report", "{stale}");
+    assert!(outside["current"].is_null());
+}

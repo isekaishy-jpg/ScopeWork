@@ -329,6 +329,12 @@ pub(super) fn follow_inner(
     Ok(summary)
 }
 
+/// The ledger file hash of the last entry, if there is one.
+pub(super) fn last_file_sha(store: &Path) -> Result<Option<String>> {
+    Ok(entries(store)?
+        .last()
+        .and_then(|e| e["file_sha256"].as_str().map(str::to_string)))
+}
 /// The ledger facts for `store status`.
 pub(super) fn status(store: &Path) -> Result<Value> {
     let entries = entries(store)?;
@@ -442,6 +448,7 @@ pub fn annotations(root: &Path, project: &str, address: &str, kind: Option<&str>
                 changes.push(json!({
                     "revision": entry["revision"],
                     "at_unix": entry["at_unix"],
+                    "by": entry["by"],
                     "kind": k,
                     "before": before,
                     "after": after,

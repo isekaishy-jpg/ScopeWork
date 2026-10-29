@@ -296,6 +296,13 @@ pub(super) fn commit(root: &Path, project: &mut Project, j: &Journal) -> Result<
     // retried here, and if it persists the answer says the change is recorded, not that it failed.
     let repathed = match finish(root, project, j, Some((delta, after_bytes))) {
         Ok(repathed) => repathed,
+        // A promoted project's store that does not match, or is damaged, stops the commit
+        // before any file changes: nothing is applied, so nothing is left pending. Retrying
+        // could not help, and `commit_pending` would promise what cannot happen.
+        Err(first) if first.starts_with("store_mismatch") || first.starts_with("store_damaged") => {
+            fs::remove_dir_all(&folder).map_err(|e| at(&folder, e))?;
+            return Err(format!("{first}. Nothing was committed."));
+        }
         Err(first) => apply_pending_retrying(root, project, j, first)?,
     };
     operations::record_commit_time(operations::APPLY, started.elapsed());
@@ -352,6 +359,23 @@ fn finish(
     prepared: Option<(serde_json::Value, Vec<u8>)>,
 ) -> Result<usize> {
     let folder = pending(root);
+    // A promoted project's store is taken before anything changes, and its head checked: a
+    // store that does not match stops the commit here, with no file touched.
+    let mut prepared = prepared;
+    let mut held = None;
+    if promoted(&j.after) {
+        let delta = match prepared.take() {
+            Some(prepared) => prepared,
+            None => {
+                let path = folder.join("journal.json");
+                let delta = serde_json::from_slice(&fs::read(&path).map_err(|e| at(&path, e))?)
+                    .map_err(|e| e.to_string())?;
+                (delta, catalog_bytes(&j.after)?)
+            }
+        };
+        held = Some(store::begin_commit(root, &delta.0)?);
+        prepared = Some(delta);
+    }
     // All existing reports must still match a recorded input or output before resuming.
     for edit in &j.edits {
         let candidates = [
@@ -385,6 +409,7 @@ fn finish(
     // Journals from 0.8.0 and earlier carry whole annotation-ledger copies. A tool's later write
     // no longer blocks them: the ledger is repathed in place instead, like newer journals.
     let mut repath_ledger = j.ledger;
+    let mut ledger_changed = false;
     for file in &j.sidecars {
         let path = root.join(&file.path);
         layout::inside(root, &path)?;
@@ -457,11 +482,11 @@ fn finish(
                 ))
             })
             .collect();
-        ledger::repin(root, &pairs)?;
+        ledger_changed |= ledger::repin(root, &pairs)? > 0;
     }
     if !j.repin_pairs.is_empty() {
         // Replaced pins are not found again, so applying this twice changes nothing more.
-        ledger::repin(root, &j.repin_pairs)?;
+        ledger_changed |= ledger::repin(root, &j.repin_pairs)? > 0;
     }
 
     let ledger_rows = if repath_ledger {
@@ -474,28 +499,24 @@ fn finish(
     } else {
         0
     };
+    ledger_changed |= ledger_rows > 0;
     fault("reports");
     let (delta, after_bytes) = match prepared {
         Some((delta, bytes)) => (Some(delta), bytes),
         None => (None, catalog_bytes(&j.after)?),
     };
-    if promoted(&j.after) {
+    if let (Some(store), Some(delta)) = (held.as_mut(), delta.as_ref()) {
         // The store holds a promoted project's history: its entry is appended before the
         // catalog changes (again harmlessly when an interrupted attempt appended it), and no
-        // receipt is written.
-        let delta = match delta {
-            Some(delta) => delta,
-            None => {
-                let path = folder.join("journal.json");
-                serde_json::from_slice(&fs::read(&path).map_err(|e| at(&path, e))?)
-                    .map_err(|e| e.to_string())?
-            }
-        };
-        store::append_commit(root, &delta, &after_bytes)?;
+        // receipt is written. Ledger changes this commit made are recorded with its author.
+        store.append(delta, &after_bytes)?;
         fault("store");
         atomic(&root.join("project.json"), &after_bytes)?;
         *project = j.after.clone();
         fault("catalog");
+        if ledger_changed {
+            store.record_ledger(root, j.after.revision, &caller());
+        }
         fs::remove_dir_all(&folder).map_err(|e| at(&folder, e))?;
         return Ok(ledger_rows);
     }

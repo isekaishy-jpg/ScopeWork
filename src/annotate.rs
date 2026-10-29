@@ -25,7 +25,8 @@ fn same_address(row: &Value, rva: &str) -> bool {
 }
 
 /// Applies `edit` to the promoted project's ledger under the project's lock, writes it, and
-/// records the change in the store. A tool rewriting the ledger meanwhile wins: the edit is
+/// records the change in the store, holding the store's lock from reading to recording so the
+/// change is recorded with its author. A tool rewriting the ledger meanwhile wins: the edit is
 /// applied again to its text.
 fn change(
     root: &Path,
@@ -46,30 +47,30 @@ fn change(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("Cannot read {}: {e}", ledger::LEDGER)),
     };
-    for _ in 0..5 {
-        let bytes = read()?;
-        let mut ledger: Value = match &bytes {
-            Some(b) => serde_json::from_slice(b).map_err(|e| {
-                format!("The ledger does not parse ({e}); retry once its writer finishes")
-            })?,
-            None => json!({"schema": 1, "annotations": [], "types": []}),
-        };
-        let answer = edit(&mut ledger, project, &dir)?;
-        if read()? != bytes {
-            continue;
+    let attempt = || -> Result<Value> {
+        for _ in 0..5 {
+            let bytes = read()?;
+            let mut ledger: Value = match &bytes {
+                Some(b) => serde_json::from_slice(b).map_err(|e| {
+                    format!("The ledger does not parse ({e}); retry once its writer finishes")
+                })?,
+                None => json!({"schema": 1, "annotations": [], "types": []}),
+            };
+            let answer = edit(&mut ledger, project, &dir)?;
+            if read()? != bytes {
+                continue;
+            }
+            fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            atomic(
+                &path,
+                &serde_json::to_vec_pretty(&ledger).map_err(|e| e.to_string())?,
+            )?;
+            return Ok(answer);
         }
-        fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-        atomic(
-            &path,
-            &serde_json::to_vec_pretty(&ledger).map_err(|e| e.to_string())?,
-        )?;
-        // The change is written; a store that cannot record it now records it at the next
-        // sync, without the author.
-        let recorded =
-            store::record_ledger(root, id, &caller()).unwrap_or_else(|e| json!({"error": e}));
-        return Ok(json!({"project": id, "change": answer, "store": recorded}));
-    }
-    Err("busy: the ledger kept changing while it was edited; retry".into())
+        Err("busy: the ledger kept changing while it was edited; retry".into())
+    };
+    let (answer, recorded) = store::ledger_change(root, id, &caller(), attempt)?;
+    Ok(json!({"project": id, "change": answer, "store": recorded}))
 }
 
 /// Sets the row of `fields.kind` at `fields.rva`, pinned to its report's current acceptance
@@ -137,6 +138,10 @@ pub fn stale(root: &Path, id: &str) -> Result<Value> {
         )
     })?;
     let ledger: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    // Only records' reports are read: a ledger row is the tools' text, and may name any path.
+    let index = catalog_index::Index::new(project);
+    let reports: std::collections::HashSet<&str> =
+        index.paths.values().map(String::as_str).collect();
     let mut hashes: HashMap<String, Option<String>> = HashMap::new();
     let mut found = vec![];
     let mut checked = 0usize;
@@ -147,6 +152,18 @@ pub fn stale(root: &Path, id: &str) -> Result<Value> {
                 continue;
             };
             checked += 1;
+            if !reports.contains(report) {
+                found.push(json!({
+                    "list": list,
+                    "kind": row["kind"],
+                    key: row[key],
+                    "report": report,
+                    "pinned": pin,
+                    "current": null,
+                    "note": "not a record's report",
+                }));
+                continue;
+            }
             let current = hashes
                 .entry(report.to_string())
                 .or_insert_with(|| {

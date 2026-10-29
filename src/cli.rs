@@ -2196,8 +2196,9 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                         &reason,
                         directed_by.as_deref(),
                     )?;
+                    let reason = lib.pools(p).pools.get(&pool).map(|e| e.reason.clone());
                     Ok(
-                        json!({"project":id,"pool":pool,"added":changed,"revision":lib.projects[p].revision}),
+                        json!({"project":id,"pool":pool,"added":changed,"pool_reason":reason,"revision":lib.projects[p].revision}),
                     )
                 }
                 PoolCommand::Remove {
