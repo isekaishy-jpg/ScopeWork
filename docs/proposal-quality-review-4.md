@@ -1,6 +1,6 @@
 # Proposal: app-wide code-quality review, round 4
 
-Status: implemented 2026-10-29. Rounds 1–3 (2026-10-27) covered the whole app. Since then about 4,500 lines of `src` changed: data records, the store and its ledger follower, artifacts and spaces, compaction, promotion and `research annotate`. Round 4 reads those modules in full (`store.rs`, `store_ledger.rs`, `store_commit.rs`, `inputs.rs`, `annotate.rs`, `promotion.rs`), reads the changes to the others, and runs the duplicate-block search over all of `src` (six or more matching lines, test modules excluded). Fixes are the obvious ones only: no feature or behaviour changes.
+Status: implemented 2026-10-29. Round 5 found nothing (the duplicate-block search shows only the `cli.rs` arm lists, no leftover markers, and every new public function has a caller), which ends this review. Rounds 1–3 (2026-10-27) covered the whole app. Since then about 4,500 lines of `src` changed: data records, the store and its ledger follower, artifacts and spaces, compaction, promotion and `research annotate`. Round 4 reads those modules in full (`store.rs`, `store_ledger.rs`, `store_commit.rs`, `inputs.rs`, `annotate.rs`, `promotion.rs`), reads the changes to the others, and runs the duplicate-block search over all of `src` (six or more matching lines, test modules excluded). Fixes are the obvious ones only: no feature or behaviour changes.
 
 ## Findings and fixes
 

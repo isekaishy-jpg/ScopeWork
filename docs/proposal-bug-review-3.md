@@ -1,6 +1,6 @@
 # Proposal: app-wide bug review, round 3
 
-Status: implemented 2026-10-29 (rounds 3 and 4). Rounds 1 and 2 (2026-10-27) covered the whole app. Round 3 reads what changed since, after quality rounds 4 and 5: the store and its ledger follower, compaction, the promoted commit path and its recovery, promotion, `research annotate`, and every place a record is found by its address now that addresses are unique per space. Only obvious fixes; no feature changes.
+Status: implemented 2026-10-29 (rounds 3 to 5; round 5 found nothing). Rounds 1 and 2 (2026-10-27) covered the whole app. Round 3 reads what changed since, after quality rounds 4 and 5: the store and its ledger follower, compaction, the promoted commit path and its recovery, promotion, `research annotate`, and every place a record is found by its address now that addresses are unique per space. Only obvious fixes; no feature changes.
 
 ## Findings and fixes
 
@@ -38,6 +38,10 @@ Round 4 read what round 3 did not reach: compaction, the ledger follower's edge 
 **Problem.** History reports changes to the catalog's own fields from a fixed list that predates artifacts and spaces, so adding an artifact or space, raising the catalog format or promoting a project appeared as a commit that changed nothing.
 
 **Design.** `artifacts`, `spaces` and `layout_version` join the list. A test checks the entry for an added artifact.
+
+## Round 5 (same day)
+
+Rechecked the round 3 and 4 fixes (the reader's retry cannot loop: it reads again only from a different pack; listing the catalog format also reports the earlier raise to format 6, which is right), the routing of the artifact, space, promote and annotate commands, and the dashboard's space labels. No defect found, which ends this review.
 
 ## Acceptance
 
