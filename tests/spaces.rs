@@ -116,6 +116,13 @@ fn artifacts_and_spaces_are_journaled_catalog_fields_that_raise_the_format() {
     ]);
     assert_eq!(added["artifact"], 1);
     assert_eq!(added["layout_version"], 7);
+    // History reports the change and the format it raised.
+    let history = f.ok(&[
+        "history", "show", "fixture", "--only", "catalog", "--limit", "1",
+    ]);
+    let change = &history["entries"][0]["project"];
+    assert_eq!(change["artifacts"]["after"][0]["name"], "Disk", "{history}");
+    assert_eq!(change["layout_version"]["after"], 7, "{history}");
     let r = f.revision();
     // The extracted file names the disk it is on, and the path there.
     let inside = f.ok(&[

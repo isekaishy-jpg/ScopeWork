@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-Fixes from the third bug review ([proposal](docs/proposal-bug-review-3.md)):
+Fixes from the third and fourth bug reviews ([proposal](docs/proposal-bug-review-3.md)):
 
 - The store no longer deletes a segment log that still holds entries because its first frame is damaged or its checkpoint is missing; it refuses with `store_damaged`. Only the empty log an interrupted segment creation leaves is removed.
+- A store reader no longer fails when a compaction replaces the text packs while it reads; it indexes the store again.
+- History reports changes to artifacts, spaces and the catalog format, which showed as empty commits.
 - `node show` and the dashboard write a prerequisite in another address space as `S<n>:0x…`, so a record's prerequisites can be saved back unchanged; `node list` and implementation links show each record's `space`.
 
 - **Artifacts and address spaces** ([design](docs/design-storage-promotion.md)). `project artifact add|update|remove` records a project's input files (name, SHA-256, size, format, and the artifact a file is extracted from), and `project space add|update|remove` adds address spaces besides the default one: offsets in a file (data disks with no program of their own), another image or another processor. `node create --space` and `"space"` in batches and imports place a function or data item in a space; an address is unique per space, spaced records have `S<n>-` folders, and `deps set` names them `S<n>:<RVA>`. The first artifact or space raises the catalog to format 7, which earlier versions cannot open.

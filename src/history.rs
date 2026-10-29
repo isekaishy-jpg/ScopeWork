@@ -410,12 +410,15 @@ impl Receipt {
 }
 
 /// Catalog fields that history reports when a receipt changes them.
-const PROJECT_FIELDS: [&str; 5] = [
+const PROJECT_FIELDS: [&str; 8] = [
     "research_scope",
     "name",
     "binary",
     "active_import",
     "last_import",
+    "artifacts",
+    "spaces",
+    "layout_version",
 ];
 
 /// Summary of one receipt: which records changed and how, without report text.
@@ -494,7 +497,8 @@ fn summarize(revision: u64, receipt: &Value, filter: &HistoryFilter) -> Option<V
         .iter()
         .map(|s| s["path"].clone())
         .collect();
-    // Changes to the catalog's own fields: scope, name, binary identity, import reservations.
+    // Changes to the catalog's own fields: scope, name, binary identity, import reservations,
+    // artifacts and spaces, and the catalog format (data, spaces, promotion).
     let mut project = serde_json::Map::new();
     if filter.node.is_none() {
         for f in PROJECT_FIELDS {

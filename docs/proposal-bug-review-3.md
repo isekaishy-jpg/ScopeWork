@@ -1,6 +1,6 @@
 # Proposal: app-wide bug review, round 3
 
-Status: implemented 2026-10-29. Rounds 1 and 2 (2026-10-27) covered the whole app. Round 3 reads what changed since, after quality rounds 4 and 5: the store and its ledger follower, compaction, the promoted commit path and its recovery, promotion, `research annotate`, and every place a record is found by its address now that addresses are unique per space. Only obvious fixes; no feature changes.
+Status: implemented 2026-10-29 (rounds 3 and 4). Rounds 1 and 2 (2026-10-27) covered the whole app. Round 3 reads what changed since, after quality rounds 4 and 5: the store and its ledger follower, compaction, the promoted commit path and its recovery, promotion, `research annotate`, and every place a record is found by its address now that addresses are unique per space. Only obvious fixes; no feature changes.
 
 ## Findings and fixes
 
@@ -22,6 +22,22 @@ Status: implemented 2026-10-29. Rounds 1 and 2 (2026-10-27) covered the whole ap
 - Promotion between its checks and its lock: a commit in that window is caught by the head check made under the project's exclusive lock.
 - Import publication on a promoted project takes its before-catalog from `project.json`, not from the in-memory catalog the publish path hands over.
 - Every remaining lookup by RVA is either space-aware or deliberately default-space (the annotation ledger, history's `--rva`, rename citations).
+
+## Round 4 (same day)
+
+Round 4 read what round 3 did not reach: compaction, the ledger follower's edge cases, artifact and space editing, the body-hash cache, the coordinator's ledger thread, and how history reports the new kinds of commit.
+
+### 3. A store reader could fail while a compaction replaced the packs (low)
+
+**Problem.** Store readers take no lock. A reader that indexed the text packs just before a compaction rewrote and removed them failed to open the old pack when it read a text (`store show`, the ledger history).
+
+**Design.** A pack that is gone makes the reader index the store again and read once more. A unit test reads a text through an index taken before a compaction.
+
+### 4. History showed artifact, space and format changes as empty commits (low)
+
+**Problem.** History reports changes to the catalog's own fields from a fixed list that predates artifacts and spaces, so adding an artifact or space, raising the catalog format or promoting a project appeared as a commit that changed nothing.
+
+**Design.** `artifacts`, `spaces` and `layout_version` join the list. A test checks the entry for an added artifact.
 
 ## Acceptance
 

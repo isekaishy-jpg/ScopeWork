@@ -1375,7 +1375,20 @@ impl TextIndex {
             return Ok(None);
         };
         // Only this text's frame is read and decompressed.
-        let mut file = fs::File::open(pack).map_err(|e| e.to_string())?;
+        let mut file = match fs::File::open(pack) {
+            Ok(file) => file,
+            // Readers take no lock: a compaction may have replaced the packs since this index
+            // was built. Index the store again and look once more.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let store = pack.parent().ok_or("Store pack without folder")?;
+                let fresh = text_index(store)?;
+                return match fresh.at.get(sha) {
+                    Some((again, _, _)) if again != pack => fresh.read(sha),
+                    _ => Err(format!("{}: {e}", pack.display())),
+                };
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         let mut payload = vec![0; frame.len()];
         std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(frame.start as u64))
             .and_then(|_| file.read_exact(&mut payload))
@@ -1664,4 +1677,31 @@ pub fn show(root: &Path, project: &str, id: u64, revision: u64) -> Result<Value>
         "path": path,
         "report": report,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_text_is_found_after_a_compaction_replaced_its_pack() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-workspaces")
+            .join(format!("store-unit-{}", uuid::Uuid::new_v4()));
+        let store = dir.join(FOLDER);
+        {
+            let mut w = Writer::open(&store).unwrap();
+            // Two syncs' worth: two small frames, which compaction merges into a new pack.
+            let first = w.text("first text").unwrap();
+            w.flush_texts().unwrap();
+            w.text("second text").unwrap();
+            w.flush_texts().unwrap();
+            let before = text_index(&store).unwrap();
+            let compacted = compact_store(&store).unwrap();
+            assert_eq!(compacted["small_frames_after"], 1, "{compacted}");
+            // An index taken before the compaction still finds the text.
+            assert_eq!(before.read(&first).unwrap().as_deref(), Some("first text"));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
