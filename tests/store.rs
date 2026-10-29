@@ -525,3 +525,34 @@ fn compaction_merges_packs_and_compresses_closed_logs_without_changing_any_answe
     }
     panic!("no sync compacted the store");
 }
+
+#[test]
+fn a_log_with_entries_is_never_removed_as_an_unfinished_segment() {
+    let f = Fixture::new();
+    f.save("3", "First.");
+    f.ok(&["store", "init", "fixture"]);
+    f.save("3", "Second.");
+    f.ok(&["store", "sync", "fixture"]);
+    let last = f.logs().pop().unwrap();
+    let checkpoint = last.with_extension("zlib");
+    let kept = fs::read(&checkpoint).unwrap();
+    // A checkpoint lost from under a log full of entries is damage, not an interrupted creation.
+    fs::remove_file(&checkpoint).unwrap();
+    f.save("3", "Third.");
+    let refused = f.fails(&["store", "sync", "fixture"]);
+    assert!(refused.contains("store_damaged"), "{refused}");
+    assert!(last.is_file(), "the log and its entries are kept");
+    fs::write(&checkpoint, kept).unwrap();
+
+    // An interrupted creation leaves an empty newer log, which the next sync removes (numbered
+    // past any segment the sync may start itself).
+    let name = last.file_name().unwrap().to_string_lossy().into_owned();
+    let seq: u64 = name["segment-".len()..name.len() - ".log".len()]
+        .parse()
+        .unwrap();
+    let empty = last.with_file_name(format!("segment-{:06}.log", seq + 5));
+    fs::write(&empty, b"").unwrap();
+    f.ok(&["store", "sync", "fixture"]);
+    assert!(!empty.exists());
+    f.verified();
+}

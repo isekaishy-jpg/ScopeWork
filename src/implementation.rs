@@ -599,7 +599,7 @@ impl Library {
         let describe = |id: u64| {
             records.get(&id).map_or(
                 json!({"id": id, "missing": true}),
-                |n| json!({"id": id, "name": n.name, "rva": n.rva.map(|r| format!("0x{r:08X}"))}),
+                |n| json!({"id": id, "name": n.name, "rva": n.rva.map(|r| format!("0x{r:08X}")), "space": n.space}),
             )
         };
         let mut view = json!({

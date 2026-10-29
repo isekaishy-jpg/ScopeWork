@@ -205,6 +205,13 @@ fn read_log(path: &Path) -> Result<Vec<u8>> {
         Ok(bytes)
     }
 }
+/// Whether `log` is what an interrupted segment creation leaves: no complete frame at all.
+/// Anything more (entries without a start, a missing checkpoint, a damaged frame) is damage.
+fn unfinished(log: &Path) -> Result<bool> {
+    let bytes = read_log(log)?;
+    let (frames, end) = frames(&bytes);
+    Ok(frames.is_empty() && !matches!(end, End::Damaged(_)))
+}
 /// Segment `seq` read from `log`, or none when it has no complete start entry or no checkpoint
 /// (a segment whose creation was interrupted).
 fn load_segment(store: &Path, seq: u64, log: PathBuf) -> Result<Option<Segment>> {
@@ -375,10 +382,17 @@ impl Writer {
                     self.check_closed(seq)?;
                     return Ok(Some(segment));
                 }
-                // A new segment whose creation was interrupted, as `repair` removes it.
-                None => {
+                // A new segment whose creation was interrupted, as `repair` removes it. A log
+                // with entries but no start or checkpoint is damage, never removed.
+                None if unfinished(&log)? => {
                     let _ = fs::remove_file(&log);
                     let _ = fs::remove_file(segment_files(&self.store, seq).1);
+                }
+                None => {
+                    return Err(format!(
+                        "store_damaged: {} has no valid start or checkpoint; run research store verify",
+                        log.display()
+                    ));
                 }
             }
         }
@@ -467,9 +481,9 @@ impl Writer {
                 .into_iter()
                 .find(|(_, path)| *path == log)
                 .map(|(n, _)| n);
-            if seq.is_some_and(|n| n < last) {
+            if seq.is_some_and(|n| n < last) || !unfinished(&log)? {
                 return Err(format!(
-                    "store_damaged: {} has no valid start; run research store verify",
+                    "store_damaged: {} has no valid start or checkpoint; run research store verify",
                     log.display()
                 ));
             }

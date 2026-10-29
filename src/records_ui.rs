@@ -496,7 +496,7 @@ impl ResearchUi {
                     .iter()
                     .filter(|e| e.prerequisite == n.id)
                     .filter_map(|e| data.node(project, e.dependent))
-                    .map(|d| format!("{} (0x{:08X})", d.name, d.rva.unwrap_or_default()))
+                    .map(|d| format!("{} ({})", d.name, address_text(d).unwrap_or_default()))
                     .collect();
                 classic::label(
                     ui,

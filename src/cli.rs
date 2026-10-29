@@ -2018,7 +2018,7 @@ pub(crate) fn execute(command: Command, lib: &mut Library) -> Result<Value, Stri
                     .iter()
                     .filter(|n| n.kind == Kind::Function && !proofs.proofs.contains_key(&n.id))
                     .filter(|n| !complete || states[&n.id] == Status::Complete)
-                    .map(|n| json!({"id":n.id,"name":n.name,"rva":n.rva.map(|r| format!("0x{r:08X}")),"effective_status":states[&n.id],"context_only":n.context_only}))
+                    .map(|n| json!({"id":n.id,"name":n.name,"rva":n.rva.map(|r| format!("0x{r:08X}")),"space":n.space,"effective_status":states[&n.id],"context_only":n.context_only}))
                     .collect();
                     Ok(json!({"project":id,"required":proofs.required,"unproven":rows}))
                 }

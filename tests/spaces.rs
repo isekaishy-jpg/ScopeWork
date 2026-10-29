@@ -346,6 +346,9 @@ fn an_address_is_unique_per_space_and_spaced_records_get_their_own_folders() {
         .unwrap()
         .to_string();
     let deps = f.ok(&["deps", "set", "fixture", "3", "--expect", &token, "S1:1000"]);
+    // The record's prerequisite list names the space, so it can be given back to `deps set`.
+    let shown = f.ok(&["node", "show", "fixture", "3"]);
+    assert_eq!(shown["dependency_rvas"], "S1:0x00001000", "{shown}");
     assert!(deps.to_string().contains(&table_id), "{deps}");
     // Ledger rows name default-space addresses: the function at 0x1000, not the table there.
     let ledger = f.project().join("tools/profiles/annotations.json");

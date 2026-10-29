@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+Fixes from the third bug review ([proposal](docs/proposal-bug-review-3.md)):
+
+- The store no longer deletes a segment log that still holds entries because its first frame is damaged or its checkpoint is missing; it refuses with `store_damaged`. Only the empty log an interrupted segment creation leaves is removed.
+- `node show` and the dashboard write a prerequisite in another address space as `S<n>:0x…`, so a record's prerequisites can be saved back unchanged; `node list` and implementation links show each record's `space`.
+
 - **Artifacts and address spaces** ([design](docs/design-storage-promotion.md)). `project artifact add|update|remove` records a project's input files (name, SHA-256, size, format, and the artifact a file is extracted from), and `project space add|update|remove` adds address spaces besides the default one: offsets in a file (data disks with no program of their own), another image or another processor. `node create --space` and `"space"` in batches and imports place a function or data item in a space; an address is unique per space, spaced records have `S<n>-` folders, and `deps set` names them `S<n>:<RVA>`. The first artifact or space raises the catalog to format 7, which earlier versions cannot open.
 - **`store promote`** (the user's manual step) makes the store authoritative for a project once it holds the current catalog, verifies and reports no conflicts: the catalog moves to format 8, every commit appends to the store before `project.json` is written, receipts stop, and history reads the store. Interrupted commits finish on the next command as before.
 - **Acceptance covers the research body and evidence once a project is promoted.** Promotion converts every acceptance, prerequisite stamp and ledger pin that still verifies to the hash of the report from its research content on, in one transaction, and keeps every old and new hash; renames, moves and identity amendments then leave completion and pins alone. `research annotate set|remove` change annotation rows of a promoted project, recorded in its store, and `annotate stale` lists rows whose report pin no longer matches.

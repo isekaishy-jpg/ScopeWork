@@ -241,8 +241,7 @@ impl Library {
         let requires = index.requires.get(&id).cloned().unwrap_or_default();
         let dependency_rvas = requires
             .iter()
-            .filter_map(|id| index.nodes[id].rva)
-            .map(|r| format!("0x{r:08X}"))
+            .filter_map(|id| address_text(index.nodes[id]))
             .collect::<Vec<_>>()
             .join(", ");
         Ok(RecordRead {

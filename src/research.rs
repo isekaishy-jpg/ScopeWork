@@ -231,6 +231,15 @@ pub(crate) fn raise_format(project: &mut Project) {
         project.layout_version = project.layout_version.max(SPACE_FORMAT);
     }
 }
+/// A function or data item's address as `deps set` reads it back: `0x0041A2B0` in the default
+/// space, `S1:0x0041A2B0` in space 1.
+pub(crate) fn address_text(n: &Node) -> Option<String> {
+    let rva = n.rva?;
+    Some(match n.space {
+        Some(space) => format!("S{space}:0x{rva:08X}"),
+        None => format!("0x{rva:08X}"),
+    })
+}
 /// Whether a function or data item other than `except` is at `rva` in `space`.
 pub(crate) fn address_taken(
     project: &Project,
