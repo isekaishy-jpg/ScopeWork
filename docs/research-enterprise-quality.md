@@ -1,6 +1,6 @@
 # Research: what enterprise-grade quality means for Scopework
 
-Status: research, 2026-11-03, at `9046ba4` (0.15.0a and its review fixes). It decides nothing; it measures where Scopework stands against what enterprise software is usually expected to provide, and proposes an order of work for the user to choose from.
+Status: research, 2026-11-03, at `9046ba4` (0.15.0a and its review fixes). It measures where Scopework stands against what enterprise software is usually expected to provide, and proposes an order of work for the user to choose from. The user's decisions since are in §5.
 
 **Method.** Measured the source (`src/`, 28,600 lines in 50 files; `tests/`, 9,700 lines in 26 suites; 358 crates in the lock file), read the build, CI, packaging and docs, and drew on the six review rounds of the last two weeks (quality 1–4, bugs 1–3, the Fable review). Nothing was run against a research home.
 
@@ -127,15 +127,19 @@ Each item would go through the workflow on its own; the order puts low-risk, hig
 **Tier 3: product and deployment**
 11. **Accessibility:** AccessKit, keyboard navigation and shortcuts, within the approved design.
 12. **Dashboard parity** for the store, annotations and spaces (deferred items in TODO.md).
-13. **Code signing** of the executables and the MSI.
-14. **Managed deployment:** a per-machine install option and documented silent-install properties.
-15. **Authenticated identity:** the coordinator records the client's Windows account from its pipe token beside the declared name.
+13. **Managed deployment:** a per-machine install option and documented silent-install properties.
+14. **Authenticated identity:** the coordinator records the client's Windows account from its pipe token beside the declared name.
 
 **Tier 4:** Linux (TODO.md side quest), and anything the user's definition of enterprise adds (§4).
 
 ## 4. Questions for the user
 
 1. **Who is the enterprise customer?** One researcher with many agents (today), a team sharing a research home (on a network share?), or an organisation that needs audit and managed deployment? The answer moves identity, deployment and Linux up or down.
-2. **Code signing:** buy a certificate (organisation validation, or EV for immediate SmartScreen trust), and under whose name?
-3. **How far may refactoring go?** Splitting the largest functions changes no behaviour, but touches most of the code at once; it could go module by module between feature work.
-4. **Accessibility target:** screen readers and keyboard-only use, or keyboard shortcuts only?
+2. **How far may refactoring go?** Splitting the largest functions changes no behaviour, but touches most of the code at once; it could go module by module between feature work.
+3. **Accessibility target:** screen readers and keyboard-only use, or keyboard shortcuts only?
+
+## 5. Decisions (user, 2026-11-03)
+
+- **No code signing.** Not worth the certificate's cost. Binaries and the MSI stay unsigned; the release notes and installation guide say so, as they do today.
+- **Every log is bounded.** Any log Scopework writes (the coordinator's, diagnostics, anything new) has a fixed size cap with rotation, like `logs/gui.log` (one rotated copy), so no log grows into another large file in the research home.
+
