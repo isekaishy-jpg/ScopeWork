@@ -155,6 +155,30 @@ Raised by the storage research; on the list as possibly needed, each to be resea
 - [ ] **Dashboard change detection from the store's log end**, instead of statting every completed report every two seconds.
 - [ ] **Quality-gate results recorded with acceptance**, and the reports' "Prior …" sections dropped once history keeps earlier texts.
 
+## Enterprise quality (recorded 2026-11-03)
+
+From docs/research-enterprise-quality.md. The user's decisions: no code signing (cost), and every log is bounded (a fixed size cap with rotation, holding while a process runs, not only at its start). Each item goes through Research, Design, Proposal, Implementation, Review and Commit.
+
+Easy items, to take as one batch:
+- [ ] **Dependency audit and SBOM.** `cargo deny` in CI (advisories, licences, sources, including the `solworker` and `solcache` git dependencies) and an SBOM attached to each release.
+- [ ] **A bounded coordinator log.** The coordinator writes its errors, caught panics and recoveries to a capped, rotated log in the research home; today they live only in `coordinator status` until it exits. The GUI's `logs/gui.log` is checked for size only when the dashboard starts, so a long session can grow it without limit: cap it while running too.
+- [ ] **`research diagnose`.** One command that bundles what a bug report needs (versions and build, coordinator status, lock holders, pending journals, store status, the recent tail of the logs) without research content.
+- [ ] **Distinct exit codes.** Busy, conflict, refused, not found and failed exit differently, mapped from today's error kinds and listed in the CLI guide with the kinds themselves, so scripts need not parse JSON to decide to retry.
+- [ ] **A backup and restore guide.** What to copy (research home, per-project folders, the store), when it is consistent (no pending journal, coordinator idle), and how to restore; perhaps `research project archive` for a snapshot taken under the project's lock.
+
+(The three timing-sensitive tests, already listed above, belong to this batch too.)
+
+Larger items:
+- [ ] **Typed errors with stable kinds.** An error type carrying a kind and a message in place of `Result<T, String>` (about 300 sites) and the prefix parsing in `cli::error_kind`, so a misspelt prefix can no longer turn into `operation_failed`.
+- [ ] **Documentation layout.** User and administrator guides apart from design history (four guides among 52 design and proposal documents in `docs/` today), an index, an architecture overview for contributors, and an administrator guide (deployment, data locations, upgrades, backup).
+- [ ] **Split the largest functions and modules.** `cli::execute` (743 lines) into a handler per command, the dashboard's `frame` (644) into panels, `apply_batch` (614) into phases; then `research.rs`, `cli.rs` and `catalog_batch.rs`. Behaviour-preserving, module by module.
+- [ ] **Fuzzing and property tests** for the parsers that read damaged or untrusted input (store frames, pending journals, batch and import requests, the ledger) and for replay and diff invariants; a coverage report.
+- [ ] **Performance targets and benchmarks** (records, agents, commit and read latency) that hold the `project.json` and status-cache work to numbers.
+- [ ] **Versioned JSON outputs** for the answers agents' tools parse.
+- [ ] **Accessibility.** eframe's AccessKit support (screen readers; compiled out today), keyboard navigation and shortcuts (four key-handling sites in the GUI today), within the approved design.
+- [ ] **Managed deployment.** A per-machine install option beside today's per-user one, and the MSI's silent-install properties documented.
+- [ ] **Authenticated identity.** The coordinator records the client's Windows account from its pipe token beside the declared `SCOPEWORK_SUBMITTER` name, so history and pool access do not rest on a self-declared name alone.
+
 ## Side quests (not on the main list)
 
 - **Linux (Arch) support.** Asked by an external user 2026-11-03. Estimate: a direct-mode build in about a day (XDG research home, crash-log redirect, an AUR `PKGBUILD`, a Linux CI job, porting the one test that uses PowerShell); full parity in about a week, the main piece being the coordinator over Unix sockets instead of Windows named pipes. The GUI (egui) runs on X11 and Wayland.
