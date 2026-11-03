@@ -135,13 +135,15 @@ Deferred by the user (not scheduled):
 - **Cross-project references**: until the single-project backend has proved itself.
 - **Entering artifacts and address spaces in the GUI**: the CLI covers them; the implementation side gets a pass later.
 
-Raised by the storage research, possibly needed later (not agreed requirements; each would need the user's decision):
-- The tooling log (`tooling.jsonl`) in the store.
-- An agent's publish (reports, prerequisites, ledger rows) as one transaction instead of several held together by the ledger lease.
-- Analysis inputs (foundation profiles) registered by path and hash, perhaps as artifacts.
-- Types as shared entities rather than ledger rows.
-- An explicit sibling order, lock-free direct-mode readers, and dashboard change detection from the store's log end.
-- Quality-gate results recorded with acceptance, and dropping the "Prior …" sections from reports once history keeps earlier texts.
+Raised by the storage research; on the list as possibly needed, each to be researched and decided before design:
+- [ ] **The tooling log in the store.** `tooling.jsonl` (behaviour-artifact reviews and other tooling entries) is still a separate file the store does not hold.
+- [ ] **A publish as one transaction.** An agent's publish (reports, then prerequisites, then ledger rows) is several commits held together by the ledger lease; one transaction would end the need for the lease around catalog commits.
+- [ ] **Analysis inputs registered by path and hash.** The foundation profiles Ghidra is rebuilt from, perhaps as artifacts.
+- [ ] **Types as shared entities.** The ledger's types (1,038 in `3-3-5a`) are followed only as ledger rows.
+- [ ] **Explicit sibling order.** Order is the catalog's array position; an explicit key was deferred to promotion.
+- [ ] **Lock-free direct-mode readers.** Direct-mode reads hold the project's shared lock and hold back writers while they read.
+- [ ] **Dashboard change detection from the store's log end**, instead of statting every completed report every two seconds.
+- [ ] **Quality-gate results recorded with acceptance**, and the reports' "Prior …" sections dropped once history keeps earlier texts.
 
 ## Side quests (not on the main list)
 
